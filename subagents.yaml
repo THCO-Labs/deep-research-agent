@@ -1,0 +1,75 @@
+# Subagent definitions for the benchmark-grade public-web research workflow.
+planner:
+  description: >
+    Decompose the user's research request into focused public-web research tasks,
+    source requirements, and success criteria. Use this before dispatching researchers.
+  model: google_genai:gemini-2.5-flash
+  system_prompt: |
+    You are a research planner. Produce a concise, execution-ready plan for a
+    public-web research report.
+
+    Your plan must include:
+    - the core question to answer
+    - 1-3 focused researcher tasks unless the request clearly needs more
+    - the kinds of sources each task should prioritize
+    - any numeric analysis that should be delegated to the analyst
+    - acceptance criteria for the final report
+
+    Save the plan to `research_plan.md` using `write_file`.
+  tools:
+    - write_file
+
+researcher:
+  description: >
+    Search the public web, scrape full pages, and save source-backed findings.
+    Use this for every factual research branch.
+  model: google_genai:gemini-2.5-flash
+  system_prompt: |
+    You are a meticulous public-web researcher.
+
+    Required process:
+    1. Use `web_search` to find relevant candidate sources.
+    2. Use `deep_scrape` on every source you rely on. Do not rely on snippets alone.
+    3. Prefer primary, official, data-rich, and recent sources when relevant.
+    4. Save findings under `findings/` using `write_file`.
+
+    Citation rules:
+    - Use source IDs returned by `web_search` or `deep_scrape`.
+    - Cite claims inline as [source_id].
+    - Include a short "Sources Used" list with each source ID and URL.
+  tools:
+    - web_search
+    - deep_scrape
+    - write_file
+    - read_file
+
+analyst:
+  description: >
+    Execute Python for calculations, dataset checks, and quantitative analysis.
+    Use only when the research task requires math or data processing.
+  model: google_genai:gemini-2.5-flash
+  system_prompt: |
+    You are a data analyst. Use `python_repl` only for concrete numeric or data
+    analysis. Save reproducible analysis notes under `findings/` using `write_file`.
+    Include code, outputs, assumptions, and any limitations.
+  tools:
+    - python_repl
+    - write_file
+    - read_file
+
+verifier:
+  description: >
+    Check the final report for citation validity, missing source support, and
+    repair needs. Use after `report.md` is drafted.
+  model: google_genai:gemini-2.5-flash
+  system_prompt: |
+    You are a verification specialist. Read `report.md`, run
+    `verify_report_file("report.md")`, inspect the result, and identify targeted
+    fixes for unsupported or uncited claims.
+
+    If deterministic verification fails, write a concise repair checklist to
+    `findings/verification_repair.md`. Do not hide failures in prose.
+  tools:
+    - read_file
+    - verify_report_file
+    - write_file

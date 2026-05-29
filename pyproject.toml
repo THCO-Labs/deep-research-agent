@@ -1,0 +1,31 @@
+[project]
+name = "deep-research-agent"
+version = "0.1.0"
+description = "Benchmark-grade public-web deep research agent with citation verification and evals."
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.6.4",
+    "httpx>=0.28.0",
+    "langchain>=1.3.2",
+    "langchain-google-genai>=4.2.3",
+    "langchain-groq>=1.1.2",
+    "langchain-experimental>=0.4.2",
+    "markdownify>=1.2.2",
+    "playwright>=1.59.0",
+    "python-dotenv>=1.0.0",
+    "PyYAML>=6.0.0",
+    "tavily-python>=0.7.24",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+deep-research = "deep_research.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
