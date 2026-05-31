@@ -158,6 +158,7 @@ deep_research/
   cli.py                  CLI parsing, settings construction, final status output
   settings.py             Env loading, provider/model resolution, budget defaults
   agent.py                DeepAgents graph creation and run lifecycle
+  deepagents_profiles.py  Provider-specific DeepAgents runtime profile patches
   prompts.py              Root orchestrator prompt
   subagents.py            YAML subagent loading and tool binding
   tools.py                Search, scrape, file, verifier, and analyst tools
@@ -249,6 +250,13 @@ Current subagents:
 | `verifier` | Run deterministic report verification and save repair notes. | `read_file`, `verify_report_file`, `write_file` |
 
 The root graph also has direct access to search and scrape as a recovery path. This prevents failures when a model tries to research directly instead of delegating.
+
+For Groq-backed runs, `deep_research/deepagents_profiles.py` registers a
+DeepAgents harness profile for `groq` and any explicit `groq:...` model strings.
+That profile excludes the built-in `write_todos` tool while preserving subagent
+dispatch, file middleware, citation verification, and the app's own live
+progress feed. This avoids provider-side `tool_use_failed` errors when a Groq
+model emits malformed JSON for DeepAgents' internal todo tool.
 
 ## 8. Tooling Architecture
 

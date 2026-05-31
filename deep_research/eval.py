@@ -10,8 +10,10 @@ from typing import Any, Callable
 
 from langchain.chat_models import init_chat_model
 from langchain.messages import HumanMessage
+from langchain_core.language_models import BaseChatModel
 
 from deep_research.agent import ResearchRunResult, run_research
+from deep_research.model_router import model_for_role
 from deep_research.settings import Settings
 
 
@@ -106,7 +108,8 @@ def source_support_score(case: BenchmarkCase, report: str, verification: dict[st
 
 
 def llm_judge_score(case: BenchmarkCase, report: str, settings: Settings) -> float:
-    model = init_chat_model(settings.judge_model)
+    routed_model = model_for_role(settings, "judge", settings.judge_model)
+    model = routed_model if isinstance(routed_model, BaseChatModel) else init_chat_model(routed_model)
     prompt = f"""Grade this research report from 0.0 to 1.0.
 
 Question: {case.question}

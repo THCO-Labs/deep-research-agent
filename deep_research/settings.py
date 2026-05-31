@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Iterable, Literal
 
 from dotenv import load_dotenv
 
@@ -40,7 +40,9 @@ class Settings:
     tool_excerpt_char_limit: int = 2_500
     live: bool = False
     google_api_key: str = field(default="", repr=False)
+    google_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
     groq_api_key: str = field(default="", repr=False)
+    groq_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
     tavily_api_key: str = field(default="", repr=False)
 
     @classmethod
@@ -70,11 +72,13 @@ class Settings:
         if not resolved_out.is_absolute():
             resolved_out = root / resolved_out
 
-        google_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-        groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        google_api_keys = _collect_numbered_env_values("GOOGLE_API_KEY")
+        groq_api_keys = _collect_numbered_env_values("GROQ_API_KEY")
+        google_api_key = google_api_keys[0] if google_api_keys else ""
+        groq_api_key = groq_api_keys[0] if groq_api_keys else ""
         tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip()
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
-        resolved_provider = _resolve_provider(requested_provider, google_api_key, groq_api_key)
+        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys)
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
         resolved_fast_model = _resolve_model(
             resolved_provider,
@@ -127,17 +131,27 @@ class Settings:
             ),
             live=live,
             google_api_key=google_api_key,
+            google_api_keys=google_api_keys,
             groq_api_key=groq_api_key,
+            groq_api_keys=groq_api_keys,
             tavily_api_key=tavily_api_key,
         )
         settings.validate()
         return settings
 
+    @property
+    def google_key_pool(self) -> tuple[str, ...]:
+        return self.google_api_keys or ((self.google_api_key,) if self.google_api_key else ())
+
+    @property
+    def groq_key_pool(self) -> tuple[str, ...]:
+        return self.groq_api_keys or ((self.groq_api_key,) if self.groq_api_key else ())
+
     def validate(self) -> None:
         missing = []
-        if self.provider == "google" and not self.google_api_key:
+        if self._uses_model_provider("google_genai") and not self.google_key_pool:
             missing.append("GOOGLE_API_KEY")
-        if self.provider == "groq" and not self.groq_api_key:
+        if self._uses_model_provider("groq") and not self.groq_key_pool:
             missing.append("GROQ_API_KEY")
         if not self.tavily_api_key:
             missing.append("TAVILY_API_KEY")
@@ -160,6 +174,22 @@ class Settings:
         if self.tool_excerpt_char_limit < 500:
             raise ConfigError("tool_excerpt_char_limit must be at least 500.")
 
+    def _uses_model_provider(self, provider_prefix: str) -> bool:
+        if self.provider == "google" and provider_prefix == "google_genai":
+            return True
+        if self.provider == "groq" and provider_prefix == "groq":
+            return True
+        models = (
+            self.model,
+            self.fast_model,
+            self.planner_model,
+            self.researcher_model,
+            self.analyst_model,
+            self.verifier_model,
+            self.judge_model,
+        )
+        return any(model.startswith(f"{provider_prefix}:") for model in models)
+
 
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
     if provider == "groq":
@@ -177,12 +207,12 @@ def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
 
 def _resolve_provider(
     provider: str,
-    google_api_key: str,
-    groq_api_key: str,
+    google_api_keys: Iterable[str],
+    groq_api_keys: Iterable[str],
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
-        return "groq" if groq_api_key else "google"
+        return "groq" if tuple(groq_api_keys) else "google"
     if normalized in {"google", "groq"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
@@ -214,3 +244,29 @@ def _default_scrape_limit(provider: ResolvedProvider) -> int:
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:
     return 1_500 if provider == "groq" else 2_500
+
+
+def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for name in _numbered_env_names(base_name):
+        value = os.environ.get(name, "").strip()
+        if value and value not in seen:
+            values.append(value)
+            seen.add(value)
+    return tuple(values)
+
+
+def _numbered_env_names(base_name: str) -> list[str]:
+    indexed: list[tuple[int, str]] = []
+    prefixes = (base_name, f"{base_name}_")
+    for name in os.environ:
+        if name == base_name:
+            indexed.append((0, name))
+            continue
+        for prefix in prefixes:
+            suffix = name.removeprefix(prefix)
+            if suffix != name and suffix.isdigit():
+                indexed.append((int(suffix), name))
+                break
+    return [name for _, name in sorted(indexed, key=lambda item: (item[0], item[1]))]

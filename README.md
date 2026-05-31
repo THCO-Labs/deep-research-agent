@@ -35,6 +35,11 @@ The default Groq model is `openai/gpt-oss-20b` because it supports tool calling
 and fits Groq on-demand token limits better than larger models. Use larger Groq
 models only when your tier has enough TPM headroom.
 
+For Groq runs, the app registers a DeepAgents runtime profile that hides the
+framework's internal `write_todos` tool. The CLI progress feed remains the
+source of visible progress, and this avoids Groq JSON-parser failures caused by
+malformed internal todo tool calls.
+
 You can route individual roles to different model strings:
 
 ```powershell

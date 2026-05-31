@@ -5,14 +5,17 @@ from typing import Any
 
 import yaml
 from langchain.tools import BaseTool
+from langchain_core.language_models import BaseChatModel
+
+ModelLike = str | BaseChatModel
 
 
 def load_subagents(
     config_path: Path,
     available_tools: dict[str, BaseTool],
     *,
-    model: str | None = None,
-    models_by_name: dict[str, str] | None = None,
+    model: ModelLike | None = None,
+    models_by_name: dict[str, ModelLike] | None = None,
 ) -> list[dict[str, Any]]:
     with config_path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}

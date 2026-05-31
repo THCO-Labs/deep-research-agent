@@ -10,6 +10,8 @@ from deepagents import create_deep_agent
 from langchain.messages import HumanMessage
 
 from deep_research.artifacts import RunArtifacts
+from deep_research.deepagents_profiles import configure_deepagents_profiles
+from deep_research.model_router import build_agent_models
 from deep_research.progress import ProgressCallback, ProgressMode, progress_line, summarize_stream_update
 from deep_research.prompts import orchestrator_prompt
 from deep_research.settings import Settings
@@ -34,10 +36,12 @@ class ResearchRunError(RuntimeError):
 
 
 def create_agent(settings: Settings, context: ToolContext):
+    configure_deepagents_profiles(settings)
+    models = build_agent_models(settings)
     tools = build_tools(context)
     root = settings.project_root
     return create_deep_agent(
-        model=settings.model,
+        model=models.orchestrator,
         tools=[
             tools["web_search"],
             tools["deep_scrape"],
@@ -49,12 +53,12 @@ def create_agent(settings: Settings, context: ToolContext):
         subagents=load_subagents(
             root / "subagents.yaml",
             tools,
-            model=settings.fast_model,
+            model=models.fast,
             models_by_name={
-                "planner": settings.planner_model,
-                "researcher": settings.researcher_model,
-                "analyst": settings.analyst_model,
-                "verifier": settings.verifier_model,
+                "planner": models.planner,
+                "researcher": models.researcher,
+                "analyst": models.analyst,
+                "verifier": models.verifier,
             },
         ),
     )
@@ -182,6 +186,8 @@ def _finalize_artifacts(
             "report_exists": report_path.exists(),
             "report_reconstructed": report_reconstructed,
             "verification_valid": result.valid,
+            "google_key_count": len(context.settings.google_key_pool),
+            "groq_key_count": len(context.settings.groq_key_pool),
             "error": None if stream_error is None else f"{type(stream_error).__name__}: {stream_error}",
         }
     )
