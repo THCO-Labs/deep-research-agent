@@ -57,6 +57,7 @@ Important options:
 - `--provider auto|google|groq`: selects model provider. `auto` uses Groq when `GROQ_API_KEY` exists, otherwise Google.
 - `--model`: overrides the main model. Short names are prefixed by the selected provider.
 - `--fast-model`: overrides the subagent and judge model.
+- `--planner-model`, `--researcher-model`, `--analyst-model`, `--verifier-model`, `--judge-model`: override individual role models.
 - `--mode fast|balanced|max_quality`: controls default source and repair budgets.
 - `--max-sources`: caps results per search call.
 - `--max-rounds`: caps verifier repair rounds.
@@ -98,6 +99,11 @@ Optional keys:
 - `DEEP_RESEARCH_PROVIDER`
 - `DEEP_RESEARCH_MODEL`
 - `DEEP_RESEARCH_FAST_MODEL`
+- `DEEP_RESEARCH_PLANNER_MODEL`
+- `DEEP_RESEARCH_RESEARCHER_MODEL`
+- `DEEP_RESEARCH_ANALYST_MODEL`
+- `DEEP_RESEARCH_VERIFIER_MODEL`
+- `DEEP_RESEARCH_JUDGE_MODEL`
 - `DEEP_RESEARCH_SCRAPE_CHAR_LIMIT`
 - `DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT`
 
@@ -114,9 +120,12 @@ Mode defaults:
 
 | Mode | Default max sources | Default repair rounds |
 | --- | ---: | ---: |
-| `fast` | 6 | 1 |
-| `balanced` | 12 | 2 |
-| `max_quality` | 24 | 3 |
+| `fast` on Google | 6 | 1 |
+| `balanced` on Google | 12 | 2 |
+| `max_quality` on Google | 24 | 3 |
+| `fast` on Groq | 2 | 1 |
+| `balanced` on Groq | 3 | 1 |
+| `max_quality` on Groq | 5 | 2 |
 
 Provider-specific scraping defaults:
 
@@ -126,6 +135,20 @@ Provider-specific scraping defaults:
 | `google` | 15,000 | 2,500 |
 
 The scraper saves more text to disk than it returns to the model. This keeps the run reproducible without overloading low-TPM providers with huge tool responses.
+
+Role-specific model routing:
+
+| Role | Settings field | Env var |
+| --- | --- | --- |
+| Root orchestrator | `model` | `DEEP_RESEARCH_MODEL` |
+| Default subagent fallback | `fast_model` | `DEEP_RESEARCH_FAST_MODEL` |
+| Planner | `planner_model` | `DEEP_RESEARCH_PLANNER_MODEL` |
+| Researcher | `researcher_model` | `DEEP_RESEARCH_RESEARCHER_MODEL` |
+| Analyst | `analyst_model` | `DEEP_RESEARCH_ANALYST_MODEL` |
+| Verifier | `verifier_model` | `DEEP_RESEARCH_VERIFIER_MODEL` |
+| Eval judge | `judge_model` | `DEEP_RESEARCH_JUDGE_MODEL` |
+
+Role model values can use any LangChain-supported model string, such as `groq:...`, `google_genai:...`, or another provider prefix when the required package and API key are installed. Tool-using roles require models that support chat tool calls. This is why Groq's tool-capable `openai/gpt-oss-20b` remains the default for Groq runs.
 
 ## 5. Package Layout
 
@@ -214,7 +237,7 @@ The root agent is built in `deep_research/agent.py` with:
 - System prompt from `deep_research/prompts.py`.
 - Subagents loaded from `subagents.yaml`.
 
-Subagents are loaded by `deep_research/subagents.py`. Their configured model is overridden at runtime with `settings.fast_model`, so provider selection applies consistently to the root agent and subagents.
+Subagents are loaded by `deep_research/subagents.py`. Their configured model is overridden at runtime with role-specific settings. If a role-specific model is not provided, it falls back to `settings.fast_model`.
 
 Current subagents:
 

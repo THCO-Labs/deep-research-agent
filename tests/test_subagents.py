@@ -60,6 +60,37 @@ researcher:
     assert subagents[0]["model"] == "groq:llama-3.1-8b-instant"
 
 
+def test_load_subagents_can_route_models_by_name(tmp_path: Path) -> None:
+    config = tmp_path / "subagents.yaml"
+    config.write_text(
+        """
+planner:
+  description: Plan
+  system_prompt: Prompt
+  tools:
+    - write_file
+researcher:
+  description: Research
+  system_prompt: Prompt
+  tools:
+    - web_search
+""",
+        encoding="utf-8",
+    )
+    artifacts = RunArtifacts.create(tmp_path, "role routes")
+    tools = build_tools(ToolContext(_settings(tmp_path), artifacts, SourceRegistry(artifacts)))
+
+    subagents = load_subagents(
+        config,
+        tools,
+        model="groq:default",
+        models_by_name={"researcher": "groq:research"},
+    )
+
+    models = {subagent["name"]: subagent["model"] for subagent in subagents}
+    assert models == {"planner": "groq:default", "researcher": "groq:research"}
+
+
 def test_load_subagents_rejects_unknown_tools(tmp_path: Path) -> None:
     config = tmp_path / "subagents.yaml"
     config.write_text(

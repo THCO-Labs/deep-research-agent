@@ -24,6 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--planner-model", default=None)
+    parser.add_argument("--researcher-model", default=None)
+    parser.add_argument("--analyst-model", default=None)
+    parser.add_argument("--verifier-model", default=None)
+    parser.add_argument("--judge-model", default=None)
     parser.add_argument("--live", action="store_true", help="Mark this run as live in settings/metrics.")
     parser.add_argument(
         "--progress",
@@ -49,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
             provider=args.provider,
             model=args.model,
             fast_model=args.fast_model,
+            planner_model=args.planner_model,
+            researcher_model=args.researcher_model,
+            analyst_model=args.analyst_model,
+            verifier_model=args.verifier_model,
+            judge_model=args.judge_model,
             scrape_char_limit=args.scrape_char_limit,
             live=args.live,
         )

@@ -31,6 +31,11 @@ class Settings:
     provider: ResolvedProvider = "google"
     model: str = GOOGLE_DEFAULT_MODEL
     fast_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    planner_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    researcher_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    analyst_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    verifier_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
     scrape_char_limit: int = 15_000
     tool_excerpt_char_limit: int = 2_500
     live: bool = False
@@ -50,13 +55,17 @@ class Settings:
         provider: Provider | None = None,
         model: str | None = None,
         fast_model: str | None = None,
+        planner_model: str | None = None,
+        researcher_model: str | None = None,
+        analyst_model: str | None = None,
+        verifier_model: str | None = None,
+        judge_model: str | None = None,
         scrape_char_limit: int | None = None,
         live: bool = False,
     ) -> "Settings":
         root = Path(project_root or Path.cwd()).resolve()
         load_dotenv(root / ".env", override=False)
 
-        mode_sources, mode_rounds = _mode_defaults(mode)
         resolved_out = Path(out_dir) if out_dir is not None else Path("runs")
         if not resolved_out.is_absolute():
             resolved_out = root / resolved_out
@@ -66,6 +75,12 @@ class Settings:
         tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip()
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
         resolved_provider = _resolve_provider(requested_provider, google_api_key, groq_api_key)
+        mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
+        resolved_fast_model = _resolve_model(
+            resolved_provider,
+            fast_model or os.environ.get("DEEP_RESEARCH_FAST_MODEL"),
+            fast=True,
+        )
 
         settings = cls(
             project_root=root,
@@ -79,10 +94,31 @@ class Settings:
                 model or os.environ.get("DEEP_RESEARCH_MODEL"),
                 fast=False,
             ),
-            fast_model=_resolve_model(
+            fast_model=resolved_fast_model,
+            planner_model=_resolve_role_model(
                 resolved_provider,
-                fast_model or os.environ.get("DEEP_RESEARCH_FAST_MODEL"),
-                fast=True,
+                planner_model or os.environ.get("DEEP_RESEARCH_PLANNER_MODEL"),
+                fallback=resolved_fast_model,
+            ),
+            researcher_model=_resolve_role_model(
+                resolved_provider,
+                researcher_model or os.environ.get("DEEP_RESEARCH_RESEARCHER_MODEL"),
+                fallback=resolved_fast_model,
+            ),
+            analyst_model=_resolve_role_model(
+                resolved_provider,
+                analyst_model or os.environ.get("DEEP_RESEARCH_ANALYST_MODEL"),
+                fallback=resolved_fast_model,
+            ),
+            verifier_model=_resolve_role_model(
+                resolved_provider,
+                verifier_model or os.environ.get("DEEP_RESEARCH_VERIFIER_MODEL"),
+                fallback=resolved_fast_model,
+            ),
+            judge_model=_resolve_role_model(
+                resolved_provider,
+                judge_model or os.environ.get("DEEP_RESEARCH_JUDGE_MODEL"),
+                fallback=resolved_fast_model,
             ),
             scrape_char_limit=scrape_char_limit
             or int(os.environ.get("DEEP_RESEARCH_SCRAPE_CHAR_LIMIT") or _default_scrape_limit(resolved_provider)),
@@ -125,7 +161,13 @@ class Settings:
             raise ConfigError("tool_excerpt_char_limit must be at least 500.")
 
 
-def _mode_defaults(mode: Mode) -> tuple[int, int]:
+def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
+    if provider == "groq":
+        if mode == "fast":
+            return 2, 1
+        if mode == "max_quality":
+            return 5, 2
+        return 3, 1
     if mode == "fast":
         return 6, 1
     if mode == "max_quality":
@@ -152,6 +194,12 @@ def _resolve_model(provider: ResolvedProvider, model: str | None, *, fast: bool)
         return chosen
     prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
+
+
+def _resolve_role_model(provider: ResolvedProvider, model: str | None, *, fallback: str) -> str:
+    if not model:
+        return fallback
+    return _resolve_model(provider, model, fast=True)
 
 
 def _default_model(provider: ResolvedProvider, *, fast: bool) -> str:

@@ -106,7 +106,7 @@ def source_support_score(case: BenchmarkCase, report: str, verification: dict[st
 
 
 def llm_judge_score(case: BenchmarkCase, report: str, settings: Settings) -> float:
-    model = init_chat_model(settings.fast_model)
+    model = init_chat_model(settings.judge_model)
     prompt = f"""Grade this research report from 0.0 to 1.0.
 
 Question: {case.question}
@@ -154,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=["auto", "google", "groq"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--planner-model", default=None)
+    parser.add_argument("--researcher-model", default=None)
+    parser.add_argument("--analyst-model", default=None)
+    parser.add_argument("--verifier-model", default=None)
+    parser.add_argument("--judge-model", default=None)
     return parser
 
 
@@ -168,6 +173,11 @@ def main(argv: list[str] | None = None) -> int:
         provider=args.provider,
         model=args.model,
         fast_model=args.fast_model,
+        planner_model=args.planner_model,
+        researcher_model=args.researcher_model,
+        analyst_model=args.analyst_model,
+        verifier_model=args.verifier_model,
+        judge_model=args.judge_model,
         scrape_char_limit=args.scrape_char_limit,
         live=True,
     )

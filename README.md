@@ -35,6 +35,28 @@ The default Groq model is `openai/gpt-oss-20b` because it supports tool calling
 and fits Groq on-demand token limits better than larger models. Use larger Groq
 models only when your tier has enough TPM headroom.
 
+You can route individual roles to different model strings:
+
+```powershell
+python -m deep_research --provider groq `
+  --model openai/gpt-oss-20b `
+  --planner-model openai/gpt-oss-20b `
+  --researcher-model openai/gpt-oss-20b `
+  --verifier-model openai/gpt-oss-20b `
+  "question"
+```
+
+Hugging Face can be added for compatible roles through LangChain-supported model
+strings after installing the optional extra:
+
+```powershell
+pip install -e ".[huggingface]"
+```
+
+Only use Hugging Face models for tool-using roles when that model/provider
+supports chat tool calling. Many free hosted models do not, so Groq remains the
+safer default for planner/researcher/verifier agents.
+
 ## Run
 
 ```powershell

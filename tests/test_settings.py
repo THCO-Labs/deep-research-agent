@@ -40,6 +40,27 @@ def test_settings_prefers_groq_when_present(tmp_path: Path, monkeypatch: pytest.
     assert settings.fast_model == "groq:openai/gpt-oss-20b"
     assert settings.scrape_char_limit == 6000
     assert settings.tool_excerpt_char_limit == 1500
+    assert settings.max_sources == 3
+    assert settings.max_rounds == 1
+
+
+def test_settings_supports_role_model_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_RESEARCHER_MODEL=groq:openai/gpt-oss-120b\n"
+        "DEEP_RESEARCH_JUDGE_MODEL=groq:openai/gpt-oss-20b\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_RESEARCHER_MODEL", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_JUDGE_MODEL", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.researcher_model == "groq:openai/gpt-oss-120b"
+    assert settings.judge_model == "groq:openai/gpt-oss-20b"
 
 
 def test_settings_supports_explicit_provider_and_short_model(

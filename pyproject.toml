@@ -21,6 +21,10 @@ dependencies = [
 test = [
     "pytest>=8.0.0",
 ]
+huggingface = [
+    "langchain-huggingface>=0.3.0",
+    "huggingface-hub>=0.23.0",
+]
 
 [project.scripts]
 deep-research = "deep_research.cli:main"

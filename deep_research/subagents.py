@@ -12,6 +12,7 @@ def load_subagents(
     available_tools: dict[str, BaseTool],
     *,
     model: str | None = None,
+    models_by_name: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     with config_path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
@@ -27,8 +28,9 @@ def load_subagents(
             "description": spec["description"],
             "system_prompt": spec["system_prompt"],
         }
-        if model:
-            subagent["model"] = model
+        selected_model = (models_by_name or {}).get(name) or model
+        if selected_model:
+            subagent["model"] = selected_model
         elif "model" in spec:
             subagent["model"] = spec["model"]
         if "tools" in spec:

@@ -46,7 +46,17 @@ def create_agent(settings: Settings, context: ToolContext):
             tools["verify_report_file"],
         ],
         system_prompt=orchestrator_prompt(settings),
-        subagents=load_subagents(root / "subagents.yaml", tools, model=settings.fast_model),
+        subagents=load_subagents(
+            root / "subagents.yaml",
+            tools,
+            model=settings.fast_model,
+            models_by_name={
+                "planner": settings.planner_model,
+                "researcher": settings.researcher_model,
+                "analyst": settings.analyst_model,
+                "verifier": settings.verifier_model,
+            },
+        ),
     )
 
 

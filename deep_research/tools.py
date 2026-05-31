@@ -231,8 +231,8 @@ def _resolve_scrape_target(url: str, context: ToolContext) -> str:
             context.emit("scrape", f"corrected URL to registered source [{same_host[0].id}]")
             return same_host[0].url
 
-    unsraped = [record for record in context.registry.records if not record.content_path]
-    if len(unsraped) == 1:
-        context.emit("scrape", f"using only unsraped source candidate [{unsraped[0].id}]")
-        return unsraped[0].url
+    unscraped = [record for record in context.registry.records if not record.content_path]
+    if len(unscraped) == 1:
+        context.emit("scrape", f"using only unscraped source candidate [{unscraped[0].id}]")
+        return unscraped[0].url
     return cleaned
