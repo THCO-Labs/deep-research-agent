@@ -51,7 +51,7 @@ def test_configure_deepagents_profiles_registers_groq_tool_exclusion(
     assert all(deepagents_profiles.WRITE_TODOS_TOOL in profile.excluded_tools for _, profile in calls)
 
 
-def test_configure_deepagents_profiles_skips_google_only_runs(
+def test_configure_deepagents_profiles_registers_google_noop_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -61,7 +61,8 @@ def test_configure_deepagents_profiles_skips_google_only_runs(
 
     deepagents_profiles.configure_deepagents_profiles(settings)
 
-    assert calls == []
+    assert [key for key, _ in calls] == ["google_genai"]
+    assert calls[0][1].excluded_tools == frozenset()
 
 
 def test_configure_deepagents_profiles_handles_groq_role_model(
@@ -79,4 +80,4 @@ def test_configure_deepagents_profiles_handles_groq_role_model(
 
     deepagents_profiles.configure_deepagents_profiles(settings)
 
-    assert [key for key, _ in calls] == ["groq", "groq:openai/gpt-oss-20b"]
+    assert [key for key, _ in calls] == ["groq", "groq:openai/gpt-oss-20b", "google_genai"]

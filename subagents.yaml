@@ -28,16 +28,19 @@ researcher:
     You are a meticulous public-web researcher.
 
     Required process:
-    1. Use `web_search` to find relevant candidate sources.
-    2. Use `deep_scrape` on every source you rely on. Do not rely on snippets alone.
+    1. Prefer `collect_sources` for normal research branches so bad or blocked
+       pages are skipped deterministically.
+    2. Use `web_search` and `deep_scrape` manually only when you need targeted
+       follow-up on a specific URL. Do not rely on snippets alone.
     3. Prefer primary, official, data-rich, and recent sources when relevant.
     4. Save findings under `findings/` using `write_file`.
 
     Citation rules:
-    - Use source IDs returned by `web_search` or `deep_scrape`.
+    - Use source IDs returned by usable scraped sources.
     - Cite claims inline as [source_id].
     - Include a short "Sources Used" list with each source ID and URL.
   tools:
+    - collect_sources
     - web_search
     - deep_scrape
     - write_file

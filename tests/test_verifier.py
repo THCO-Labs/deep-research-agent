@@ -52,3 +52,64 @@ def test_verify_report_accepts_scraped_source() -> None:
 
     assert result.valid is True
     assert result.citation_validity_score == 1.0
+
+
+def test_verify_report_scores_cited_claim_against_source_text() -> None:
+    record = SourceRecord(
+        id=1,
+        url="https://example.com",
+        canonical_url="https://example.com/",
+        title="Example",
+        fetched_at="2026-01-01T00:00:00+00:00",
+        extraction_method="playwright",
+        content_hash="abc",
+        content_path="source_docs/source_1.md",
+    )
+    report = (
+        "## Finding\n\n"
+        "Fine-tuning adapts a pretrained model to a specific task by training on task-specific data [1].\n\n"
+        "## Sources\n[1] Example: https://example.com"
+    )
+
+    result = verify_report(
+        report,
+        [record],
+        source_loader=lambda _record: (
+            "Fine-tuning adapts a pretrained model to a specific task by training on task-specific data."
+        ),
+    )
+
+    assert result.valid is True
+    assert result.source_support_score == 1.0
+    assert result.support_checks[0]["supported"] is True
+
+
+def test_verify_report_flags_weakly_supported_cited_claim() -> None:
+    record = SourceRecord(
+        id=1,
+        url="https://example.com",
+        canonical_url="https://example.com/",
+        title="Example",
+        fetched_at="2026-01-01T00:00:00+00:00",
+        extraction_method="playwright",
+        content_hash="abc",
+        content_path="source_docs/source_1.md",
+    )
+    report = (
+        "## Finding\n\n"
+        "Fine-tuning always makes spacecraft engines cheaper in ocean climates [1].\n\n"
+        "## Sources\n[1] Example: https://example.com"
+    )
+
+    result = verify_report(
+        report,
+        [record],
+        source_loader=lambda _record: (
+            "Fine-tuning adapts a pretrained machine learning model to a downstream task."
+        ),
+    )
+
+    assert result.valid is False
+    assert result.source_support_score < 1.0
+    assert result.weakly_supported_claims
+    assert result.weakly_supported_claims[0]["cited_source_ids"] == [1]

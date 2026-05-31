@@ -10,8 +10,8 @@ from tavily import TavilyClient
 
 from deep_research.artifacts import RunArtifacts
 from deep_research.models import Metrics
-from deep_research.progress import ProgressCallback, progress_line
-from deep_research.scraper import PlaywrightScraper, ScrapeResult
+from deep_research.progress import ActivityLog, ProgressCallback, progress_line
+from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
 from deep_research.settings import Settings
 from deep_research.source_registry import SourceRegistry
 from deep_research.urls import canonicalize_url
@@ -29,6 +29,7 @@ class ToolContext:
     registry: SourceRegistry
     search_client: Any | None = None
     scraper: Any | None = None
+    activity: ActivityLog | None = None
     on_progress: ProgressCallback | None = None
     repl: PythonREPL = field(default_factory=PythonREPL)
     metrics: Metrics = field(default_factory=Metrics)
@@ -40,22 +41,19 @@ class ToolContext:
             self.scraper = PlaywrightScraper()
 
     def emit(self, stage: str, message: str) -> None:
+        if self.activity:
+            self.activity.emit(stage, message)
+            return
         if self.on_progress:
             self.on_progress(progress_line(stage, message))
 
 
 def build_tools(context: ToolContext) -> dict[str, BaseTool]:
-    @tool
-    def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
-        """Search the public web and register source candidates.
-
-        This returns candidates only. Call deep_scrape on a result URL before
-        relying on it or citing its source_id.
-        """
+    def search_candidates(query: str, max_results: int) -> tuple[str, list[dict[str, Any]]]:
         cleaned = query.strip()
         if not cleaned:
             raise ResearchToolError("web_search query cannot be empty.")
-        bounded_results = max(1, min(max_results, context.settings.max_sources))
+        bounded_results = max(1, max_results)
         context.metrics.search_count += 1
         context.emit("search", f"{cleaned} (top {bounded_results})")
         try:
@@ -86,11 +84,9 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             )
         source_ids = ", ".join(f"[{item['source_id']}]" for item in results) or "none"
         context.emit("search", f"registered {len(results)} source candidate(s): {source_ids}")
-        return {"query": cleaned, "results": results}
+        return cleaned, results
 
-    @tool
-    def deep_scrape(url: str) -> dict[str, Any]:
-        """Render a public URL with Playwright, convert it to markdown, and register it."""
+    def scrape_candidate(url: str) -> dict[str, Any]:
         cleaned = _resolve_scrape_target(url, context)
         if not cleaned:
             raise ResearchToolError("deep_scrape URL cannot be empty.")
@@ -98,8 +94,12 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
         context.emit("scrape", cleaned)
         try:
             result: ScrapeResult = context.scraper.fetch(cleaned)
+        except ScrapeQualityError as exc:
+            context.emit("scrape", f"rejected unusable source: {cleaned}")
+            return _unusable_source_payload(cleaned, context, str(exc))
         except Exception as exc:
-            raise ResearchToolError(f"Scrape failed for URL {cleaned!r}: {exc}") from exc
+            context.emit("scrape", f"failed unusable source: {cleaned}")
+            return _unusable_source_payload(cleaned, context, f"Scrape failed: {exc}")
 
         markdown = result.markdown[: context.settings.scrape_char_limit]
         excerpt = markdown[: context.settings.tool_excerpt_char_limit]
@@ -117,12 +117,74 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             "content_path": record.content_path,
             "excerpt": excerpt,
             "saved_chars": len(markdown),
+            "source_usable": True,
         }
         context.emit(
             "scrape",
             f"source [{record.id}] {record.title} ({len(markdown):,} chars)",
         )
         return payload
+
+    @tool
+    def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+        """Search the public web and register source candidates.
+
+        This returns candidates only. Call deep_scrape or collect_sources before
+        relying on sources or citing source IDs.
+        """
+        bounded_results = max(1, min(max_results, context.settings.max_sources))
+        cleaned, results = search_candidates(query, bounded_results)
+        return {"query": cleaned, "results": results}
+
+    @tool
+    def deep_scrape(url: str) -> dict[str, Any]:
+        """Render a public URL, register usable markdown, or return an unusable-source result."""
+        return scrape_candidate(url)
+
+    @tool
+    def collect_sources(query: str, target_count: int = 3, max_results: int = 0) -> dict[str, Any]:
+        """Search and scrape candidates until enough usable, citeable sources are collected.
+
+        Prefer this over manually pairing web_search and deep_scrape for normal
+        research. It skips failed, blocked, and low-quality pages and returns
+        only scraped sources as usable.
+        """
+        target = max(1, min(target_count, context.settings.max_sources))
+        candidate_limit = max_results if max_results > 0 else max(target * 3, context.settings.max_sources)
+        candidate_limit = max(target, min(candidate_limit, 10))
+        cleaned, candidates = search_candidates(query, candidate_limit)
+        usable_sources = []
+        unusable_sources = []
+        seen_urls: set[str] = set()
+
+        for candidate in candidates:
+            if len(usable_sources) >= target:
+                break
+            url = str(candidate.get("url") or "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            scrape_result = scrape_candidate(url)
+            if scrape_result.get("source_usable") is True:
+                usable_sources.append(scrape_result)
+            else:
+                unusable_sources.append(scrape_result)
+
+        context.emit(
+            "collect",
+            f"gathered {len(usable_sources)}/{target} usable source(s), skipped {len(unusable_sources)}",
+        )
+        return {
+            "query": cleaned,
+            "target_count": target,
+            "candidate_count": len(candidates),
+            "usable_count": len(usable_sources),
+            "unusable_count": len(unusable_sources),
+            "usable_sources": usable_sources,
+            "unusable_sources": unusable_sources,
+            "needs_more_sources": len(usable_sources) < target,
+            "instruction": "Use only usable_sources for citations. If needs_more_sources is true, run another query.",
+        }
 
     @tool
     def write_file(file_path: str, content: str) -> str:
@@ -135,14 +197,24 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
 
     @tool
     def read_file(file_path: str) -> str:
-        """Read a UTF-8 text file from inside the current research run directory."""
+        """Read a bounded UTF-8 text preview from inside the current research run directory."""
         context.metrics.read_count += 1
         path = context.artifacts.resolve_path(file_path)
         if not path.exists():
             context.emit("read", f"missing {file_path}")
             return f"ERROR: file not found: {file_path}"
+        content = path.read_text(encoding="utf-8")
+        preview = _bounded_preview(content, context.settings.tool_excerpt_char_limit)
+        if len(preview) < len(content):
+            context.emit("read", f"{file_path} (preview {len(preview):,}/{len(content):,} chars)")
+            return (
+                preview
+                + "\n\n"
+                + f"[TRUNCATED: returned {len(preview):,} of {len(content):,} chars. "
+                + "The complete file remains in the run directory for verification.]"
+            )
         context.emit("read", file_path)
-        return path.read_text(encoding="utf-8")
+        return preview
 
     @tool
     def verify_report_file(file_path: str = "report.md") -> dict[str, Any]:
@@ -154,9 +226,12 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             result = {
                 "valid": False,
                 "citation_validity_score": 0.0,
+                "source_support_score": 0.0,
                 "missing_sources": [f"Report file not found: {file_path}"],
                 "unused_sources": [record.id for record in context.registry.records],
                 "unsupported_claims": [],
+                "weakly_supported_claims": [],
+                "support_checks": [],
                 "source_list_errors": [],
                 "unscraped_sources": [record.id for record in context.registry.records if not record.content_path],
                 "cited_source_ids": [],
@@ -171,13 +246,15 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             report,
             context.registry.records,
             verification_rounds=context.metrics.verification_rounds,
+            source_loader=lambda record: context.artifacts.read_text(record.content_path or ""),
         )
         context.artifacts.write_json("verification.json", result.to_dict())
         status = "passed" if result.valid else "failed"
         context.emit(
             "verify",
             f"{status}: score {result.citation_validity_score:.2f}, "
-            f"{len(result.unsupported_claims)} unsupported paragraph(s)",
+            f"{len(result.unsupported_claims)} uncited paragraph(s), "
+            f"{len(result.weakly_supported_claims)} weakly supported claim(s)",
         )
         return result.to_dict()
 
@@ -193,6 +270,7 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
     return {
         "web_search": web_search,
         "deep_scrape": deep_scrape,
+        "collect_sources": collect_sources,
         "write_file": write_file,
         "read_file": read_file,
         "verify_report_file": verify_report_file,
@@ -236,3 +314,34 @@ def _resolve_scrape_target(url: str, context: ToolContext) -> str:
         context.emit("scrape", f"using only unscraped source candidate [{unscraped[0].id}]")
         return unscraped[0].url
     return cleaned
+
+
+def _unusable_source_payload(url: str, context: ToolContext, error: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "url": url,
+        "error": error,
+        "source_usable": False,
+        "needs_alternate_source": True,
+        "instruction": "Do not cite this source. Search for or scrape an alternate source.",
+    }
+    source_id = _source_id_for_url(url, context)
+    if source_id is not None:
+        payload["source_id"] = source_id
+    return payload
+
+
+def _source_id_for_url(url: str, context: ToolContext) -> int | None:
+    try:
+        canonical = canonicalize_url(url)
+    except ValueError:
+        return None
+    for record in context.registry.records:
+        if record.canonical_url == canonical or record.url == url:
+            return record.id
+    return None
+
+
+def _bounded_preview(content: str, limit: int) -> str:
+    if len(content) <= limit:
+        return content
+    return content[:limit].rstrip()

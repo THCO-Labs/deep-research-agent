@@ -2,12 +2,61 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from typing import Callable
 
 from deep_research.models import SourceRecord, VerificationResult
 from deep_research.urls import canonicalize_url
 
 CITATION_RE = re.compile(r"\[(\d+)\]")
 SOURCE_LINE_RE = re.compile(r"^\[(\d+)\]\s+(.+?):\s+(https?://\S+)\s*$")
+TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
+SUPPORT_THRESHOLD = 0.28
+MIN_SUPPORT_TOKENS = 6
+
+SourceLoader = Callable[[SourceRecord], str]
+
+STOPWORDS = {
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "also",
+    "among",
+    "because",
+    "before",
+    "being",
+    "between",
+    "could",
+    "during",
+    "each",
+    "from",
+    "have",
+    "into",
+    "more",
+    "most",
+    "only",
+    "other",
+    "over",
+    "same",
+    "should",
+    "such",
+    "than",
+    "that",
+    "their",
+    "there",
+    "these",
+    "this",
+    "through",
+    "under",
+    "using",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+    "would",
+}
 
 
 def parse_inline_citations(markdown: str) -> list[int]:
@@ -29,6 +78,7 @@ def verify_report(
     source_records: list[SourceRecord],
     *,
     verification_rounds: int = 0,
+    source_loader: SourceLoader | None = None,
 ) -> VerificationResult:
     registry_by_id = {record.id: record for record in source_records}
     source_list = parse_source_list(report_markdown)
@@ -67,20 +117,44 @@ def verify_report(
 
     unused = sorted(record.id for record in source_records if record.id not in cited_ids)
     unsupported = _paragraphs_without_citations(report_markdown)
+    support_checks, source_support_errors = _source_support_checks(
+        report_markdown,
+        registry_by_id,
+        source_loader,
+    )
+    source_errors.extend(source_support_errors)
+    weak_claims = [check for check in support_checks if not check["supported"]]
+    source_support_score = _average_support_score(support_checks)
     source_sequence_errors = _source_sequence_errors(source_list)
     source_errors.extend(source_sequence_errors)
 
-    denominator = max(len(cited_ids) + len(source_list) + len(unsupported), 1)
-    failures = len(set(missing)) + len(source_errors) + len(unsupported) + len(set(unscraped))
+    denominator = max(len(cited_ids) + len(source_list) + len(unsupported) + len(support_checks), 1)
+    failures = (
+        len(set(missing))
+        + len(source_errors)
+        + len(unsupported)
+        + len(weak_claims)
+        + len(set(unscraped))
+    )
     score = max(0.0, 1.0 - failures / denominator)
-    valid = not missing and not source_errors and not unsupported and not unscraped and bool(cited_ids)
+    valid = (
+        not missing
+        and not source_errors
+        and not unsupported
+        and not weak_claims
+        and not unscraped
+        and bool(cited_ids)
+    )
     return VerificationResult(
         valid=valid,
         citation_validity_score=round(score, 4),
+        source_support_score=source_support_score,
         missing_sources=sorted(set(missing)),
         unused_sources=unused,
         unscraped_sources=sorted(set(unscraped)),
         unsupported_claims=unsupported,
+        weakly_supported_claims=weak_claims,
+        support_checks=support_checks,
         source_list_errors=source_errors,
         cited_source_ids=cited_ids,
         total_citations=sum(Counter(citations).values()),
@@ -113,6 +187,91 @@ def _paragraphs_without_citations(markdown: str) -> list[str]:
         if not CITATION_RE.search(text):
             unsupported.append(text[:240])
     return unsupported
+
+
+def _source_support_checks(
+    markdown: str,
+    registry_by_id: dict[int, SourceRecord],
+    source_loader: SourceLoader | None,
+) -> tuple[list[dict[str, object]], list[str]]:
+    if source_loader is None:
+        return [], []
+
+    checks: list[dict[str, object]] = []
+    errors: list[str] = []
+    source_text_cache: dict[int, str] = {}
+
+    for paragraph in _paragraphs_with_citations(markdown):
+        cited_ids = sorted(set(parse_inline_citations(paragraph)))
+        source_text_parts: list[str] = []
+        for source_id in cited_ids:
+            record = registry_by_id.get(source_id)
+            if record is None or not record.content_path:
+                continue
+            if source_id not in source_text_cache:
+                try:
+                    source_text_cache[source_id] = source_loader(record)
+                except Exception as exc:  # verifier surfaces the exact read failure.
+                    errors.append(f"Source content for [{source_id}] could not be read: {exc}")
+                    source_text_cache[source_id] = ""
+            source_text_parts.append(source_text_cache[source_id])
+
+        claim_tokens = _significant_tokens(_strip_citations(paragraph))
+        if len(claim_tokens) < MIN_SUPPORT_TOKENS:
+            continue
+
+        source_tokens = _significant_tokens(" ".join(source_text_parts))
+        support_score = _token_support_score(claim_tokens, source_tokens)
+        supported = support_score >= SUPPORT_THRESHOLD
+        checks.append(
+            {
+                "paragraph": paragraph[:240],
+                "cited_source_ids": cited_ids,
+                "support_score": round(support_score, 4),
+                "supported": supported,
+                "matched_terms": sorted(claim_tokens & source_tokens)[:20],
+                "missing_terms": sorted(claim_tokens - source_tokens)[:20],
+            }
+        )
+    return checks, errors
+
+
+def _paragraphs_with_citations(markdown: str) -> list[str]:
+    body = _without_sources(markdown)
+    cited: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", body):
+        text = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
+        if not text or text.startswith("#") or text.startswith("|"):
+            continue
+        if CITATION_RE.search(text):
+            cited.append(text)
+    return cited
+
+
+def _strip_citations(text: str) -> str:
+    return CITATION_RE.sub("", text)
+
+
+def _significant_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in TOKEN_RE.findall(text.lower())
+        if token not in STOPWORDS and not token.isdigit()
+    }
+
+
+def _token_support_score(claim_tokens: set[str], source_tokens: set[str]) -> float:
+    if not claim_tokens:
+        return 1.0
+    if not source_tokens:
+        return 0.0
+    return len(claim_tokens & source_tokens) / len(claim_tokens)
+
+
+def _average_support_score(checks: list[dict[str, object]]) -> float:
+    if not checks:
+        return 1.0
+    return round(sum(float(check["support_score"]) for check in checks) / len(checks), 4)
 
 
 def _source_sequence_errors(source_list: dict[int, str]) -> list[str]:

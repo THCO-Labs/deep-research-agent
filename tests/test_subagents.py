@@ -91,6 +91,21 @@ researcher:
     assert models == {"planner": "groq:default", "researcher": "groq:research"}
 
 
+def test_project_subagents_config_maps_collect_sources(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "subagents.yaml"
+    artifacts = RunArtifacts.create(tmp_path, "project subagents")
+    tools = build_tools(ToolContext(_settings(tmp_path), artifacts, SourceRegistry(artifacts)))
+
+    subagents = load_subagents(config, tools)
+
+    researcher = next(subagent for subagent in subagents if subagent["name"] == "researcher")
+    assert [tool.name for tool in researcher["tools"]][:3] == [
+        "collect_sources",
+        "web_search",
+        "deep_scrape",
+    ]
+
+
 def test_load_subagents_rejects_unknown_tools(tmp_path: Path) -> None:
     config = tmp_path / "subagents.yaml"
     config.write_text(

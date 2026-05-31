@@ -103,8 +103,8 @@ def source_support_score(case: BenchmarkCase, report: str, verification: dict[st
     requirement_score = 1.0
     if case.source_requirements:
         requirement_score = requirement_hits / len(case.source_requirements)
-    citation_score = float(verification.get("citation_validity_score", 0.0))
-    return round((requirement_score + citation_score) / 2, 4)
+    verifier_support = float(verification.get("source_support_score", 0.0))
+    return round((requirement_score + verifier_support) / 2, 4)
 
 
 def llm_judge_score(case: BenchmarkCase, report: str, settings: Settings) -> float:
@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-rounds", type=int, default=None)
     parser.add_argument("--scrape-char-limit", type=int, default=None)
-    parser.add_argument("--provider", choices=["auto", "google", "groq"], default=None)
+    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--planner-model", default=None)

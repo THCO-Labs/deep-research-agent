@@ -1,8 +1,16 @@
+import os
 from pathlib import Path
 
 import pytest
 
 from deep_research.settings import ConfigError, Settings
+
+
+@pytest.fixture(autouse=True)
+def clear_research_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.startswith(("GOOGLE_API_KEY", "GROQ_API_KEY", "DEEP_RESEARCH_")) or name == "TAVILY_API_KEY":
+            monkeypatch.delenv(name, raising=False)
 
 
 def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21,13 +29,20 @@ def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert settings.max_sources == 12
 
 
-def test_settings_prefers_groq_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     (tmp_path / ".env").write_text(
-        "GOOGLE_API_KEY=google-test\nGROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        "GOOGLE_API_KEY=google-test\nGOOGLE_API_KEY1=google-test-1\n"
+        "GROQ_API_KEY=groq-test\nGROQ_API_KEY1=groq-test-1\n"
+        "TAVILY_API_KEY=tavily-test\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY1", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY1", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
     monkeypatch.delenv("DEEP_RESEARCH_MODEL", raising=False)
@@ -35,13 +50,76 @@ def test_settings_prefers_groq_when_present(tmp_path: Path, monkeypatch: pytest.
 
     settings = Settings.from_env(project_root=tmp_path)
 
-    assert settings.provider == "groq"
+    assert settings.provider == "hybrid"
     assert settings.model == "groq:openai/gpt-oss-20b"
     assert settings.fast_model == "groq:openai/gpt-oss-20b"
+    assert settings.planner_model == "google_genai:gemini-2.5-flash"
+    assert settings.researcher_model == "groq:openai/gpt-oss-20b"
+    assert settings.verifier_model == "google_genai:gemini-2.5-flash"
+    assert settings.judge_model == "google_genai:gemini-2.5-flash"
     assert settings.scrape_char_limit == 6000
-    assert settings.tool_excerpt_char_limit == 1500
+    assert settings.tool_excerpt_char_limit == 900
     assert settings.max_sources == 3
     assert settings.max_rounds == 1
+    assert settings.google_key_pool == ("google-test", "google-test-1")
+    assert settings.groq_key_pool == ("groq-test", "groq-test-1")
+
+
+def test_settings_auto_uses_groq_when_only_groq_is_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider == "groq"
+    assert settings.model == "groq:openai/gpt-oss-20b"
+    assert settings.groq_key_pool == ("groq-test",)
+
+
+def test_settings_loads_numbered_groq_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY1=groq-one\nGROQ_API_KEY2=groq-two\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY1", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider == "groq"
+    assert settings.groq_api_key == "groq-one"
+    assert settings.groq_key_pool == ("groq-one", "groq-two")
+
+
+def test_settings_loads_numbered_google_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GOOGLE_API_KEY1=google-one\nGOOGLE_API_KEY2=google-two\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY1", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY2", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider == "google"
+    assert settings.google_api_key == "google-one"
+    assert settings.google_key_pool == ("google-one", "google-two")
 
 
 def test_settings_supports_role_model_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

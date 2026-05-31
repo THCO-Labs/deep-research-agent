@@ -2,11 +2,40 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Callable, Literal
 
 ProgressMode = Literal["live", "raw", "quiet"]
 ProgressCallback = Callable[[str], None]
+
+
+@dataclass
+class ActivityLog:
+    artifacts: Any
+    on_update: ProgressCallback | None = None
+    progress_mode: ProgressMode = "live"
+
+    def emit(
+        self,
+        stage: str,
+        message: str,
+        *,
+        kind: str = "status",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        event = {
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "stage": stage,
+            "kind": kind,
+            "message": message,
+        }
+        if data:
+            event["data"] = data
+        self.artifacts.append_jsonl("activity.jsonl", event)
+        self.artifacts.append_text("activity.md", f"- `{event['timestamp']}` **{stage}**: {message}\n")
+        if self.on_update and self.progress_mode == "live":
+            self.on_update(progress_line(stage, message))
 
 
 def progress_line(stage: str, message: str) -> str:
@@ -15,6 +44,14 @@ def progress_line(stage: str, message: str) -> str:
 
 
 def summarize_stream_update(node: str, content: Any) -> str | None:
+    event = summarize_stream_event(node, content)
+    if event is None:
+        return None
+    stage, message = event
+    return progress_line(stage, message)
+
+
+def summarize_stream_event(node: str, content: Any) -> tuple[str, str] | None:
     text = _content_to_text(content)
     if not text:
         return None
@@ -26,13 +63,13 @@ def summarize_stream_update(node: str, content: Any) -> str | None:
         if text.startswith("Wrote "):
             return None
         if text.startswith("ERROR:"):
-            return progress_line("tool", text[:240])
-        return progress_line("tool", _shorten(text, 180))
+            return "tool", text[:240]
+        return "tool", _shorten(text, 180)
 
     if node == "model":
-        return progress_line("agent", _shorten(text, 240))
+        return "agent", _shorten(text, 240)
 
-    return progress_line(node, _shorten(text, 200))
+    return node, _shorten(text, 200)
 
 
 def _content_to_text(content: Any) -> str:

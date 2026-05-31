@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -18,9 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scrape-char-limit", type=int, default=None)
     parser.add_argument(
         "--provider",
-        choices=["auto", "google", "groq"],
+        choices=["auto", "google", "groq", "hybrid"],
         default=None,
-        help="Model provider. auto uses Groq when GROQ_API_KEY is present, otherwise Google.",
+        help="Model provider. auto uses hybrid when Groq and Google keys are present.",
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
@@ -70,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ResearchRunError as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        failure_path = exc.result.run_dir / "failure.json"
+        if failure_path.exists():
+            failure = json.loads(failure_path.read_text(encoding="utf-8"))
+            print(f"Failure category: {failure.get('category')}", file=sys.stderr)
+            if failure.get("retry_after_seconds") is not None:
+                print(f"Retry after: {failure.get('retry_after_seconds')}s", file=sys.stderr)
+            print(f"Suggested action: {failure.get('suggested_action')}", file=sys.stderr)
         print(f"Run directory: {exc.result.run_dir}", file=sys.stderr)
         print(f"Verification: {exc.result.verification_path}", file=sys.stderr)
         print(f"Metrics: {exc.result.metrics_path}", file=sys.stderr)

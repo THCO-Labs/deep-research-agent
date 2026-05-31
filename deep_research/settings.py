@@ -8,13 +8,22 @@ from typing import Iterable, Literal
 from dotenv import load_dotenv
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq"]
-ResolvedProvider = Literal["google", "groq"]
+Provider = Literal["auto", "google", "groq", "hybrid"]
+ResolvedProvider = Literal["google", "groq", "hybrid"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
 GOOGLE_DEFAULT_FAST_MODEL = "google_genai:gemini-2.5-flash"
 GROQ_DEFAULT_MODEL = "groq:openai/gpt-oss-20b"
 GROQ_DEFAULT_FAST_MODEL = "groq:openai/gpt-oss-20b"
+HYBRID_DEFAULT_MODELS = {
+    "orchestrator": GROQ_DEFAULT_MODEL,
+    "fast": GROQ_DEFAULT_FAST_MODEL,
+    "planner": GOOGLE_DEFAULT_FAST_MODEL,
+    "researcher": GROQ_DEFAULT_FAST_MODEL,
+    "analyst": GROQ_DEFAULT_FAST_MODEL,
+    "verifier": GOOGLE_DEFAULT_FAST_MODEL,
+    "judge": GOOGLE_DEFAULT_FAST_MODEL,
+}
 
 
 class ConfigError(RuntimeError):
@@ -84,6 +93,7 @@ class Settings:
             resolved_provider,
             fast_model or os.environ.get("DEEP_RESEARCH_FAST_MODEL"),
             fast=True,
+            role="fast",
         )
 
         settings = cls(
@@ -97,32 +107,38 @@ class Settings:
                 resolved_provider,
                 model or os.environ.get("DEEP_RESEARCH_MODEL"),
                 fast=False,
+                role="orchestrator",
             ),
             fast_model=resolved_fast_model,
             planner_model=_resolve_role_model(
                 resolved_provider,
                 planner_model or os.environ.get("DEEP_RESEARCH_PLANNER_MODEL"),
                 fallback=resolved_fast_model,
+                role="planner",
             ),
             researcher_model=_resolve_role_model(
                 resolved_provider,
                 researcher_model or os.environ.get("DEEP_RESEARCH_RESEARCHER_MODEL"),
                 fallback=resolved_fast_model,
+                role="researcher",
             ),
             analyst_model=_resolve_role_model(
                 resolved_provider,
                 analyst_model or os.environ.get("DEEP_RESEARCH_ANALYST_MODEL"),
                 fallback=resolved_fast_model,
+                role="analyst",
             ),
             verifier_model=_resolve_role_model(
                 resolved_provider,
                 verifier_model or os.environ.get("DEEP_RESEARCH_VERIFIER_MODEL"),
                 fallback=resolved_fast_model,
+                role="verifier",
             ),
             judge_model=_resolve_role_model(
                 resolved_provider,
                 judge_model or os.environ.get("DEEP_RESEARCH_JUDGE_MODEL"),
                 fallback=resolved_fast_model,
+                role="judge",
             ),
             scrape_char_limit=scrape_char_limit
             or int(os.environ.get("DEEP_RESEARCH_SCRAPE_CHAR_LIMIT") or _default_scrape_limit(resolved_provider)),
@@ -163,7 +179,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq"}:
+        if self.provider not in {"google", "groq", "hybrid"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.max_sources < 1:
             raise ConfigError("max_sources must be at least 1.")
@@ -192,7 +208,7 @@ class Settings:
 
 
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
-    if provider == "groq":
+    if provider in {"groq", "hybrid"}:
         if mode == "fast":
             return 2, 1
         if mode == "max_quality":
@@ -212,38 +228,62 @@ def _resolve_provider(
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
-        return "groq" if tuple(groq_api_keys) else "google"
-    if normalized in {"google", "groq"}:
+        has_google = bool(tuple(google_api_keys))
+        has_groq = bool(tuple(groq_api_keys))
+        if has_google and has_groq:
+            return "hybrid"
+        return "groq" if has_groq else "google"
+    if normalized in {"google", "groq", "hybrid"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 
 
-def _resolve_model(provider: ResolvedProvider, model: str | None, *, fast: bool) -> str:
-    chosen = model.strip() if model else _default_model(provider, fast=fast)
+def _resolve_model(
+    provider: ResolvedProvider,
+    model: str | None,
+    *,
+    fast: bool,
+    role: str,
+) -> str:
+    chosen = model.strip() if model else _default_model(provider, fast=fast, role=role)
     if ":" in chosen:
         return chosen
-    prefix = "google_genai" if provider == "google" else "groq"
+    if provider == "hybrid":
+        default_provider, _, _ = _default_model(provider, fast=fast, role=role).partition(":")
+        prefix = default_provider
+    else:
+        prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
 
 
-def _resolve_role_model(provider: ResolvedProvider, model: str | None, *, fallback: str) -> str:
+def _resolve_role_model(
+    provider: ResolvedProvider,
+    model: str | None,
+    *,
+    fallback: str,
+    role: str,
+) -> str:
     if not model:
+        if provider == "hybrid":
+            return _default_model(provider, fast=True, role=role)
         return fallback
-    return _resolve_model(provider, model, fast=True)
+    return _resolve_model(provider, model, fast=True, role=role)
 
 
-def _default_model(provider: ResolvedProvider, *, fast: bool) -> str:
+def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
+    if provider == "hybrid":
+        return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
     if provider == "groq":
         return GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL
     return GOOGLE_DEFAULT_FAST_MODEL if fast else GOOGLE_DEFAULT_MODEL
 
 
 def _default_scrape_limit(provider: ResolvedProvider) -> int:
-    return 6_000 if provider == "groq" else 15_000
+    return 6_000 if provider in {"groq", "hybrid"} else 15_000
 
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:
-    return 1_500 if provider == "groq" else 2_500
+    return 900 if provider in {"groq", "hybrid"} else 2_500
 
 
 def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:

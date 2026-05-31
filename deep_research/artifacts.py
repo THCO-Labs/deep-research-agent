@@ -25,6 +25,11 @@ class RunArtifacts:
         (run_dir / "findings").mkdir()
         (run_dir / "source_docs").mkdir()
         (run_dir / "sources.jsonl").write_text("", encoding="utf-8")
+        (run_dir / "activity.jsonl").write_text("", encoding="utf-8")
+        (run_dir / "activity.md").write_text(
+            "# Activity Log\n\nVisible research progress. This is not hidden chain-of-thought.\n\n",
+            encoding="utf-8",
+        )
         return cls(run_dir=run_dir)
 
     def resolve_path(self, file_path: str | Path) -> Path:
@@ -53,6 +58,16 @@ class RunArtifacts:
     def write_jsonl(self, file_path: str | Path, rows: list[dict[str, Any]]) -> Path:
         text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
         return self.write_text(file_path, text)
+
+    def append_text(self, file_path: str | Path, content: str) -> Path:
+        target = self.resolve_path(file_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(content)
+        return target
+
+    def append_jsonl(self, file_path: str | Path, row: dict[str, Any]) -> Path:
+        return self.append_text(file_path, json.dumps(row, sort_keys=True) + "\n")
 
 
 def slugify(value: str) -> str:

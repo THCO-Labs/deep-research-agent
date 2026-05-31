@@ -7,6 +7,7 @@ Deep Research Agent is a public-web research system designed to produce source-b
 The system is built around four principles:
 
 - **Evidence first**: search results are only candidates; relied-on sources must be scraped before they can pass verification.
+- **Recoverable acquisition**: normal research uses `collect_sources` to over-fetch candidates, scrape them, skip blocked or low-quality pages, and return only usable sources for citation.
 - **Reproducibility**: every run gets its own artifact directory with the request, sources, report, transcript, metrics, and verification output.
 - **Provider flexibility**: model execution can use Google Gemini or Groq through LangChain model strings.
 - **Measurability**: reports are checked by deterministic citation validation and can be scored through a benchmark harness.
@@ -26,6 +27,9 @@ flowchart TD
     Runner --> Agent["DeepAgents Graph"]
     Agent --> RootTools["Root Tools"]
     Agent --> Subagents["Planner / Researcher / Analyst / Verifier"]
+    RootTools --> Collector["collect_sources Recovery Loop"]
+    Collector --> Tavily["Tavily Search"]
+    Collector --> Scraper["Playwright + HTTP Scraper"]
     RootTools --> Tavily["Tavily Search"]
     RootTools --> Scraper["Playwright + HTTP Scraper"]
     RootTools --> Verifier["Citation Verifier"]
@@ -35,6 +39,8 @@ flowchart TD
     Registry --> Artifacts
     Verifier --> Artifacts
     Agent --> Report["report.md"]
+    Runner --> Activity["activity.md / activity.jsonl"]
+    Runner --> Routes["model_routes.json"]
     Runner --> Metrics["metrics.json"]
 ```
 
@@ -54,7 +60,7 @@ python -m deep_research "research question"
 
 Important options:
 
-- `--provider auto|google|groq`: selects model provider. `auto` uses Groq when `GROQ_API_KEY` exists, otherwise Google.
+- `--provider auto|google|groq|hybrid`: selects model provider. `auto` uses `hybrid` when both Groq and Google keys exist, otherwise it uses the available provider.
 - `--model`: overrides the main model. Short names are prefixed by the selected provider.
 - `--fast-model`: overrides the subagent and judge model.
 - `--planner-model`, `--researcher-model`, `--analyst-model`, `--verifier-model`, `--judge-model`: override individual role models.
@@ -91,8 +97,8 @@ Configuration lives in `deep_research/settings.py`.
 Required keys:
 
 - `TAVILY_API_KEY`: required for public-web search.
-- `GROQ_API_KEY`: required when provider resolves to `groq`.
-- `GOOGLE_API_KEY`: required when provider resolves to `google`.
+- `GROQ_API_KEY`: required when provider resolves to `groq` or a role uses a `groq:...` model.
+- `GOOGLE_API_KEY`: required when provider resolves to `google` or a role uses a `google_genai:...` model.
 
 Optional keys:
 
@@ -107,14 +113,42 @@ Optional keys:
 - `DEEP_RESEARCH_SCRAPE_CHAR_LIMIT`
 - `DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT`
 
+API key pools:
+
+- `GROQ_API_KEY`, `GROQ_API_KEY1`, `GROQ_API_KEY2`, ...
+- `GOOGLE_API_KEY`, `GOOGLE_API_KEY1`, `GOOGLE_API_KEY2`, ...
+
+The unnumbered key and numbered keys are deduplicated and sorted with the
+unnumbered key first. `deep_research/model_router.py` assigns role models across
+the provider's available key pool. In hybrid mode with two Groq keys and two
+Google keys, the active default graph uses all four credentials:
+
+| Role | Default provider | Key slot |
+| --- | --- | --- |
+| Orchestrator | Groq | `GROQ_API_KEY` |
+| Researcher | Groq | `GROQ_API_KEY1` |
+| Planner | Google | `GOOGLE_API_KEY` |
+| Verifier | Google | `GOOGLE_API_KEY1` |
+| Analyst | Groq | wraps across the Groq key pool |
+| Eval judge | Google | wraps across the Google key pool |
+
+Key values are never written to progress output or metrics.
+
+Each run writes `model_routes.json` before the graph starts. The manifest
+contains role, provider, model, key pool size, key slot, and safe key label for
+each role. It is the authoritative artifact for confirming that a hybrid run is
+actually distributing work across `GROQ_API_KEY`, `GROQ_API_KEY1`,
+`GOOGLE_API_KEY`, and `GOOGLE_API_KEY1` without leaking secret values.
+
 Provider defaults:
 
 | Provider | Main model | Fast model |
 | --- | --- | --- |
 | `groq` | `groq:openai/gpt-oss-20b` | `groq:openai/gpt-oss-20b` |
 | `google` | `google_genai:gemini-2.5-flash` | `google_genai:gemini-2.5-flash` |
+| `hybrid` | `groq:openai/gpt-oss-20b` | `groq:openai/gpt-oss-20b` |
 
-Groq is preferred automatically when a Groq key is present because the project was adapted to avoid Gemini free-tier quota exhaustion. The default Groq model is intentionally the 20B tool-call-capable model because larger Groq models can exceed on-demand token-per-minute limits in multi-step agent flows.
+Hybrid is preferred automatically when both Groq and Google keys are present because it spreads active subagent work across both providers. If only Groq keys are present, Groq is preferred to avoid Gemini free-tier quota exhaustion. The default Groq model is intentionally the 20B tool-call-capable model because larger Groq models can exceed on-demand token-per-minute limits in multi-step agent flows.
 
 Mode defaults:
 
@@ -126,15 +160,19 @@ Mode defaults:
 | `fast` on Groq | 2 | 1 |
 | `balanced` on Groq | 3 | 1 |
 | `max_quality` on Groq | 5 | 2 |
+| `fast` on Hybrid | 2 | 1 |
+| `balanced` on Hybrid | 3 | 1 |
+| `max_quality` on Hybrid | 5 | 2 |
 
 Provider-specific scraping defaults:
 
 | Provider | Saved scrape chars | Tool-return excerpt chars |
 | --- | ---: | ---: |
-| `groq` | 6,000 | 1,500 |
+| `groq` | 6,000 | 900 |
+| `hybrid` | 6,000 | 900 |
 | `google` | 15,000 | 2,500 |
 
-The scraper saves more text to disk than it returns to the model. This keeps the run reproducible without overloading low-TPM providers with huge tool responses.
+The scraper and file reader save more text to disk than they return to the model. This keeps the run reproducible without overloading low-TPM providers with huge tool responses. Before truncation, scraper output is parsed as HTML, obvious site chrome is removed, and the best article/main-content node is converted to markdown. Bot checks, Cloudflare challenges, JavaScript-only pages, very low-content extracts, and fetch failures such as 403 responses are surfaced as unusable source results instead of being saved as citable source documents or aborting the run.
 
 Role-specific model routing:
 
@@ -157,6 +195,8 @@ deep_research/
   __main__.py             Module entry point for `python -m deep_research`
   cli.py                  CLI parsing, settings construction, final status output
   settings.py             Env loading, provider/model resolution, budget defaults
+  model_router.py         Provider model construction and API key-pool routing
+  errors.py               Provider/tool failure classification
   agent.py                DeepAgents graph creation and run lifecycle
   deepagents_profiles.py  Provider-specific DeepAgents runtime profile patches
   prompts.py              Root orchestrator prompt
@@ -218,13 +258,13 @@ Detailed steps:
 1. The CLI configures UTF-8 console output to avoid Windows encoding crashes.
 2. `Settings.from_env()` loads `.env`, resolves provider/model defaults, and validates keys.
 3. `RunArtifacts.create()` creates `runs/<timestamp-slug>/`.
-4. `request.md`, an initial `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
+4. `request.md`, `activity.md`, `activity.jsonl`, `model_routes.json`, an initial `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
 5. A `SourceRegistry` is attached to the run.
 6. A `ToolContext` is created with settings, artifacts, registry, Tavily client, scraper, Python REPL, metrics, and progress callback.
 7. `create_deep_agent()` builds the root DeepAgents graph with root tools and subagents.
-8. The graph streams updates. In `live` progress mode these are summarized into concise progress lines.
+8. The graph streams updates. In `live` progress mode these are summarized into concise progress lines. All observable progress events are also persisted to `activity.md` and `activity.jsonl`; these logs expose actions, sources, and status, not hidden chain-of-thought.
 9. Tool calls mutate only the run artifact directory and the source registry.
-10. If the graph fails, `error.txt`, `verification.json`, and `metrics.json` are still written.
+10. If the graph fails, `failure.json`, `error.txt`, `verification.json`, and `metrics.json` are still written.
 11. If the graph returns final report text but does not write `report.md`, the runner reconstructs `report.md` and appends a real `## Sources` section from the registry.
 12. Deterministic verification runs against the final report and source registry.
 13. Metrics are written and artifact paths are printed.
@@ -234,7 +274,7 @@ Detailed steps:
 The root agent is built in `deep_research/agent.py` with:
 
 - `settings.model` as the primary model.
-- Root tools: `web_search`, `deep_scrape`, `write_file`, `read_file`, `verify_report_file`.
+- Root tools: `web_search`, `deep_scrape`, `collect_sources`, `write_file`, `read_file`, `verify_report_file`.
 - System prompt from `deep_research/prompts.py`.
 - Subagents loaded from `subagents.yaml`.
 
@@ -245,7 +285,7 @@ Current subagents:
 | Subagent | Purpose | Tools |
 | --- | --- | --- |
 | `planner` | Decompose the request and save `research_plan.md`. | `write_file` |
-| `researcher` | Search, scrape, and save source-backed findings. | `web_search`, `deep_scrape`, `write_file`, `read_file` |
+| `researcher` | Collect usable sources and save source-backed findings. | `collect_sources`, `web_search`, `deep_scrape`, `write_file`, `read_file` |
 | `analyst` | Run Python for numeric/data analysis. | `python_repl`, `write_file`, `read_file` |
 | `verifier` | Run deterministic report verification and save repair notes. | `read_file`, `verify_report_file`, `write_file` |
 
@@ -271,11 +311,27 @@ Tools are defined in `deep_research/tools.py` by `build_tools(context)`.
 - `registry`
 - `search_client`
 - `scraper`
+- `activity`
 - `on_progress`
 - `repl`
 - `metrics`
 
 Each tool updates metrics and can emit progress events.
+
+### collect_sources
+
+`collect_sources(query, target_count, max_results)` is the preferred source acquisition tool for normal research branches.
+
+Important behavior:
+
+- Searches Tavily for more candidates than the requested usable-source target, capped at a small recovery budget.
+- Registers every candidate in `SourceRegistry` so IDs remain deterministic.
+- Scrapes candidates in order until the target number of usable sources is collected.
+- Skips blocked pages, bot checks, low-content pages, and fetch failures by returning them under `unusable_sources`.
+- Returns citable entries only under `usable_sources`; each usable entry has `source_usable: true` and a saved `content_path`.
+- Sets `needs_more_sources: true` when the query did not produce enough usable sources, telling the researcher to run a better follow-up query.
+
+This tool prevents one bad page, such as a 403 or a Cloudflare challenge, from ending the full research run.
 
 ### web_search
 
@@ -289,7 +345,7 @@ Important behavior:
 - Returned results include `needs_scrape: true`.
 - Snippets are not returned to the model as evidence.
 
-Search results are candidates only. Verification will not pass a report that cites a source that was only searched and never scraped.
+Search results are candidates only. Verification will not pass a report that cites a source that was only searched and never scraped. Use this manually for targeted follow-up; use `collect_sources` for ordinary source gathering.
 
 ### deep_scrape
 
@@ -302,6 +358,7 @@ Important behavior:
 - Uses `PlaywrightScraper`.
 - Saves source markdown to `source_docs/source_<id>.md`.
 - Returns only a compact excerpt to the model to avoid provider token limits.
+- Returns `source_usable: false` instead of raising when the page is blocked, low quality, or cannot be fetched. Those records must not be cited.
 
 ### write_file and read_file
 
@@ -409,6 +466,8 @@ Expected artifacts:
 | File or directory | Purpose |
 | --- | --- |
 | `request.md` | Original research request. |
+| `activity.md` / `activity.jsonl` | Visible progress feed and machine-readable progress events. |
+| `model_routes.json` | Per-role provider/model/key-slot manifest without API key values. |
 | `research_plan.md` | Plan written by planner/root agent. |
 | `sources.jsonl` | Machine-readable source registry. |
 | `source_docs/` | Scraped source markdown. |
@@ -416,6 +475,7 @@ Expected artifacts:
 | `report.md` | Final report. |
 | `verification.json` | Deterministic citation verification output. |
 | `metrics.json` | Runtime, tool counts, source count, error state. |
+| `failure.json` | Present only when the graph raises an error; classifies provider/tool failures. |
 | `transcript.log` | Raw streamed graph content captured during the run. |
 | `error.txt` | Present only when the graph raises an error. |
 
@@ -576,21 +636,28 @@ Recoverable behavior:
 - Final model text can be reconstructed into `report.md`.
 - Mangled scrape targets can be resolved to registered source candidates.
 - Playwright scrape failures fall back to HTTP extraction.
+- Blocked, bot-protected, low-content, and non-fetchable pages return unusable source payloads and are skipped by `collect_sources`.
 
 Run-ending behavior:
 
 - Provider API errors.
 - Search client failures.
-- Scrape failures after both Playwright and HTTP fallback fail.
 - Path safety violations.
 - Empty required inputs.
 
 When a run-ending error occurs, the runner still writes:
 
+- `failure.json`
 - `error.txt`
 - `transcript.log`
 - `verification.json`
 - `metrics.json`
+
+`failure.json` classifies common provider and tool failures into categories such
+as `quota_or_rate_limit`, `token_budget_exceeded`, `tool_call_parse_error`, and
+`auth_or_permission`. It also records retryability, provider retry-after seconds
+when present, and a suggested action. The same category is mirrored in
+`metrics.json` under `error_category`.
 
 The CLI returns exit code `1` for `ResearchRunError` and exit code `2` for configuration or user-input errors.
 

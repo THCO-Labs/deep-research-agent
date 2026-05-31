@@ -11,8 +11,9 @@ from langchain.messages import HumanMessage
 
 from deep_research.artifacts import RunArtifacts
 from deep_research.deepagents_profiles import configure_deepagents_profiles
-from deep_research.model_router import build_agent_models
-from deep_research.progress import ProgressCallback, ProgressMode, progress_line, summarize_stream_update
+from deep_research.errors import classify_exception
+from deep_research.model_router import build_agent_models, describe_model_routes, route_summary
+from deep_research.progress import ActivityLog, ProgressCallback, ProgressMode, summarize_stream_event
 from deep_research.prompts import orchestrator_prompt
 from deep_research.settings import Settings
 from deep_research.source_registry import SourceRegistry
@@ -45,6 +46,7 @@ def create_agent(settings: Settings, context: ToolContext):
         tools=[
             tools["web_search"],
             tools["deep_scrape"],
+            tools["collect_sources"],
             tools["write_file"],
             tools["read_file"],
             tools["verify_report_file"],
@@ -76,7 +78,11 @@ def run_research(
 
     started = time.perf_counter()
     artifacts = RunArtifacts.create(settings.out_dir, question)
-    _emit(on_update, progress_mode, "run", f"created {artifacts.run_dir}")
+    activity = ActivityLog(artifacts, on_update=on_update, progress_mode=progress_mode)
+    _emit(activity, "run", f"created {artifacts.run_dir}")
+    model_routes = describe_model_routes(settings)
+    artifacts.write_json("model_routes.json", model_routes)
+    _emit(activity, "model", route_summary(settings))
     artifacts.write_text("request.md", question.strip() + "\n")
     artifacts.write_text(
         "research_plan.md",
@@ -87,11 +93,12 @@ def run_research(
         settings=settings,
         artifacts=artifacts,
         registry=registry,
+        activity=activity,
         on_progress=on_update if progress_mode == "live" else None,
     )
-    _emit(on_update, progress_mode, "run", "building agent graph")
+    _emit(activity, "run", "building agent graph")
     agent = create_agent(settings, context)
-    _emit(on_update, progress_mode, "run", "starting research stream")
+    _emit(activity, "run", "starting research stream")
 
     transcript: list[str] = []
     last_model_content = ""
@@ -117,16 +124,26 @@ def run_research(
                         last_model_content = str(content)
                     if on_update and progress_mode == "raw":
                         on_update(line)
-                    elif on_update and progress_mode == "live":
-                        summary = summarize_stream_update(node, content)
-                        if summary:
-                            on_update(summary)
+                    event = summarize_stream_event(node, content)
+                    if event:
+                        stage, message = event
+                        if progress_mode == "live":
+                            # Tool-specific progress is emitted by ToolContext;
+                            # this captures visible agent narration.
+                            if stage != "tool":
+                                activity.emit(stage, message, kind="agent_stream")
+                        else:
+                            activity.emit(stage, message, kind="agent_stream")
     except Exception as exc:
         stream_error = exc
-        _emit(on_update, progress_mode, "error", f"{type(exc).__name__}: {exc}")
+        failure = classify_exception(exc)
+        artifacts.write_json("failure.json", failure.to_dict())
+        _emit(activity, "error", f"{failure.category}: {failure.message}")
+        if failure.retry_after_seconds is not None:
+            _emit(activity, "retry", f"provider suggested retry after {failure.retry_after_seconds}s")
         artifacts.write_text("error.txt", f"{type(exc).__name__}: {exc}\n")
 
-    _emit(on_update, progress_mode, "run", "finalizing artifacts")
+    _emit(activity, "run", "finalizing artifacts")
     artifacts.write_text("transcript.log", "\n\n".join(transcript))
     _finalize_artifacts(artifacts, registry, context, started, last_model_content, stream_error)
     result = ResearchRunResult(
@@ -137,18 +154,12 @@ def run_research(
     )
     if stream_error is not None:
         raise ResearchRunError(f"Research run failed: {stream_error}", result) from stream_error
-    _emit(on_update, progress_mode, "run", "complete")
+    _emit(activity, "run", "complete")
     return result
 
 
-def _emit(
-    on_update: ProgressCallback | None,
-    progress_mode: ProgressMode,
-    stage: str,
-    message: str,
-) -> None:
-    if on_update and progress_mode == "live":
-        on_update(progress_line(stage, message))
+def _emit(activity: ActivityLog, stage: str, message: str) -> None:
+    activity.emit(stage, message)
 
 
 def _finalize_artifacts(
@@ -174,11 +185,18 @@ def _finalize_artifacts(
             report_path.read_text(encoding="utf-8"),
             registry.records,
             verification_rounds=context.metrics.verification_rounds,
+            source_loader=lambda record: artifacts.read_text(record.content_path or ""),
         )
     else:
-        result = verify_report("", registry.records, verification_rounds=context.metrics.verification_rounds)
+        result = verify_report(
+            "",
+            registry.records,
+            verification_rounds=context.metrics.verification_rounds,
+            source_loader=lambda record: artifacts.read_text(record.content_path or ""),
+        )
     artifacts.write_json("verification.json", result.to_dict())
     metrics = context.metrics.to_dict()
+    failure = classify_exception(stream_error) if stream_error is not None else None
     metrics.update(
         {
             "runtime_seconds": round(time.perf_counter() - started, 3),
@@ -189,8 +207,13 @@ def _finalize_artifacts(
             "google_key_count": len(context.settings.google_key_pool),
             "groq_key_count": len(context.settings.groq_key_pool),
             "error": None if stream_error is None else f"{type(stream_error).__name__}: {stream_error}",
+            "error_category": None if failure is None else failure.category,
+            "retryable": None if failure is None else failure.retryable,
+            "retry_after_seconds": None if failure is None else failure.retry_after_seconds,
         }
     )
+    if failure is not None:
+        artifacts.write_json("failure.json", failure.to_dict())
     artifacts.write_json("metrics.json", metrics)
 
 

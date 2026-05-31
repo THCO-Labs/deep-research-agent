@@ -38,10 +38,13 @@ class Metrics:
 class VerificationResult:
     valid: bool
     citation_validity_score: float
+    source_support_score: float = 1.0
     missing_sources: list[str] = field(default_factory=list)
     unused_sources: list[int] = field(default_factory=list)
     unscraped_sources: list[int] = field(default_factory=list)
     unsupported_claims: list[str] = field(default_factory=list)
+    weakly_supported_claims: list[dict[str, Any]] = field(default_factory=list)
+    support_checks: list[dict[str, Any]] = field(default_factory=list)
     source_list_errors: list[str] = field(default_factory=list)
     cited_source_ids: list[int] = field(default_factory=list)
     total_citations: int = 0

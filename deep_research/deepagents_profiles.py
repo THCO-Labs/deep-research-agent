@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from threading import Lock
 
+from collections.abc import Mapping
+
 from deepagents.profiles import HarnessProfile, register_harness_profile
 
 from deep_research.settings import Settings
 
 WRITE_TODOS_TOOL = "write_todos"
+GROQ_PROVIDER = "groq"
+GOOGLE_PROVIDER = "google_genai"
 
 _PROFILE_LOCK = Lock()
 _CONFIGURED_PROFILE_KEYS: set[str] = set()
@@ -21,22 +25,19 @@ def configure_deepagents_profiles(settings: Settings) -> None:
     a first-class progress stream, so Groq runs remove that internal tool from
     the visible tool set while keeping subagent dispatch and file safety.
     """
-    profile_keys = _profile_keys(settings)
-    if not profile_keys:
+    profiles = _profiles(settings)
+    if not profiles:
         return
 
     with _PROFILE_LOCK:
-        for key in profile_keys:
+        for key, profile in profiles.items():
             if key in _CONFIGURED_PROFILE_KEYS:
                 continue
-            register_harness_profile(
-                key,
-                HarnessProfile(excluded_tools=frozenset({WRITE_TODOS_TOOL})),
-            )
+            register_harness_profile(key, profile)
             _CONFIGURED_PROFILE_KEYS.add(key)
 
 
-def _profile_keys(settings: Settings) -> tuple[str, ...]:
+def _profiles(settings: Settings) -> Mapping[str, HarnessProfile]:
     models = {
         settings.model,
         settings.fast_model,
@@ -47,6 +48,12 @@ def _profile_keys(settings: Settings) -> tuple[str, ...]:
         settings.judge_model,
     }
     groq_models = {model for model in models if model.startswith("groq:")}
-    if settings.provider != "groq" and not groq_models:
-        return ()
-    return tuple(sorted({"groq", *groq_models}))
+    google_models = {model for model in models if model.startswith("google_genai:")}
+    profiles: dict[str, HarnessProfile] = {}
+    if settings.provider == "groq" or groq_models:
+        groq_profile = HarnessProfile(excluded_tools=frozenset({WRITE_TODOS_TOOL}))
+        for key in sorted({GROQ_PROVIDER, *groq_models}):
+            profiles[key] = groq_profile
+    if settings.provider == "google" or google_models:
+        profiles[GOOGLE_PROVIDER] = HarnessProfile()
+    return profiles
