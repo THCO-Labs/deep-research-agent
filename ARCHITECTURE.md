@@ -8,6 +8,7 @@ The system is built around four principles:
 
 - **Evidence first**: search results are only candidates; relied-on sources must be scraped before they can pass verification.
 - **Recoverable acquisition**: normal research uses `collect_sources` to over-fetch candidates, scrape them, skip blocked or low-quality pages, and return only usable sources for citation.
+- **Source quality ranking**: source candidates receive deterministic quality metadata so scrape budget is spent on stronger public-web evidence first.
 - **Reproducibility**: every run gets its own artifact directory with the request, sources, report, transcript, metrics, and verification output.
 - **Provider flexibility**: model execution can use Google Gemini or Groq through LangChain model strings.
 - **Measurability**: reports are checked by deterministic citation validation and can be scored through a benchmark harness.
@@ -40,6 +41,7 @@ flowchart TD
     Verifier --> Artifacts
     Agent --> Report["report.md"]
     Runner --> Activity["activity.md / activity.jsonl"]
+    Runner --> Manifest["run_manifest.json"]
     Runner --> Routes["model_routes.json"]
     Runner --> Metrics["metrics.json"]
 ```
@@ -112,6 +114,9 @@ Optional keys:
 - `DEEP_RESEARCH_JUDGE_MODEL`
 - `DEEP_RESEARCH_SCRAPE_CHAR_LIMIT`
 - `DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT`
+- `DEEP_RESEARCH_MODEL_FALLBACKS`
+- `DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS`
+- `DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS`
 
 API key pools:
 
@@ -135,10 +140,30 @@ Google keys, the active default graph uses all four credentials:
 Key values are never written to progress output or metrics.
 
 Each run writes `model_routes.json` before the graph starts. The manifest
-contains role, provider, model, key pool size, key slot, and safe key label for
-each role. It is the authoritative artifact for confirming that a hybrid run is
-actually distributing work across `GROQ_API_KEY`, `GROQ_API_KEY1`,
-`GOOGLE_API_KEY`, and `GOOGLE_API_KEY1` without leaking secret values.
+contains role, provider, model, key pool size, key slot, safe key label, and
+fallback route list for each role. It is the authoritative artifact for
+confirming that a hybrid run is actually distributing work across
+`GROQ_API_KEY`, `GROQ_API_KEY1`, `GOOGLE_API_KEY`, and `GOOGLE_API_KEY1` without
+leaking secret values.
+
+Each run also writes `run_manifest.json`. This higher-level reproducibility
+manifest includes the redacted `Settings` payload, progress mode, runtime
+metadata, selected package versions, and the full `model_routes.json` payload.
+It records key-pool counts and whether a Tavily key was present, but never
+stores API key values.
+
+Model fallback is enabled by default through `DEEP_RESEARCH_MODEL_FALLBACKS`.
+When a model call fails with a classified quota/rate-limit, token-budget, or
+tool-call parse failure, the wrapper tries same-provider alternate keys first.
+In hybrid mode it then tries a cross-provider fallback route, such as Groq to
+Google or Google to Groq. Fallback attempts are emitted to `activity.md` and
+`activity.jsonl` under `model_fallback`.
+
+If all available fallback candidates return retryable provider windows, the
+wrapper waits only when the shortest retry delay is within
+`DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS`, then retries the candidate
+chain up to `DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS`. Waits are visible as
+`model_retry` events.
 
 Provider defaults:
 
@@ -195,6 +220,7 @@ deep_research/
   __main__.py             Module entry point for `python -m deep_research`
   cli.py                  CLI parsing, settings construction, final status output
   settings.py             Env loading, provider/model resolution, budget defaults
+  manifest.py             Redacted run manifest and runtime metadata
   model_router.py         Provider model construction and API key-pool routing
   errors.py               Provider/tool failure classification
   agent.py                DeepAgents graph creation and run lifecycle
@@ -209,6 +235,8 @@ deep_research/
   models.py               SourceRecord, Metrics, VerificationResult dataclasses
   urls.py                 URL canonicalization
   progress.py             Concise live progress rendering
+  activity.py             Terminal/HTML activity viewer for run progress
+  repair.py               Deterministic verification repair checklist renderer
   eval.py                 Benchmark execution harness
   eval_report.py          Benchmark result summarizer
 ```
@@ -258,7 +286,7 @@ Detailed steps:
 1. The CLI configures UTF-8 console output to avoid Windows encoding crashes.
 2. `Settings.from_env()` loads `.env`, resolves provider/model defaults, and validates keys.
 3. `RunArtifacts.create()` creates `runs/<timestamp-slug>/`.
-4. `request.md`, `activity.md`, `activity.jsonl`, `model_routes.json`, an initial `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
+4. `request.md`, `activity.md`, `activity.jsonl`, `activity.html`, `run_manifest.json`, `model_routes.json`, an initial `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
 5. A `SourceRegistry` is attached to the run.
 6. A `ToolContext` is created with settings, artifacts, registry, Tavily client, scraper, Python REPL, metrics, and progress callback.
 7. `create_deep_agent()` builds the root DeepAgents graph with root tools and subagents.
@@ -267,7 +295,8 @@ Detailed steps:
 10. If the graph fails, `failure.json`, `error.txt`, `verification.json`, and `metrics.json` are still written.
 11. If the graph returns final report text but does not write `report.md`, the runner reconstructs `report.md` and appends a real `## Sources` section from the registry.
 12. Deterministic verification runs against the final report and source registry.
-13. Metrics are written and artifact paths are printed.
+13. If verification fails, `findings/verification_repair.md` is generated from the deterministic verifier output.
+14. Metrics are written and artifact paths are printed.
 
 ## 7. Agents and Subagents
 
@@ -326,7 +355,8 @@ Important behavior:
 
 - Searches Tavily for more candidates than the requested usable-source target, capped at a small recovery budget.
 - Registers every candidate in `SourceRegistry` so IDs remain deterministic.
-- Scrapes candidates in order until the target number of usable sources is collected.
+- Ranks candidates by `source_quality_score` before scraping, preserving stable source IDs.
+- Scrapes ranked candidates until the target number of usable sources is collected.
 - Skips blocked pages, bot checks, low-content pages, and fetch failures by returning them under `unusable_sources`.
 - Returns citable entries only under `usable_sources`; each usable entry has `source_usable: true` and a saved `content_path`.
 - Sets `needs_more_sources: true` when the query did not produce enough usable sources, telling the researcher to run a better follow-up query.
@@ -422,6 +452,11 @@ content_hash
 content_path
 query
 snippet
+search_score
+source_quality_score
+source_quality_label
+source_quality_type
+source_quality_reasons
 ```
 
 Registry behavior:
@@ -433,6 +468,7 @@ Registry behavior:
 - Registry state is persisted to `sources.jsonl` after updates.
 - Duplicate canonical URLs reuse the same source ID.
 - Duplicate content hashes reuse the existing scraped source.
+- Source quality is scored at search time and refreshed after scrape using URL, title, snippet, search score, extracted text length, and domain/source-type signals.
 
 The registry is the source of truth for citation numbers. The final report must cite source IDs from this registry.
 
@@ -467,11 +503,14 @@ Expected artifacts:
 | --- | --- |
 | `request.md` | Original research request. |
 | `activity.md` / `activity.jsonl` | Visible progress feed and machine-readable progress events. |
+| `activity.html` | Auto-refreshing local dashboard for visible progress events. |
+| `run_manifest.json` | Redacted settings, runtime metadata, package versions, progress mode, and model routes. |
 | `model_routes.json` | Per-role provider/model/key-slot manifest without API key values. |
 | `research_plan.md` | Plan written by planner/root agent. |
 | `sources.jsonl` | Machine-readable source registry. |
 | `source_docs/` | Scraped source markdown. |
 | `findings/` | Intermediate researcher/analyst/verifier notes. |
+| `findings/verification_repair.md` | Deterministic repair checklist written when final verification fails. |
 | `report.md` | Final report. |
 | `verification.json` | Deterministic citation verification output. |
 | `metrics.json` | Runtime, tool counts, source count, error state. |
@@ -503,23 +542,35 @@ Verification checks:
 - Sources are sequential without gaps.
 - Factual paragraphs have at least one inline citation.
 - Cited sources were actually scraped, not merely returned by search.
+- Each cited paragraph is compared against the text of its cited source files with a conservative lexical support check.
 
 Verification output is `VerificationResult`:
 
 ```text
 valid
 citation_validity_score
+source_support_score
 missing_sources
 unused_sources
 unscraped_sources
 unsupported_claims
+weakly_supported_claims
+support_checks
 source_list_errors
 cited_source_ids
 total_citations
 verification_rounds
 ```
 
-A report only passes when it has citations, parseable sources, no unsupported factual paragraphs, and no cited-but-unscraped sources.
+`unsupported_claims` means factual paragraphs with no citation. `weakly_supported_claims` means cited paragraphs whose important terms are not sufficiently present in the cited scraped source text. This is not full semantic proof, but it catches citation laundering and obvious hallucinated claims while keeping the check deterministic and benchmarkable.
+
+A report only passes when it has citations, parseable sources, no uncited factual paragraphs, no weakly supported cited claims, and no cited-but-unscraped sources.
+
+When final verification fails, `deep_research/repair.py` renders
+`findings/verification_repair.md` from the same `VerificationResult`. The file
+lists required repairs, weakly supported claims, uncited paragraphs, source-list
+errors, missing sources, and cited-but-unscraped sources. This artifact is
+deterministic and does not depend on a model verifier completing successfully.
 
 ## 14. Progress Feed
 
@@ -547,6 +598,21 @@ Example `live` output:
 ```
 
 The progress feed shows observable execution state. It does not expose private model chain-of-thought.
+
+Every run also maintains `activity.html`, an auto-refreshing local dashboard
+rendered from `activity.jsonl`. The dashboard shows stage counts, the latest
+event, recent search/scrape/write/verify/fallback activity, and a clear note
+that it is not hidden chain-of-thought. For terminal inspection, use:
+
+```powershell
+python -m deep_research.activity --follow
+python -m deep_research.activity --latest --out runs --follow
+python -m deep_research.activity runs/<run-dir>
+python -m deep_research.activity runs/<run-dir> --follow
+```
+
+If no run directory is passed, the activity viewer selects the newest run under
+`runs/` or the directory provided with `--out`.
 
 ## 15. Report Reconstruction
 
@@ -583,6 +649,8 @@ Final metrics additions:
 - `report_exists`
 - `report_reconstructed`
 - `verification_valid`
+- `avg_source_quality_score`
+- `strong_source_count`
 - `error`
 
 Metrics are intentionally machine-readable so benchmark runs and external dashboards can consume them later.
@@ -609,19 +677,34 @@ Evaluation per case:
 
 1. Run the research agent.
 2. Read `report.md`, `verification.json`, and `metrics.json`.
-3. Compute required-answer match.
-4. Compute source-support score from source requirements and citation score.
+3. Compute expected-answer token recall and must-include phrase coverage.
+4. Compute source-requirement coverage against the report plus scraped source documents.
 5. Run an LLM judge with `settings.fast_model`.
 6. Write one JSONL result row.
+
+The harness treats a failed research case as data, not as a process-level abort.
+`ResearchRunError` rows keep any generated run directory, report path,
+verification, metrics, `failure.json` category, retry metadata, and repair path.
+Unexpected runner failures and judge failures are also captured in the result
+row so the remaining dataset cases still run.
 
 Summary metrics:
 
 - `accuracy`
 - `citation_validity`
 - `source_support`
+- `must_include_coverage`
+- `source_requirement_coverage`
 - `llm_judge`
 - `avg_runtime_seconds`
 - `failures`
+- `run_failure_count`
+- `failure_categories`
+
+Each result row also records missing must-include phrases, missing source
+requirements, source-quality metrics, tool counts, failure category, report
+reconstruction status, and repair checklist path. These fields make benchmark
+failures diagnosable without re-reading the whole run directory.
 
 `deep_research/eval_report.py` can summarize a completed result JSONL file.
 
@@ -729,11 +812,11 @@ Likely future extensions:
 
 - Add a document-ingestion subsystem for PDFs, DOCX, CSV, and local corpora.
 - Replace `PythonREPL` with a maintained, sandboxed analysis runtime.
-- Add domain-level source quality scoring.
+- Tune source-quality weights with benchmark outcomes and domain allow/block lists.
 - Add per-source extraction metadata such as HTTP status, content type, and final redirect chain.
 - Add semantic claim verification against scraped source chunks.
-- Add retry/backoff policies for provider quota errors.
-- Add an interactive browser or TUI progress dashboard.
+- Add durable pause/resume scheduling for retry windows longer than the configured in-process wait cap.
+- Add optional richer browser controls for filtering and comparing activity timelines.
 - Add a report renderer for HTML/PDF exports.
 - Add benchmark history tracking across runs.
 

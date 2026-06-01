@@ -39,7 +39,9 @@ class PlaywrightScraper:
             browser = playwright.chromium.launch(headless=True)
             try:
                 page = browser.new_page()
-                page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                response = page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                if response is not None and response.status >= 400:
+                    raise RuntimeError(f"HTTP {response.status} while fetching {url}")
                 try:
                     page.wait_for_load_state("networkidle", timeout=5_000)
                 except PlaywrightTimeoutError:
@@ -100,10 +102,14 @@ def _is_challenge_page(soup: BeautifulSoup, *, title: str = "") -> bool:
     title_text = title.strip().lower()
     challenge_markers = (
         "just a moment",
+        "403 forbidden",
+        "access denied",
         "performing security verification",
+        "request blocked",
         "enable javascript and cookies to continue",
         "checking if the site connection is secure",
         "verify you are human",
+        "temporarily blocked",
         "cloudflare",
         "cf-browser-verification",
     )

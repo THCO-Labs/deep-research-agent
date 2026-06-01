@@ -46,6 +46,25 @@ class MultiSearchClient:
         return {"results": results[:max_results]}
 
 
+class QualitySearchClient:
+    def search(self, query: str, max_results: int) -> dict:
+        results = [
+            {
+                "title": "What is fine-tuning?",
+                "url": "https://medium.com/example/fine-tuning",
+                "content": "blog snippet",
+                "score": 1.0,
+            },
+            {
+                "title": "Fine-tuning API documentation",
+                "url": "https://docs.example.com/fine-tuning",
+                "content": "official documentation snippet",
+                "score": 0.2,
+            },
+        ]
+        return {"results": results[:max_results]}
+
+
 class FakeScraper:
     def fetch(self, url: str) -> ScrapeResult:
         return ScrapeResult(
@@ -74,6 +93,19 @@ class FakeChallengeScraper:
 class FakeFailingScraper:
     def fetch(self, url: str) -> ScrapeResult:
         raise RuntimeError("403 Forbidden")
+
+
+class RecordingScraper:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    def fetch(self, url: str) -> ScrapeResult:
+        self.urls.append(url)
+        return ScrapeResult(
+            url=url,
+            title=f"Title for {url}",
+            markdown="Official documentation contains substantial fine-tuning guidance. " * 20,
+        )
 
 
 def test_mocked_research_tools_generate_required_artifacts(tmp_path: Path) -> None:
@@ -147,6 +179,33 @@ def test_collect_sources_skips_bad_candidates_and_returns_usable_sources(tmp_pat
     assert result["unusable_sources"][0]["source_id"] == 1
     assert registry.records[0].content_path is None
     assert registry.records[1].content_path == "source_docs/source_2.md"
+
+
+def test_collect_sources_ranks_higher_quality_candidates_before_scraping(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        google_api_key="google",
+        tavily_api_key="tavily",
+        max_sources=2,
+    )
+    artifacts = RunArtifacts.create(tmp_path, "quality ranking")
+    registry = SourceRegistry(artifacts)
+    scraper = RecordingScraper()
+    context = ToolContext(
+        settings,
+        artifacts,
+        registry,
+        search_client=QualitySearchClient(),
+        scraper=scraper,
+    )
+    tools = build_tools(context)
+
+    result = tools["collect_sources"].invoke({"query": "fine tuning docs", "target_count": 1})
+
+    assert scraper.urls == ["https://docs.example.com/fine-tuning"]
+    assert result["usable_sources"][0]["source_quality_type"] == "official_docs"
+    assert result["candidate_ranking"][0]["source_id"] == 2
 
 
 def test_deep_scrape_returns_unusable_source_for_quality_rejection(tmp_path: Path) -> None:

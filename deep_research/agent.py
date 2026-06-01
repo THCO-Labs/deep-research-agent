@@ -12,9 +12,11 @@ from langchain.messages import HumanMessage
 from deep_research.artifacts import RunArtifacts
 from deep_research.deepagents_profiles import configure_deepagents_profiles
 from deep_research.errors import classify_exception
+from deep_research.manifest import build_run_manifest
 from deep_research.model_router import build_agent_models, describe_model_routes, route_summary
 from deep_research.progress import ActivityLog, ProgressCallback, ProgressMode, summarize_stream_event
 from deep_research.prompts import orchestrator_prompt
+from deep_research.repair import render_verification_repair_markdown
 from deep_research.settings import Settings
 from deep_research.source_registry import SourceRegistry
 from deep_research.subagents import load_subagents
@@ -38,7 +40,11 @@ class ResearchRunError(RuntimeError):
 
 def create_agent(settings: Settings, context: ToolContext):
     configure_deepagents_profiles(settings)
-    models = build_agent_models(settings)
+    models = build_agent_models(
+        settings,
+        on_fallback=lambda message: context.emit("model_fallback", message),
+        on_retry=lambda message: context.emit("model_retry", message),
+    )
     tools = build_tools(context)
     root = settings.project_root
     return create_deep_agent(
@@ -82,6 +88,16 @@ def run_research(
     _emit(activity, "run", f"created {artifacts.run_dir}")
     model_routes = describe_model_routes(settings)
     artifacts.write_json("model_routes.json", model_routes)
+    artifacts.write_json(
+        "run_manifest.json",
+        build_run_manifest(
+            question=question,
+            settings=settings,
+            run_dir=artifacts.run_dir,
+            model_routes=model_routes,
+            progress_mode=progress_mode,
+        ),
+    )
     _emit(activity, "model", route_summary(settings))
     artifacts.write_text("request.md", question.strip() + "\n")
     artifacts.write_text(
@@ -145,7 +161,15 @@ def run_research(
 
     _emit(activity, "run", "finalizing artifacts")
     artifacts.write_text("transcript.log", "\n\n".join(transcript))
-    _finalize_artifacts(artifacts, registry, context, started, last_model_content, stream_error)
+    _finalize_artifacts(
+        artifacts,
+        registry,
+        context,
+        started,
+        last_model_content,
+        stream_error,
+        activity=activity,
+    )
     result = ResearchRunResult(
         run_dir=artifacts.run_dir,
         report_path=artifacts.resolve_path("report.md"),
@@ -169,6 +193,7 @@ def _finalize_artifacts(
     started: float,
     last_model_content: str = "",
     stream_error: Exception | None = None,
+    activity: ActivityLog | None = None,
 ) -> None:
     report_path = artifacts.resolve_path("report.md")
     report_reconstructed = False
@@ -195,8 +220,26 @@ def _finalize_artifacts(
             source_loader=lambda record: artifacts.read_text(record.content_path or ""),
         )
     artifacts.write_json("verification.json", result.to_dict())
+    repair_checklist_path = None
+    if not result.valid:
+        repair_path = artifacts.write_text(
+            "findings/verification_repair.md",
+            render_verification_repair_markdown(
+                result,
+                registry.records,
+                report_exists=report_path.exists(),
+            ),
+        )
+        repair_checklist_path = str(repair_path.relative_to(artifacts.run_dir))
+        if activity is not None:
+            activity.emit("repair", f"wrote {repair_checklist_path}")
     metrics = context.metrics.to_dict()
     failure = classify_exception(stream_error) if stream_error is not None else None
+    scraped_quality_scores = [
+        record.source_quality_score
+        for record in registry.records
+        if record.content_path and record.source_quality_score > 0
+    ]
     metrics.update(
         {
             "runtime_seconds": round(time.perf_counter() - started, 3),
@@ -204,6 +247,14 @@ def _finalize_artifacts(
             "report_exists": report_path.exists(),
             "report_reconstructed": report_reconstructed,
             "verification_valid": result.valid,
+            "avg_source_quality_score": round(
+                sum(scraped_quality_scores) / len(scraped_quality_scores),
+                4,
+            )
+            if scraped_quality_scores
+            else 0.0,
+            "strong_source_count": sum(1 for score in scraped_quality_scores if score >= 0.70),
+            "repair_checklist_path": repair_checklist_path,
             "google_key_count": len(context.settings.google_key_pool),
             "groq_key_count": len(context.settings.groq_key_pool),
             "error": None if stream_error is None else f"{type(stream_error).__name__}: {stream_error}",

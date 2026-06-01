@@ -47,6 +47,9 @@ class Settings:
     judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
     scrape_char_limit: int = 15_000
     tool_excerpt_char_limit: int = 2_500
+    model_fallbacks: bool = True
+    provider_retry_attempts: int = 1
+    provider_retry_max_wait_seconds: int = 60
     live: bool = False
     google_api_key: str = field(default="", repr=False)
     google_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
@@ -72,6 +75,9 @@ class Settings:
         verifier_model: str | None = None,
         judge_model: str | None = None,
         scrape_char_limit: int | None = None,
+        model_fallbacks: bool | None = None,
+        provider_retry_attempts: int | None = None,
+        provider_retry_max_wait_seconds: int | None = None,
         live: bool = False,
     ) -> "Settings":
         root = Path(project_root or Path.cwd()).resolve()
@@ -145,6 +151,17 @@ class Settings:
             tool_excerpt_char_limit=int(
                 os.environ.get("DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT") or _default_excerpt_limit(resolved_provider)
             ),
+            model_fallbacks=_resolve_bool(
+                model_fallbacks,
+                os.environ.get("DEEP_RESEARCH_MODEL_FALLBACKS"),
+                default=True,
+            ),
+            provider_retry_attempts=provider_retry_attempts
+            if provider_retry_attempts is not None
+            else int(os.environ.get("DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS") or "1"),
+            provider_retry_max_wait_seconds=provider_retry_max_wait_seconds
+            if provider_retry_max_wait_seconds is not None
+            else int(os.environ.get("DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS") or "60"),
             live=live,
             google_api_key=google_api_key,
             google_api_keys=google_api_keys,
@@ -185,6 +202,10 @@ class Settings:
             raise ConfigError("max_sources must be at least 1.")
         if self.max_rounds < 0:
             raise ConfigError("max_rounds must be zero or greater.")
+        if self.provider_retry_attempts < 0:
+            raise ConfigError("provider_retry_attempts must be zero or greater.")
+        if self.provider_retry_max_wait_seconds < 0:
+            raise ConfigError("provider_retry_max_wait_seconds must be zero or greater.")
         if self.scrape_char_limit < 1_000:
             raise ConfigError("scrape_char_limit must be at least 1000.")
         if self.tool_excerpt_char_limit < 500:
@@ -295,6 +316,19 @@ def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:
             values.append(value)
             seen.add(value)
     return tuple(values)
+
+
+def _resolve_bool(value: bool | None, raw: str | None, *, default: bool) -> bool:
+    if value is not None:
+        return value
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"Unsupported boolean value: {raw}")
 
 
 def _numbered_env_names(base_name: str) -> list[str]:

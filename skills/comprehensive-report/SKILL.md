@@ -17,7 +17,7 @@ description: Orchestrates a benchmark-grade public-web research lifecycle with s
 8. End with `## Sources` using `[source_id] Title: URL` lines.
 9. Dispatch `verifier` and run `verify_report_file("report.md")`.
 10. If verification fails, repair the report and rerun verification. In balanced mode, perform at most 2 repair rounds.
-11. If residual issues remain after the repair budget, include a brief `## Verification Notes` section and leave details in `verification.json`.
+11. If residual issues remain after the repair budget, include a brief `## Verification Notes` section and leave details in `verification.json` plus `findings/verification_repair.md`.
 
 ## Report Structure
 
@@ -31,7 +31,9 @@ Use the structure that best fits the question:
 
 - `request.md`, `research_plan.md`, `sources.jsonl`, `report.md`, `verification.json`, and `metrics.json` must exist.
 - Every relied-on source must be scraped, not just discovered.
+- Prefer sources with `source_quality_label` of `excellent` or `strong`; weak sources need a clear reason.
 - `collect_sources` entries under `unusable_sources` or `deep_scrape` results with `source_usable: false` must not be cited.
 - Every factual paragraph must have at least one inline citation.
+- Every cited paragraph must be supported by the scraped source text strongly enough to avoid `weakly_supported_claims`.
 - Source IDs in citations must match `sources.jsonl`.
-- Failed verification checks must be visible in `verification.json`.
+- Failed verification checks must be visible in `verification.json` and summarized in `findings/verification_repair.md`.

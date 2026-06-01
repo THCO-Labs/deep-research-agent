@@ -52,3 +52,27 @@ def test_source_registry_dedupes_by_canonical_url_and_content(tmp_path: Path) ->
     assert first.id == second.id
     assert scraped.id == scraped_duplicate.id
     assert len(registry.records) == 2
+
+
+def test_source_registry_persists_quality_metadata(tmp_path: Path) -> None:
+    artifacts = RunArtifacts.create(tmp_path, "quality registry")
+    registry = SourceRegistry(artifacts)
+
+    record = registry.upsert_search_result(
+        url="https://docs.example.com/guide",
+        title="Example documentation",
+        query="docs",
+        snippet="Official documentation",
+        search_score=0.5,
+    )
+    scraped = registry.record_scrape(
+        url=record.url,
+        title=record.title,
+        markdown="Official documentation includes detailed implementation guidance. " * 20,
+        extraction_method="playwright",
+    )
+
+    source_doc = (artifacts.run_dir / scraped.content_path).read_text(encoding="utf-8")
+    assert scraped.source_quality_label in {"strong", "excellent"}
+    assert "Source quality:" in source_doc
+    assert "source_quality_score" in (artifacts.run_dir / "sources.jsonl").read_text(encoding="utf-8")

@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import asdict, dataclass
-from typing import TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatResult
+from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 
+from deep_research.errors import classify_exception
 from deep_research.settings import Settings
 
 ModelLike: TypeAlias = str | BaseChatModel
+FallbackCallback: TypeAlias = Callable[[str], None]
+RetryCallback: TypeAlias = Callable[[str], None]
+
+FALLBACK_ERROR_CATEGORIES = {
+    "quota_or_rate_limit",
+    "token_budget_exceeded",
+    "tool_call_parse_error",
+}
 
 _ROLE_KEY_INDEX = {
     "orchestrator": 0,
@@ -56,34 +70,163 @@ class ModelRoute:
     key_count: int
     key_slot: int | None
     key_label: str | None
+    fallback_routes: list[dict[str, object]]
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-def build_agent_models(settings: Settings) -> RoutedAgentModels:
+class FallbackChatModel(BaseChatModel):
+    primary: Any
+    fallbacks: tuple[Any, ...] = ()
+    route_label: str = ""
+    on_fallback: FallbackCallback | None = None
+    on_retry: RetryCallback | None = None
+    retry_attempts: int = 0
+    retry_max_wait_seconds: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "deep_research_fallback"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return _call_with_classified_fallbacks(
+            self.primary,
+            self.fallbacks,
+            lambda model: model._generate(messages, stop=stop, run_manager=run_manager, **kwargs),
+            route_label=self.route_label,
+            on_fallback=self.on_fallback,
+            on_retry=self.on_retry,
+            retry_attempts=self.retry_attempts,
+            retry_max_wait_seconds=self.retry_max_wait_seconds,
+        )
+
+    def bind_tools(
+        self,
+        tools: list[dict[str, Any] | type | Callable | Any],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, Any]:
+        bound_primary = self.primary.bind_tools(tools, tool_choice=tool_choice, **kwargs)
+        bound_fallbacks = tuple(
+            fallback.bind_tools(tools, tool_choice=tool_choice, **kwargs)
+            for fallback in self.fallbacks
+        )
+        return ClassifiedFallbackRunnable(
+            primary=bound_primary,
+            fallbacks=bound_fallbacks,
+            route_label=self.route_label,
+            on_fallback=self.on_fallback,
+            on_retry=self.on_retry,
+            retry_attempts=self.retry_attempts,
+            retry_max_wait_seconds=self.retry_max_wait_seconds,
+        )
+
+
+class ClassifiedFallbackRunnable(Runnable[Any, Any]):
+    def __init__(
+        self,
+        *,
+        primary: Runnable[Any, Any],
+        fallbacks: tuple[Runnable[Any, Any], ...],
+        route_label: str,
+        on_fallback: FallbackCallback | None = None,
+        on_retry: RetryCallback | None = None,
+        retry_attempts: int = 0,
+        retry_max_wait_seconds: int = 0,
+    ) -> None:
+        self.primary = primary
+        self.fallbacks = fallbacks
+        self.route_label = route_label
+        self.on_fallback = on_fallback
+        self.on_retry = on_retry
+        self.retry_attempts = retry_attempts
+        self.retry_max_wait_seconds = retry_max_wait_seconds
+
+    def invoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return _call_with_classified_fallbacks(
+            self.primary,
+            self.fallbacks,
+            lambda runnable: runnable.invoke(input, config=config, **kwargs),
+            route_label=self.route_label,
+            on_fallback=self.on_fallback,
+            on_retry=self.on_retry,
+            retry_attempts=self.retry_attempts,
+            retry_max_wait_seconds=self.retry_max_wait_seconds,
+        )
+
+    async def ainvoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return await _acall_with_classified_fallbacks(
+            self.primary,
+            self.fallbacks,
+            lambda runnable: runnable.ainvoke(input, config=config, **kwargs),
+            route_label=self.route_label,
+            on_fallback=self.on_fallback,
+            on_retry=self.on_retry,
+            retry_attempts=self.retry_attempts,
+            retry_max_wait_seconds=self.retry_max_wait_seconds,
+        )
+
+
+def build_agent_models(
+    settings: Settings,
+    *,
+    on_fallback: FallbackCallback | None = None,
+    on_retry: RetryCallback | None = None,
+) -> RoutedAgentModels:
     return RoutedAgentModels(
-        orchestrator=model_for_role(settings, "orchestrator", settings.model),
-        fast=model_for_role(settings, "fast", settings.fast_model),
-        planner=model_for_role(settings, "planner", settings.planner_model),
-        researcher=model_for_role(settings, "researcher", settings.researcher_model),
-        analyst=model_for_role(settings, "analyst", settings.analyst_model),
-        verifier=model_for_role(settings, "verifier", settings.verifier_model),
+        orchestrator=model_for_role(settings, "orchestrator", settings.model, on_fallback=on_fallback, on_retry=on_retry),
+        fast=model_for_role(settings, "fast", settings.fast_model, on_fallback=on_fallback, on_retry=on_retry),
+        planner=model_for_role(settings, "planner", settings.planner_model, on_fallback=on_fallback, on_retry=on_retry),
+        researcher=model_for_role(settings, "researcher", settings.researcher_model, on_fallback=on_fallback, on_retry=on_retry),
+        analyst=model_for_role(settings, "analyst", settings.analyst_model, on_fallback=on_fallback, on_retry=on_retry),
+        verifier=model_for_role(settings, "verifier", settings.verifier_model, on_fallback=on_fallback, on_retry=on_retry),
     )
 
 
-def model_for_role(settings: Settings, role: str, model_spec: str) -> ModelLike:
+def model_for_role(
+    settings: Settings,
+    role: str,
+    model_spec: str,
+    *,
+    on_fallback: FallbackCallback | None = None,
+    on_retry: RetryCallback | None = None,
+) -> ModelLike:
     provider, model_name = _split_model_spec(model_spec)
-    if provider == "groq" and settings.groq_key_pool:
-        return ChatGroq(
-            model=model_name,
-            api_key=_key_for_role(settings.groq_key_pool, role),
+    primary = _chat_model_for_role(settings, role, provider, model_name)
+    if primary is not None:
+        fallbacks = tuple(
+            _chat_model_for_route(route)
+            for route in _fallback_routes(settings, role, provider, model_name)
         )
-    if provider == "google_genai" and settings.google_key_pool:
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            api_key=_key_for_role(settings.google_key_pool, role),
-        )
+        if settings.model_fallbacks and (fallbacks or settings.provider_retry_attempts > 0):
+            return FallbackChatModel(
+                primary=primary,
+                fallbacks=fallbacks,
+                route_label=f"{role} {provider}:{model_name}",
+                on_fallback=on_fallback,
+                on_retry=on_retry,
+                retry_attempts=settings.provider_retry_attempts,
+                retry_max_wait_seconds=settings.provider_retry_max_wait_seconds,
+            )
+        return primary
     return model_spec
 
 
@@ -91,6 +234,9 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
     routes = [_describe_role(settings, role) for role in _ROLE_MODEL_ATTRS]
     return {
         "provider": settings.provider,
+        "model_fallbacks": settings.model_fallbacks,
+        "provider_retry_attempts": settings.provider_retry_attempts,
+        "provider_retry_max_wait_seconds": settings.provider_retry_max_wait_seconds,
         "google_key_count": len(settings.google_key_pool),
         "groq_key_count": len(settings.groq_key_pool),
         "roles": [route.to_dict() for route in routes],
@@ -103,7 +249,9 @@ def route_summary(settings: Settings) -> str:
     parts = []
     for route in routes:
         key = route.key_label or "no-key"
-        parts.append(f"{route.role}={route.provider}:{route.model} via {key}")
+        fallback_count = len(route.fallback_routes) if settings.model_fallbacks else 0
+        fallback_text = f" +{fallback_count} fallback(s)" if fallback_count else ""
+        parts.append(f"{route.role}={route.provider}:{route.model} via {key}{fallback_text}")
     return "; ".join(parts)
 
 
@@ -127,6 +275,12 @@ def _describe_role(settings: Settings, role: str) -> ModelRoute:
         key_count=len(keys),
         key_slot=key_slot,
         key_label=_key_label(provider, key_slot),
+        fallback_routes=[
+            _route_to_dict(route)
+            for route in _fallback_routes(settings, role, provider, model_name)
+        ]
+        if settings.model_fallbacks
+        else [],
     )
 
 
@@ -152,6 +306,222 @@ def _key_label(provider: str, key_slot: int | None) -> str | None:
     if base is None:
         return None
     return base if key_slot == 0 else f"{base}{key_slot}"
+
+
+def _chat_model_for_role(
+    settings: Settings,
+    role: str,
+    provider: str,
+    model_name: str,
+) -> BaseChatModel | None:
+    keys = _key_pool_for_provider(settings, provider)
+    if not keys:
+        return None
+    key_slot = _key_slot_for_role(keys, role)
+    return _chat_model_for_route(
+        {
+            "provider": provider,
+            "model": model_name,
+            "api_key": keys[key_slot],
+        }
+    )
+
+
+def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
+    provider = str(route["provider"])
+    model_name = str(route["model"])
+    api_key = str(route["api_key"])
+    if provider == "groq":
+        return ChatGroq(model=model_name, api_key=api_key)
+    if provider == "google_genai":
+        return ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
+    raise ValueError(f"Unsupported model provider: {provider}")
+
+
+def _fallback_routes(
+    settings: Settings,
+    role: str,
+    provider: str,
+    model_name: str,
+) -> list[dict[str, object]]:
+    if not settings.model_fallbacks:
+        return []
+    routes: list[dict[str, object]] = []
+    keys = _key_pool_for_provider(settings, provider)
+    primary_slot = _key_slot_for_role(keys, role) if keys else None
+    for slot, api_key in enumerate(keys):
+        if slot == primary_slot:
+            continue
+        routes.append(
+            {
+                "provider": provider,
+                "model": model_name,
+                "api_key": api_key,
+                "key_slot": slot,
+                "key_label": _key_label(provider, slot),
+                "fallback_type": "same_provider_key",
+            }
+        )
+
+    if settings.provider == "hybrid":
+        alternate_provider, alternate_model = _alternate_hybrid_model(provider)
+        alternate_keys = _key_pool_for_provider(settings, alternate_provider)
+        if alternate_keys:
+            alternate_slot = _key_slot_for_role(alternate_keys, role)
+            routes.append(
+                {
+                    "provider": alternate_provider,
+                    "model": alternate_model,
+                    "api_key": alternate_keys[alternate_slot],
+                    "key_slot": alternate_slot,
+                    "key_label": _key_label(alternate_provider, alternate_slot),
+                    "fallback_type": "cross_provider",
+                }
+            )
+    return routes
+
+
+def _alternate_hybrid_model(provider: str) -> tuple[str, str]:
+    if provider == "groq":
+        return "google_genai", "gemini-2.5-flash"
+    if provider == "google_genai":
+        return "groq", "openai/gpt-oss-20b"
+    return provider, ""
+
+
+def _route_to_dict(route: dict[str, object]) -> dict[str, object]:
+    return {
+        "provider": route["provider"],
+        "model": route["model"],
+        "key_slot": route["key_slot"],
+        "key_label": route["key_label"],
+        "fallback_type": route["fallback_type"],
+    }
+
+
+def _call_with_classified_fallbacks(
+    primary: Any,
+    fallbacks: tuple[Any, ...],
+    call: Callable[[Any], Any],
+    *,
+    route_label: str,
+    on_fallback: FallbackCallback | None,
+    on_retry: RetryCallback | None,
+    retry_attempts: int,
+    retry_max_wait_seconds: int,
+) -> Any:
+    candidates = (primary, *fallbacks)
+    last_error: Exception | None = None
+    for retry_index in range(retry_attempts + 1):
+        failures = []
+        for index, candidate in enumerate(candidates):
+            try:
+                return call(candidate)
+            except Exception as exc:
+                last_error = exc
+                failures.append(classify_exception(exc))
+                if index == len(candidates) - 1:
+                    break
+                if not _should_try_fallback(exc):
+                    raise
+                _emit_fallback(on_fallback, route_label, exc, index + 1)
+
+        wait_seconds = _retry_wait_seconds(failures, retry_max_wait_seconds)
+        if retry_index < retry_attempts and wait_seconds is not None:
+            _emit_retry(on_retry, route_label, wait_seconds, retry_index + 1, retry_attempts)
+            time.sleep(wait_seconds)
+            continue
+        break
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No model candidates were available.")
+
+
+async def _acall_with_classified_fallbacks(
+    primary: Any,
+    fallbacks: tuple[Any, ...],
+    call: Callable[[Any], Any],
+    *,
+    route_label: str,
+    on_fallback: FallbackCallback | None,
+    on_retry: RetryCallback | None,
+    retry_attempts: int,
+    retry_max_wait_seconds: int,
+) -> Any:
+    candidates = (primary, *fallbacks)
+    last_error: Exception | None = None
+    for retry_index in range(retry_attempts + 1):
+        failures = []
+        for index, candidate in enumerate(candidates):
+            try:
+                return await call(candidate)
+            except Exception as exc:
+                last_error = exc
+                failures.append(classify_exception(exc))
+                if index == len(candidates) - 1:
+                    break
+                if not _should_try_fallback(exc):
+                    raise
+                _emit_fallback(on_fallback, route_label, exc, index + 1)
+
+        wait_seconds = _retry_wait_seconds(failures, retry_max_wait_seconds)
+        if retry_index < retry_attempts and wait_seconds is not None:
+            _emit_retry(on_retry, route_label, wait_seconds, retry_index + 1, retry_attempts)
+            await asyncio.sleep(wait_seconds)
+            continue
+        break
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No model candidates were available.")
+
+
+def _should_try_fallback(exc: Exception) -> bool:
+    return classify_exception(exc).category in FALLBACK_ERROR_CATEGORIES
+
+
+def _emit_fallback(
+    on_fallback: FallbackCallback | None,
+    route_label: str,
+    exc: Exception,
+    next_index: int,
+) -> None:
+    if on_fallback is None:
+        return
+    failure = classify_exception(exc)
+    on_fallback(
+        f"{route_label} failed with {failure.category}; trying fallback candidate {next_index}"
+    )
+
+
+def _retry_wait_seconds(
+    failures: list[Any],
+    retry_max_wait_seconds: int,
+) -> int | None:
+    if retry_max_wait_seconds <= 0 or not failures:
+        return None
+    if any(failure.category not in FALLBACK_ERROR_CATEGORIES for failure in failures):
+        return None
+    if any(not failure.retryable or failure.retry_after_seconds is None for failure in failures):
+        return None
+    wait_seconds = min(int(failure.retry_after_seconds or 0) for failure in failures)
+    if wait_seconds <= 0 or wait_seconds > retry_max_wait_seconds:
+        return None
+    return wait_seconds
+
+
+def _emit_retry(
+    on_retry: RetryCallback | None,
+    route_label: str,
+    wait_seconds: int,
+    attempt: int,
+    max_attempts: int,
+) -> None:
+    if on_retry is None:
+        return
+    on_retry(
+        f"{route_label} all candidates hit retryable provider limits; "
+        f"waiting {wait_seconds}s before retry {attempt}/{max_attempts}"
+    )
 
 
 def _split_model_spec(model_spec: str) -> tuple[str, str]:

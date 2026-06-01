@@ -141,6 +141,39 @@ def test_settings_supports_role_model_overrides(tmp_path: Path, monkeypatch: pyt
     assert settings.judge_model == "groq:openai/gpt-oss-20b"
 
 
+def test_settings_supports_disabling_model_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MODEL_FALLBACKS=false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MODEL_FALLBACKS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.model_fallbacks is False
+
+
+def test_settings_supports_provider_retry_window_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS=2\n"
+        "DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS=15\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider_retry_attempts == 2
+    assert settings.provider_retry_max_wait_seconds == 15
+
+
 def test_settings_supports_explicit_provider_and_short_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

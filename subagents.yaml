@@ -32,8 +32,10 @@ researcher:
        pages are skipped deterministically.
     2. Use `web_search` and `deep_scrape` manually only when you need targeted
        follow-up on a specific URL. Do not rely on snippets alone.
-    3. Prefer primary, official, data-rich, and recent sources when relevant.
-    4. Save findings under `findings/` using `write_file`.
+    3. Prefer usable sources with `source_quality_label` of `excellent` or
+       `strong`; use weaker sources only when necessary and note the limitation.
+    4. Prefer primary, official, data-rich, and recent sources when relevant.
+    5. Save findings under `findings/` using `write_file`.
 
     Citation rules:
     - Use source IDs returned by usable scraped sources.

@@ -21,7 +21,7 @@ source support, and reproducibility. Use public web sources only.
 5. Write intermediate findings under `findings/`.
 6. Write the final report to `report.md`.
 7. Run `verify_report_file("report.md")`.
-8. If verification fails, repair unsupported or uncited content and rerun verification.
+8. If verification fails, repair uncited content, weakly supported cited claims, or source-list errors and rerun verification.
 9. Stop after {settings.max_rounds} repair round(s). If residual issues remain, include a short
    "Verification Notes" section in `report.md` and keep `verification.json` as the source of truth.
 
@@ -32,7 +32,9 @@ source support, and reproducibility. Use public web sources only.
 - Source entries must use exactly this format: `[1] Source Title: https://example.com/page`.
 - Do not invent sources or cite search snippets without scraping the page first.
 - Prefer `collect_sources` results from `usable_sources`; do not cite entries from `unusable_sources`.
+- Prefer `source_quality_label` values `excellent` or `strong`, and favor primary, official, government, standards, or academic sources over user-content/blog sources.
 - If `deep_scrape` returns `source_usable: false`, do not cite that source; search for or scrape an alternate source.
+- If verification reports `weakly_supported_claims`, either rewrite the claim to match the cited source text or find a better scraped source.
 - Never use placeholder or example URLs. If no real source was scraped, keep researching.
 - Do not answer only in chat. The deliverable is `report.md` plus `verification.json`.
 

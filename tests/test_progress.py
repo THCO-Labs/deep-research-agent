@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from deep_research.artifacts import RunArtifacts
-from deep_research.progress import ActivityLog, summarize_stream_event, summarize_stream_update
+from deep_research.progress import (
+    ActivityLog,
+    format_activity_summary,
+    load_activity_events,
+    render_activity_html,
+    summarize_stream_event,
+    summarize_stream_update,
+)
 from deep_research.scraper import ScrapeResult
 from deep_research.settings import Settings
 from deep_research.source_registry import SourceRegistry
@@ -55,6 +62,24 @@ def test_activity_log_persists_jsonl_and_markdown(tmp_path: Path) -> None:
     assert "**search**: registered 2 source candidate(s)" in (artifacts.run_dir / "activity.md").read_text(
         encoding="utf-8"
     )
+    assert "Deep Research Activity" in (artifacts.run_dir / "activity.html").read_text(encoding="utf-8")
+
+
+def test_activity_summary_and_html_are_safe_to_read(tmp_path: Path) -> None:
+    artifacts = RunArtifacts.create(tmp_path, "activity viewer")
+    activity = ActivityLog(artifacts, progress_mode="quiet")
+
+    activity.emit("model_fallback", "orchestrator failed <secret>; trying fallback")
+    activity.emit("verify", "passed: score 1.00")
+
+    events = load_activity_events(artifacts.run_dir)
+    summary = format_activity_summary(events, run_name=artifacts.run_dir.name, limit=2)
+    html = render_activity_html(events, run_name=artifacts.run_dir.name)
+
+    assert "model_fallback=1" in summary
+    assert "verify=1" in summary
+    assert "&lt;secret&gt;" in html
+    assert "hidden chain-of-thought" in html
 
 
 def test_tool_context_emits_progress_events(tmp_path: Path) -> None:

@@ -30,6 +30,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analyst-model", default=None)
     parser.add_argument("--verifier-model", default=None)
     parser.add_argument("--judge-model", default=None)
+    parser.add_argument(
+        "--no-model-fallbacks",
+        action="store_true",
+        help="Disable automatic model/key fallback routing.",
+    )
+    parser.add_argument(
+        "--provider-retry-attempts",
+        type=int,
+        default=None,
+        help="In-process retry attempts when every model candidate returns a retryable provider wait window.",
+    )
+    parser.add_argument(
+        "--provider-retry-max-wait-seconds",
+        type=int,
+        default=None,
+        help="Maximum provider retry-after delay the runner will wait for before surfacing the failure.",
+    )
     parser.add_argument("--live", action="store_true", help="Mark this run as live in settings/metrics.")
     parser.add_argument(
         "--progress",
@@ -61,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
             verifier_model=args.verifier_model,
             judge_model=args.judge_model,
             scrape_char_limit=args.scrape_char_limit,
+            model_fallbacks=not args.no_model_fallbacks,
+            provider_retry_attempts=args.provider_retry_attempts,
+            provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
             live=args.live,
         )
         result = run_research(

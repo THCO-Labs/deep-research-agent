@@ -16,6 +16,14 @@ class SourceRecord:
     content_path: str | None = None
     query: str | None = None
     snippet: str | None = None
+    search_score: float | None = None
+    source_quality_score: float = 0.0
+    source_quality_label: str = "unscored"
+    source_quality_type: str = "unscored"
+    source_quality_reasons: list[str] = field(default_factory=list)
+    source_relevance_score: float = 0.0
+    source_relevance_matched_terms: list[str] = field(default_factory=list)
+    source_relevance_missing_terms: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

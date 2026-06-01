@@ -19,6 +19,21 @@ def test_html_to_markdown_rejects_cloudflare_challenge() -> None:
         html_to_markdown(html, title="Just a moment...")
 
 
+def test_html_to_markdown_rejects_access_denied_page() -> None:
+    html = """
+    <html>
+      <head><title>Access denied</title></head>
+      <body>
+        <h1>403 Forbidden</h1>
+        <p>Access denied. Your request was blocked by a security service.</p>
+      </body>
+    </html>
+    """
+
+    with pytest.raises(ScrapeQualityError):
+        html_to_markdown(html, title="Access denied")
+
+
 def test_html_to_markdown_prefers_article_over_navigation() -> None:
     nav_links = "".join(f"<a href='/nav-{i}'>Navigation item {i}</a>" for i in range(100))
     html = f"""

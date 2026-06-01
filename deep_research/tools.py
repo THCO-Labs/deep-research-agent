@@ -71,6 +71,7 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
                 title=item.get("title") or url,
                 query=cleaned,
                 snippet=item.get("content"),
+                search_score=_float_or_none(item.get("score")),
             )
             results.append(
                 {
@@ -79,6 +80,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
                     "url": record.url,
                     "canonical_url": record.canonical_url,
                     "score": item.get("score"),
+                    "source_quality_score": record.source_quality_score,
+                    "source_quality_label": record.source_quality_label,
+                    "source_quality_type": record.source_quality_type,
+                    "source_quality_reasons": record.source_quality_reasons,
                     "needs_scrape": True,
                 }
             )
@@ -118,6 +123,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             "excerpt": excerpt,
             "saved_chars": len(markdown),
             "source_usable": True,
+            "source_quality_score": record.source_quality_score,
+            "source_quality_label": record.source_quality_label,
+            "source_quality_type": record.source_quality_type,
+            "source_quality_reasons": record.source_quality_reasons,
         }
         context.emit(
             "scrape",
@@ -157,7 +166,9 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
         unusable_sources = []
         seen_urls: set[str] = set()
 
-        for candidate in candidates:
+        ranked_candidates = _rank_source_candidates(candidates)
+
+        for candidate in ranked_candidates:
             if len(usable_sources) >= target:
                 break
             url = str(candidate.get("url") or "")
@@ -178,6 +189,16 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             "query": cleaned,
             "target_count": target,
             "candidate_count": len(candidates),
+            "candidate_ranking": [
+                {
+                    "source_id": candidate.get("source_id"),
+                    "url": candidate.get("url"),
+                    "source_quality_score": candidate.get("source_quality_score"),
+                    "source_quality_label": candidate.get("source_quality_label"),
+                    "source_quality_type": candidate.get("source_quality_type"),
+                }
+                for candidate in ranked_candidates
+            ],
             "usable_count": len(usable_sources),
             "unusable_count": len(unusable_sources),
             "usable_sources": usable_sources,
@@ -345,3 +366,25 @@ def _bounded_preview(content: str, limit: int) -> str:
     if len(content) <= limit:
         return content
     return content[:limit].rstrip()
+
+
+def _rank_source_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        candidate
+        for _, candidate in sorted(
+            enumerate(candidates),
+            key=lambda item: (
+                -float(item[1].get("source_quality_score") or 0.0),
+                item[0],
+            ),
+        )
+    ]
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
