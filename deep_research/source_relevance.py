@@ -62,7 +62,7 @@ def score_source_relevance(
         weighted_terms[term] = max(weighted_terms.get(term, 0.0), 0.6)
     if markdown is not None:
         for term in _tokens(markdown[:4000]):
-            weighted_terms[term] = max(weighted_terms.get(term, 0.0), 0.5)
+            weighted_terms[term] = max(weighted_terms.get(term, 0.0), 0.7)
 
     matched = sorted(term for term in query_terms if term in weighted_terms)
     missing = sorted(query_terms - set(matched))

@@ -27,6 +27,7 @@ def test_redacted_settings_excludes_secret_values(tmp_path: Path) -> None:
     assert payload["google_key_count"] == 1
     assert payload["groq_key_count"] == 1
     assert payload["tavily_api_key_present"] is True
+    assert payload["precollect_sources"] is True
     assert "secret" not in str(payload)
 
 

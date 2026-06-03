@@ -8,8 +8,8 @@ from typing import Iterable, Literal
 from dotenv import load_dotenv
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq", "hybrid"]
-ResolvedProvider = Literal["google", "groq", "hybrid"]
+Provider = Literal["auto", "google", "groq", "hybrid", "ollama"]
+ResolvedProvider = Literal["google", "groq", "hybrid", "ollama"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
 GOOGLE_DEFAULT_FAST_MODEL = "google_genai:gemini-2.5-flash"
@@ -47,6 +47,7 @@ class Settings:
     judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
     scrape_char_limit: int = 15_000
     tool_excerpt_char_limit: int = 2_500
+    precollect_sources: bool = True
     model_fallbacks: bool = True
     provider_retry_attempts: int = 1
     provider_retry_max_wait_seconds: int = 60
@@ -75,6 +76,7 @@ class Settings:
         verifier_model: str | None = None,
         judge_model: str | None = None,
         scrape_char_limit: int | None = None,
+        precollect_sources: bool | None = None,
         model_fallbacks: bool | None = None,
         provider_retry_attempts: int | None = None,
         provider_retry_max_wait_seconds: int | None = None,
@@ -151,6 +153,11 @@ class Settings:
             tool_excerpt_char_limit=int(
                 os.environ.get("DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT") or _default_excerpt_limit(resolved_provider)
             ),
+            precollect_sources=_resolve_bool(
+                precollect_sources,
+                os.environ.get("DEEP_RESEARCH_PRECOLLECT_SOURCES"),
+                default=True,
+            ),
             model_fallbacks=_resolve_bool(
                 model_fallbacks,
                 os.environ.get("DEEP_RESEARCH_MODEL_FALLBACKS"),
@@ -196,7 +203,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq", "hybrid"}:
+        if self.provider not in {"google", "groq", "hybrid", "ollama"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.max_sources < 1:
             raise ConfigError("max_sources must be at least 1.")
@@ -216,6 +223,8 @@ class Settings:
             return True
         if self.provider == "groq" and provider_prefix == "groq":
             return True
+        if self.provider == "ollama" and provider_prefix == "ollama":
+            return True
         models = (
             self.model,
             self.fast_model,
@@ -229,7 +238,7 @@ class Settings:
 
 
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
-    if provider in {"groq", "hybrid"}:
+    if provider in {"groq", "hybrid", "ollama"}:
         if mode == "fast":
             return 2, 1
         if mode == "max_quality":
@@ -254,7 +263,7 @@ def _resolve_provider(
         if has_google and has_groq:
             return "hybrid"
         return "groq" if has_groq else "google"
-    if normalized in {"google", "groq", "hybrid"}:
+    if normalized in {"google", "groq", "hybrid", "ollama"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 
@@ -272,6 +281,8 @@ def _resolve_model(
     if provider == "hybrid":
         default_provider, _, _ = _default_model(provider, fast=fast, role=role).partition(":")
         prefix = default_provider
+    elif provider == "ollama":
+        prefix = "ollama"
     else:
         prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
@@ -292,6 +303,8 @@ def _resolve_role_model(
 
 
 def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
+    if provider == "ollama":
+        return "ollama:qwen2.5-coder:1.5b" if fast else "ollama:qwen2.5-coder:7b"
     if provider == "hybrid":
         return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
     if provider == "groq":
@@ -300,11 +313,11 @@ def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
 
 
 def _default_scrape_limit(provider: ResolvedProvider) -> int:
-    return 6_000 if provider in {"groq", "hybrid"} else 15_000
+    return 6_000 if provider in {"groq", "hybrid", "ollama"} else 15_000
 
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:
-    return 900 if provider in {"groq", "hybrid"} else 2_500
+    return 900 if provider in {"groq", "hybrid", "ollama"} else 2_500
 
 
 def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:

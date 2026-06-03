@@ -37,6 +37,7 @@ source support, and reproducibility. Use public web sources only.
 - If verification reports `weakly_supported_claims`, either rewrite the claim to match the cited source text or find a better scraped source.
 - Never use placeholder or example URLs. If no real source was scraped, keep researching.
 - Do not answer only in chat. The deliverable is `report.md` plus `verification.json`.
+- IMPORTANT TOOL CALLING RULE: When using tools, output ONLY valid JSON. Do not include markdown formatting like ```json.
 
 ## Budget
 - Mode: {settings.mode}

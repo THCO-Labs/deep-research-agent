@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scrape-char-limit", type=int, default=None)
     parser.add_argument(
         "--provider",
-        choices=["auto", "google", "groq", "hybrid"],
+        choices=["auto", "google", "groq", "hybrid", "ollama"],
         default=None,
         help="Model provider. auto uses hybrid when Groq and Google keys are present.",
     )
@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-model-fallbacks",
         action="store_true",
         help="Disable automatic model/key fallback routing.",
+    )
+    parser.add_argument(
+        "--no-precollect-sources",
+        action="store_true",
+        help="Disable deterministic source collection before the model graph starts.",
     )
     parser.add_argument(
         "--provider-retry-attempts",
@@ -78,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             verifier_model=args.verifier_model,
             judge_model=args.judge_model,
             scrape_char_limit=args.scrape_char_limit,
+            precollect_sources=not args.no_precollect_sources,
             model_fallbacks=not args.no_model_fallbacks,
             provider_retry_attempts=args.provider_retry_attempts,
             provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,

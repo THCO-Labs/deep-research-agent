@@ -52,7 +52,12 @@ def _profiles(settings: Settings) -> Mapping[str, HarnessProfile]:
     profiles: dict[str, HarnessProfile] = {}
     if settings.provider == "groq" or groq_models:
         groq_profile = HarnessProfile(excluded_tools=frozenset({WRITE_TODOS_TOOL}))
-        for key in sorted({GROQ_PROVIDER, *groq_models}):
+        # Also register under "fallbackchatmodel": when model_fallbacks=True,
+        # every model is wrapped in FallbackChatModel whose _get_ls_params()
+        # derives ls_provider="fallbackchatmodel" from the class name. Without
+        # this registration the deepagents harness cannot find the groq profile
+        # and write_todos is NOT excluded, causing a tool_call_parse_error.
+        for key in sorted({GROQ_PROVIDER, "fallbackchatmodel", *groq_models}):
             profiles[key] = groq_profile
     if settings.provider == "google" or google_models:
         profiles[GOOGLE_PROVIDER] = HarnessProfile()

@@ -156,6 +156,38 @@ def test_settings_supports_disabling_model_fallbacks(tmp_path: Path, monkeypatch
     assert settings.model_fallbacks is False
 
 
+def test_settings_supports_disabling_precollection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_PRECOLLECT_SOURCES=false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PRECOLLECT_SOURCES", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.precollect_sources is False
+
+
+def test_settings_supports_ollama_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "DEEP_RESEARCH_PROVIDER=ollama\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider == "ollama"
+    assert settings.model == "ollama:qwen2.5-coder:7b"
+    assert settings.fast_model == "ollama:qwen2.5-coder:1.5b"
+
+
 def test_settings_supports_provider_retry_window_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"

@@ -48,6 +48,7 @@ _ROLE_MODEL_ATTRS = {
 _KEY_ENV_BASE = {
     "groq": "GROQ_API_KEY",
     "google_genai": "GOOGLE_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
 }
 
 
@@ -88,6 +89,16 @@ class FallbackChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "deep_research_fallback"
+
+    def _get_ls_params(
+        self,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        getter = getattr(self.primary, "_get_ls_params", None)
+        if callable(getter):
+            return getter(stop=stop, **kwargs)
+        return super()._get_ls_params(stop=stop, **kwargs)
 
     def _generate(
         self,
@@ -289,6 +300,8 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.groq_key_pool
     if provider == "google_genai":
         return settings.google_key_pool
+    if provider == "ollama":
+        return ("ollama-local",)
     return ()
 
 
@@ -335,6 +348,9 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
         return ChatGroq(model=model_name, api_key=api_key)
     if provider == "google_genai":
         return ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(model=model_name)
     raise ValueError(f"Unsupported model provider: {provider}")
 
 

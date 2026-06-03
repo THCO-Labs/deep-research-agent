@@ -162,7 +162,9 @@ def _remove_unusable_nodes(soup: BeautifulSoup) -> None:
         "signup",
         "subscribe",
     )
-    for node in soup.find_all(True):
+    for node in list(soup.find_all(True)):
+        if node.parent is None or getattr(node, "attrs", None) is None:
+            continue
         haystack = " ".join(
             str(value).lower()
             for value in (

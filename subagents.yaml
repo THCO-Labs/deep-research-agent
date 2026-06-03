@@ -16,6 +16,7 @@ planner:
     - acceptance criteria for the final report
 
     Save the plan to `research_plan.md` using `write_file`.
+    IMPORTANT TOOL CALLING RULE: When using tools, output ONLY valid JSON. Do not include markdown formatting like ```json.
   tools:
     - write_file
 
@@ -41,6 +42,7 @@ researcher:
     - Use source IDs returned by usable scraped sources.
     - Cite claims inline as [source_id].
     - Include a short "Sources Used" list with each source ID and URL.
+    IMPORTANT TOOL CALLING RULE: When using tools, output ONLY valid JSON. Do not include markdown formatting like ```json.
   tools:
     - collect_sources
     - web_search
@@ -57,6 +59,7 @@ analyst:
     You are a data analyst. Use `python_repl` only for concrete numeric or data
     analysis. Save reproducible analysis notes under `findings/` using `write_file`.
     Include code, outputs, assumptions, and any limitations.
+    IMPORTANT TOOL CALLING RULE: When using tools, output ONLY valid JSON. Do not include markdown formatting like ```json.
   tools:
     - python_repl
     - write_file
@@ -74,6 +77,7 @@ verifier:
 
     If deterministic verification fails, write a concise repair checklist to
     `findings/verification_repair.md`. Do not hide failures in prose.
+    IMPORTANT TOOL CALLING RULE: When using tools, output ONLY valid JSON. Do not include markdown formatting like ```json.
   tools:
     - read_file
     - verify_report_file

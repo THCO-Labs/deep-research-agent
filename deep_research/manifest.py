@@ -17,6 +17,7 @@ PACKAGE_NAMES = (
     "langchain",
     "langchain-google-genai",
     "langchain-groq",
+    "langchain-ollama",
     "playwright",
     "tavily-python",
 )
@@ -59,6 +60,7 @@ def redacted_settings(settings: Settings) -> dict[str, Any]:
         "max_rounds": settings.max_rounds,
         "scrape_char_limit": settings.scrape_char_limit,
         "tool_excerpt_char_limit": settings.tool_excerpt_char_limit,
+        "precollect_sources": settings.precollect_sources,
         "model_fallbacks": settings.model_fallbacks,
         "provider_retry_attempts": settings.provider_retry_attempts,
         "provider_retry_max_wait_seconds": settings.provider_retry_max_wait_seconds,

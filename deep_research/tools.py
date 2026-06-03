@@ -84,6 +84,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
                     "source_quality_label": record.source_quality_label,
                     "source_quality_type": record.source_quality_type,
                     "source_quality_reasons": record.source_quality_reasons,
+                    "source_relevance_score": record.source_relevance_score,
+                    "source_relevance_matched_terms": record.source_relevance_matched_terms,
+                    "source_relevance_missing_terms": record.source_relevance_missing_terms,
+                    "source_rank_score": _source_rank_score(record.source_quality_score, record.source_relevance_score),
                     "needs_scrape": True,
                 }
             )
@@ -100,10 +104,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
         try:
             result: ScrapeResult = context.scraper.fetch(cleaned)
         except ScrapeQualityError as exc:
-            context.emit("scrape", f"rejected unusable source: {cleaned}")
+            context.emit("scrape", f"rejected unusable source: {cleaned} - {exc}")
             return _unusable_source_payload(cleaned, context, str(exc))
         except Exception as exc:
-            context.emit("scrape", f"failed unusable source: {cleaned}")
+            context.emit("scrape", f"failed unusable source: {cleaned} - {exc}")
             return _unusable_source_payload(cleaned, context, f"Scrape failed: {exc}")
 
         markdown = result.markdown[: context.settings.scrape_char_limit]
@@ -127,6 +131,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
             "source_quality_label": record.source_quality_label,
             "source_quality_type": record.source_quality_type,
             "source_quality_reasons": record.source_quality_reasons,
+            "source_relevance_score": record.source_relevance_score,
+            "source_relevance_matched_terms": record.source_relevance_matched_terms,
+            "source_relevance_missing_terms": record.source_relevance_missing_terms,
+            "source_rank_score": _source_rank_score(record.source_quality_score, record.source_relevance_score),
         }
         context.emit(
             "scrape",
@@ -196,6 +204,10 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
                     "source_quality_score": candidate.get("source_quality_score"),
                     "source_quality_label": candidate.get("source_quality_label"),
                     "source_quality_type": candidate.get("source_quality_type"),
+                    "source_relevance_score": candidate.get("source_relevance_score"),
+                    "source_relevance_matched_terms": candidate.get("source_relevance_matched_terms"),
+                    "source_relevance_missing_terms": candidate.get("source_relevance_missing_terms"),
+                    "source_rank_score": candidate.get("source_rank_score"),
                 }
                 for candidate in ranked_candidates
             ],
@@ -374,11 +386,25 @@ def _rank_source_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, 
         for _, candidate in sorted(
             enumerate(candidates),
             key=lambda item: (
+                -_source_rank_score(
+                    item[1].get("source_quality_score"),
+                    item[1].get("source_relevance_score"),
+                ),
+                -float(item[1].get("source_relevance_score") or 0.0),
                 -float(item[1].get("source_quality_score") or 0.0),
                 item[0],
             ),
         )
     ]
+
+
+def _source_rank_score(
+    quality_score: Any,
+    relevance_score: Any,
+) -> float:
+    quality = _float_or_none(quality_score) or 0.0
+    relevance = _float_or_none(relevance_score) or 0.0
+    return round((quality * 0.55) + (relevance * 0.45), 4)
 
 
 def _float_or_none(value: Any) -> float | None:

@@ -74,5 +74,8 @@ def test_source_registry_persists_quality_metadata(tmp_path: Path) -> None:
 
     source_doc = (artifacts.run_dir / scraped.content_path).read_text(encoding="utf-8")
     assert scraped.source_quality_label in {"strong", "excellent"}
+    assert scraped.source_relevance_score > 0
     assert "Source quality:" in source_doc
+    assert "Source relevance:" in source_doc
     assert "source_quality_score" in (artifacts.run_dir / "sources.jsonl").read_text(encoding="utf-8")
+    assert "source_relevance_score" in (artifacts.run_dir / "sources.jsonl").read_text(encoding="utf-8")

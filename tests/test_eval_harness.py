@@ -53,6 +53,8 @@ def test_evaluate_dataset_writes_results_jsonl(tmp_path: Path) -> None:
                 "verification_rounds": 1,
                 "avg_source_quality_score": 0.82,
                 "strong_source_count": 1,
+                "avg_source_relevance_score": 0.91,
+                "high_relevance_source_count": 1,
                 "report_reconstructed": False,
                 "repair_checklist_path": None,
             },
@@ -77,6 +79,7 @@ def test_evaluate_dataset_writes_results_jsonl(tmp_path: Path) -> None:
     assert rows[0]["required_answer_match"] is True
     assert rows[0]["citation_verifier_score"] == 1.0
     assert rows[0]["avg_source_quality_score"] == 0.82
+    assert rows[0]["avg_source_relevance_score"] == 0.91
     assert rows[0]["must_include_coverage"] == 1.0
     assert rows[0]["missing_must_include"] == []
     assert rows[0]["source_requirement_coverage"] == 1.0
@@ -87,6 +90,7 @@ def test_evaluate_dataset_writes_results_jsonl(tmp_path: Path) -> None:
     summary = json.loads((results_path.parent / "summary.json").read_text(encoding="utf-8"))
     assert summary["must_include_coverage"] == 1.0
     assert summary["source_requirement_coverage"] == 1.0
+    assert summary["avg_source_relevance"] == 0.91
 
 
 def test_eval_coverage_reports_missing_terms() -> None:

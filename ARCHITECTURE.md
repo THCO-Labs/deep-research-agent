@@ -8,7 +8,7 @@ The system is built around four principles:
 
 - **Evidence first**: search results are only candidates; relied-on sources must be scraped before they can pass verification.
 - **Recoverable acquisition**: normal research uses `collect_sources` to over-fetch candidates, scrape them, skip blocked or low-quality pages, and return only usable sources for citation.
-- **Source quality ranking**: source candidates receive deterministic quality metadata so scrape budget is spent on stronger public-web evidence first.
+- **Source quality and relevance ranking**: source candidates receive deterministic quality and query-relevance metadata so scrape budget is spent on stronger public-web evidence for the actual question.
 - **Reproducibility**: every run gets its own artifact directory with the request, sources, report, transcript, metrics, and verification output.
 - **Provider flexibility**: model execution can use Google Gemini or Groq through LangChain model strings.
 - **Measurability**: reports are checked by deterministic citation validation and can be scored through a benchmark harness.
@@ -62,7 +62,7 @@ python -m deep_research "research question"
 
 Important options:
 
-- `--provider auto|google|groq|hybrid`: selects model provider. `auto` uses `hybrid` when both Groq and Google keys exist, otherwise it uses the available provider.
+- `--provider auto|google|groq|hybrid|ollama`: selects model provider. `auto` uses `hybrid` when both Groq and Google keys exist, otherwise it uses the available provider.
 - `--model`: overrides the main model. Short names are prefixed by the selected provider.
 - `--fast-model`: overrides the subagent and judge model.
 - `--planner-model`, `--researcher-model`, `--analyst-model`, `--verifier-model`, `--judge-model`: override individual role models.
@@ -114,6 +114,7 @@ Optional keys:
 - `DEEP_RESEARCH_JUDGE_MODEL`
 - `DEEP_RESEARCH_SCRAPE_CHAR_LIMIT`
 - `DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT`
+- `DEEP_RESEARCH_PRECOLLECT_SOURCES`
 - `DEEP_RESEARCH_MODEL_FALLBACKS`
 - `DEEP_RESEARCH_PROVIDER_RETRY_ATTEMPTS`
 - `DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS`
@@ -172,6 +173,7 @@ Provider defaults:
 | `groq` | `groq:openai/gpt-oss-20b` | `groq:openai/gpt-oss-20b` |
 | `google` | `google_genai:gemini-2.5-flash` | `google_genai:gemini-2.5-flash` |
 | `hybrid` | `groq:openai/gpt-oss-20b` | `groq:openai/gpt-oss-20b` |
+| `ollama` | `ollama:qwen2.5-coder:7b` | `ollama:qwen2.5-coder:1.5b` |
 
 Hybrid is preferred automatically when both Groq and Google keys are present because it spreads active subagent work across both providers. If only Groq keys are present, Groq is preferred to avoid Gemini free-tier quota exhaustion. The default Groq model is intentionally the 20B tool-call-capable model because larger Groq models can exceed on-demand token-per-minute limits in multi-step agent flows.
 
@@ -185,9 +187,9 @@ Mode defaults:
 | `fast` on Groq | 2 | 1 |
 | `balanced` on Groq | 3 | 1 |
 | `max_quality` on Groq | 5 | 2 |
-| `fast` on Hybrid | 2 | 1 |
-| `balanced` on Hybrid | 3 | 1 |
-| `max_quality` on Hybrid | 5 | 2 |
+| `fast` on Hybrid/Ollama | 2 | 1 |
+| `balanced` on Hybrid/Ollama | 3 | 1 |
+| `max_quality` on Hybrid/Ollama | 5 | 2 |
 
 Provider-specific scraping defaults:
 
@@ -195,6 +197,7 @@ Provider-specific scraping defaults:
 | --- | ---: | ---: |
 | `groq` | 6,000 | 900 |
 | `hybrid` | 6,000 | 900 |
+| `ollama` | 6,000 | 900 |
 | `google` | 15,000 | 2,500 |
 
 The scraper and file reader save more text to disk than they return to the model. This keeps the run reproducible without overloading low-TPM providers with huge tool responses. Before truncation, scraper output is parsed as HTML, obvious site chrome is removed, and the best article/main-content node is converted to markdown. Bot checks, Cloudflare challenges, JavaScript-only pages, very low-content extracts, and fetch failures such as 403 responses are surfaced as unusable source results instead of being saved as citable source documents or aborting the run.
@@ -269,7 +272,7 @@ sequenceDiagram
     CLI->>S: Settings.from_env()
     CLI->>R: run_research(question, settings)
     R->>A: create run directory
-    R->>A: write request.md and initial research_plan.md
+    R->>A: write request.md and deterministic research_plan.md
     R->>G: create_deep_agent(...)
     G->>T: search, scrape, read/write, verify
     T->>A: persist sources and files
@@ -286,17 +289,18 @@ Detailed steps:
 1. The CLI configures UTF-8 console output to avoid Windows encoding crashes.
 2. `Settings.from_env()` loads `.env`, resolves provider/model defaults, and validates keys.
 3. `RunArtifacts.create()` creates `runs/<timestamp-slug>/`.
-4. `request.md`, `activity.md`, `activity.jsonl`, `activity.html`, `run_manifest.json`, `model_routes.json`, an initial `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
+4. `request.md`, `activity.md`, `activity.jsonl`, `activity.html`, `run_manifest.json`, `model_routes.json`, a deterministic baseline `research_plan.md`, empty `sources.jsonl`, `findings/`, and `source_docs/` are created.
 5. A `SourceRegistry` is attached to the run.
 6. A `ToolContext` is created with settings, artifacts, registry, Tavily client, scraper, Python REPL, metrics, and progress callback.
-7. `create_deep_agent()` builds the root DeepAgents graph with root tools and subagents.
-8. The graph streams updates. In `live` progress mode these are summarized into concise progress lines. All observable progress events are also persisted to `activity.md` and `activity.jsonl`; these logs expose actions, sources, and status, not hidden chain-of-thought.
-9. Tool calls mutate only the run artifact directory and the source registry.
-10. If the graph fails, `failure.json`, `error.txt`, `verification.json`, and `metrics.json` are still written.
-11. If the graph returns final report text but does not write `report.md`, the runner reconstructs `report.md` and appends a real `## Sources` section from the registry.
-12. Deterministic verification runs against the final report and source registry.
-13. If verification fails, `findings/verification_repair.md` is generated from the deterministic verifier output.
-14. Metrics are written and artifact paths are printed.
+7. Unless disabled, a deterministic pre-collection pass runs `collect_sources` for the original question, writes `findings/precollected_sources.md`, and updates `research_plan.md` with the usable-source outcome.
+8. `create_deep_agent()` builds the root DeepAgents graph with root tools and subagents.
+9. The graph streams updates. In `live` progress mode these are summarized into concise progress lines. All observable progress events are also persisted to `activity.md` and `activity.jsonl`; these logs expose actions, sources, and status, not hidden chain-of-thought.
+10. Tool calls mutate only the run artifact directory and the source registry.
+11. If the graph fails, `failure.json`, `error.txt`, `verification.json`, and `metrics.json` are still written.
+12. If the graph returns final report text but does not write `report.md`, the runner reconstructs `report.md` and appends a real `## Sources` section from the registry.
+13. Deterministic verification runs against the final report and source registry.
+14. If verification fails, `findings/verification_repair.md` is generated from the deterministic verifier output.
+15. Metrics are written and artifact paths are printed.
 
 ## 7. Agents and Subagents
 
@@ -355,11 +359,16 @@ Important behavior:
 
 - Searches Tavily for more candidates than the requested usable-source target, capped at a small recovery budget.
 - Registers every candidate in `SourceRegistry` so IDs remain deterministic.
-- Ranks candidates by `source_quality_score` before scraping, preserving stable source IDs.
+- Ranks candidates by combined `source_rank_score`, preserving stable source IDs.
 - Scrapes ranked candidates until the target number of usable sources is collected.
 - Skips blocked pages, bot checks, low-content pages, and fetch failures by returning them under `unusable_sources`.
 - Returns citable entries only under `usable_sources`; each usable entry has `source_usable: true` and a saved `content_path`.
 - Sets `needs_more_sources: true` when the query did not produce enough usable sources, telling the researcher to run a better follow-up query.
+
+`source_rank_score` combines `source_quality_score` and `source_relevance_score`.
+Quality keeps primary, official, government, standards, and academic sources
+ahead when relevance is comparable. Relevance prevents an authoritative page on
+the wrong topic from consuming scrape budget ahead of a directly relevant page.
 
 This tool prevents one bad page, such as a 403 or a Cloudflare challenge, from ending the full research run.
 
@@ -457,6 +466,9 @@ source_quality_score
 source_quality_label
 source_quality_type
 source_quality_reasons
+source_relevance_score
+source_relevance_matched_terms
+source_relevance_missing_terms
 ```
 
 Registry behavior:
@@ -469,6 +481,7 @@ Registry behavior:
 - Duplicate canonical URLs reuse the same source ID.
 - Duplicate content hashes reuse the existing scraped source.
 - Source quality is scored at search time and refreshed after scrape using URL, title, snippet, search score, extracted text length, and domain/source-type signals.
+- Source relevance is scored against the originating query using URL, title, snippet, and extracted text terms.
 
 The registry is the source of truth for citation numbers. The final report must cite source IDs from this registry.
 
@@ -506,7 +519,7 @@ Expected artifacts:
 | `activity.html` | Auto-refreshing local dashboard for visible progress events. |
 | `run_manifest.json` | Redacted settings, runtime metadata, package versions, progress mode, and model routes. |
 | `model_routes.json` | Per-role provider/model/key-slot manifest without API key values. |
-| `research_plan.md` | Plan written by planner/root agent. |
+| `research_plan.md` | Deterministic baseline plan, updated after pre-collection and optionally refined by planner/root agent. |
 | `sources.jsonl` | Machine-readable source registry. |
 | `source_docs/` | Scraped source markdown. |
 | `findings/` | Intermediate researcher/analyst/verifier notes. |
@@ -539,7 +552,7 @@ Verification checks:
 - Every cited ID exists in `sources.jsonl`.
 - Every cited ID appears in the Sources section.
 - Every Sources section URL matches the registry canonical URL.
-- Sources are sequential without gaps.
+- Source IDs may be sparse because search-only candidates also receive registry IDs; the Sources section should list the scraped source IDs used for citation.
 - Factual paragraphs have at least one inline citation.
 - Cited sources were actually scraped, not merely returned by search.
 - Each cited paragraph is compared against the text of its cited source files with a conservative lexical support check.
@@ -651,6 +664,8 @@ Final metrics additions:
 - `verification_valid`
 - `avg_source_quality_score`
 - `strong_source_count`
+- `avg_source_relevance_score`
+- `high_relevance_source_count`
 - `error`
 
 Metrics are intentionally machine-readable so benchmark runs and external dashboards can consume them later.
@@ -702,9 +717,10 @@ Summary metrics:
 - `failure_categories`
 
 Each result row also records missing must-include phrases, missing source
-requirements, source-quality metrics, tool counts, failure category, report
-reconstruction status, and repair checklist path. These fields make benchmark
-failures diagnosable without re-reading the whole run directory.
+requirements, source-quality metrics, source-relevance metrics, tool counts,
+failure category, report reconstruction status, and repair checklist path. These
+fields make benchmark failures diagnosable without re-reading the whole run
+directory.
 
 `deep_research/eval_report.py` can summarize a completed result JSONL file.
 
@@ -838,6 +854,12 @@ Force Google:
 
 ```powershell
 python -m deep_research --provider google "how to build a multi-step web research agent from scratch"
+```
+
+Force local Ollama:
+
+```powershell
+python -m deep_research --provider ollama "how to build a multi-step web research agent from scratch"
 ```
 
 Use raw debug streaming:

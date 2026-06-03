@@ -79,3 +79,28 @@ def test_html_to_markdown_selects_wikipedia_article_body() -> None:
 
     assert "In deep learning, fine-tuning" in markdown
     assert "Main page Contents" not in markdown
+
+
+def test_html_to_markdown_skips_children_of_removed_noise_nodes() -> None:
+    html = """
+    <html><body>
+      <main>
+        <div class="newsletter">
+          <p>This child should not crash after its parent is removed.</p>
+        </div>
+        <article>
+          <h1>Fine-tuning</h1>
+          <p>Fine-tuning adapts a pretrained model to a specific downstream task with task-specific data.</p>
+          <p>The process updates model parameters or a selected subset of trainable parameters.</p>
+          <p>This reuse of learned representations can reduce data and compute requirements.</p>
+          <p>Teams often begin with a broadly trained base model and continue training on narrower examples.</p>
+          <p>The resulting model can specialize behavior while preserving useful general capabilities.</p>
+        </article>
+      </main>
+    </body></html>
+    """
+
+    markdown = html_to_markdown(html, title="Fine-tuning")
+
+    assert "Fine-tuning adapts" in markdown
+    assert "This child should not crash" not in markdown

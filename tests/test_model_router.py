@@ -12,6 +12,9 @@ class FakeChatModel:
     def bind_tools(self, tools, **kwargs):
         return FakeRunnable(self)
 
+    def _get_ls_params(self, stop=None, **kwargs):
+        return {"ls_provider": "groq", "ls_model_name": self.model}
+
 
 class FakeRunnable:
     def __init__(self, model: FakeChatModel) -> None:
@@ -145,6 +148,29 @@ def test_model_route_manifest_exposes_key_slots_without_secret_values(tmp_path: 
     assert "secret" not in str(manifest)
 
 
+def test_model_route_manifest_describes_ollama_without_api_key(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="ollama",
+        model="ollama:qwen2.5-coder:7b",
+        fast_model="ollama:qwen2.5-coder:1.5b",
+        planner_model="ollama:qwen2.5-coder:1.5b",
+        researcher_model="ollama:qwen2.5-coder:1.5b",
+        analyst_model="ollama:qwen2.5-coder:1.5b",
+        verifier_model="ollama:qwen2.5-coder:1.5b",
+        judge_model="ollama:qwen2.5-coder:1.5b",
+        tavily_api_key="tavily",
+    )
+
+    manifest = model_router.describe_model_routes(settings)
+    routes = {route["role"]: route for route in manifest["roles"]}
+
+    assert routes["orchestrator"]["provider"] == "ollama"
+    assert routes["orchestrator"]["key_label"] == "OLLAMA_API_KEY"
+    assert routes["orchestrator"]["key_count"] == 1
+
+
 def test_model_router_can_disable_fallback_wrapping(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(model_router, "ChatGroq", FakeChatModel)
     settings = Settings(
@@ -169,6 +195,16 @@ def test_model_router_can_disable_fallback_wrapping(tmp_path: Path, monkeypatch)
     assert isinstance(model, FakeChatModel)
     assert manifest["model_fallbacks"] is False
     assert manifest["roles"][0]["fallback_routes"] == []
+
+
+def test_fallback_chat_model_proxies_langsmith_provider_params() -> None:
+    model = model_router.FallbackChatModel(
+        primary=FakeChatModel(model="primary", api_key="key-a"),
+        fallbacks=(FakeChatModel(model="fallback", api_key="key-b"),),
+    )
+
+    assert model._get_ls_params()["ls_provider"] == "groq"
+    assert model._get_ls_params()["ls_model_name"] == "primary"
 
 
 def test_bound_model_falls_back_on_rate_limit(tmp_path: Path, monkeypatch) -> None:

@@ -47,7 +47,7 @@ def test_configure_deepagents_profiles_registers_groq_tool_exclusion(
     deepagents_profiles.configure_deepagents_profiles(settings)
     deepagents_profiles.configure_deepagents_profiles(settings)
 
-    assert [key for key, _ in calls] == ["groq", "groq:openai/gpt-oss-20b"]
+    assert [key for key, _ in calls] == ["fallbackchatmodel", "groq", "groq:openai/gpt-oss-20b"]
     assert all(deepagents_profiles.WRITE_TODOS_TOOL in profile.excluded_tools for _, profile in calls)
 
 
@@ -80,4 +80,4 @@ def test_configure_deepagents_profiles_handles_groq_role_model(
 
     deepagents_profiles.configure_deepagents_profiles(settings)
 
-    assert [key for key, _ in calls] == ["groq", "groq:openai/gpt-oss-20b", "google_genai"]
+    assert [key for key, _ in calls] == ["fallbackchatmodel", "groq", "groq:openai/gpt-oss-20b", "google_genai"]

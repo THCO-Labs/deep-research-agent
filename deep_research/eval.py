@@ -140,6 +140,8 @@ def evaluate_dataset(
             "source_count": metrics.get("source_count", 0),
             "avg_source_quality_score": metrics.get("avg_source_quality_score", 0.0),
             "strong_source_count": metrics.get("strong_source_count", 0),
+            "avg_source_relevance_score": metrics.get("avg_source_relevance_score", 0.0),
+            "high_relevance_source_count": metrics.get("high_relevance_source_count", 0),
             "search_count": metrics.get("search_count", 0),
             "scrape_count": metrics.get("scrape_count", 0),
             "verification_rounds": metrics.get("verification_rounds", 0),
@@ -264,6 +266,10 @@ def summarize_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
             sum(float(row.get("avg_source_quality_score", 0.0)) for row in rows) / len(rows),
             4,
         ),
+        "avg_source_relevance": round(
+            sum(float(row.get("avg_source_relevance_score", 0.0)) for row in rows) / len(rows),
+            4,
+        ),
         "llm_judge": round(sum(float(row["llm_judge_score"]) for row in rows) / len(rows), 4),
         "avg_runtime_seconds": round(sum(float(row["runtime_seconds"]) for row in rows) / len(rows), 3),
         "failures": [row["id"] for row in rows if not row["verification_valid"]],
@@ -281,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-rounds", type=int, default=None)
     parser.add_argument("--scrape-char-limit", type=int, default=None)
-    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid"], default=None)
+    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid", "ollama"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--planner-model", default=None)

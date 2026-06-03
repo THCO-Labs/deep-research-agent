@@ -65,6 +65,25 @@ class QualitySearchClient:
         return {"results": results[:max_results]}
 
 
+class RelevanceSearchClient:
+    def search(self, query: str, max_results: int) -> dict:
+        results = [
+            {
+                "title": "Billing API documentation",
+                "url": "https://docs.example.com/billing",
+                "content": "invoice payment subscription documentation",
+                "score": 1.0,
+            },
+            {
+                "title": "Fine tuning model adaptation",
+                "url": "https://example.com/fine-tuning-adaptation",
+                "content": "fine tuning adapts pretrained models to specific tasks",
+                "score": 0.4,
+            },
+        ]
+        return {"results": results[:max_results]}
+
+
 class FakeScraper:
     def fetch(self, url: str) -> ScrapeResult:
         return ScrapeResult(
@@ -206,6 +225,34 @@ def test_collect_sources_ranks_higher_quality_candidates_before_scraping(tmp_pat
     assert scraper.urls == ["https://docs.example.com/fine-tuning"]
     assert result["usable_sources"][0]["source_quality_type"] == "official_docs"
     assert result["candidate_ranking"][0]["source_id"] == 2
+    assert result["candidate_ranking"][0]["source_rank_score"] >= result["candidate_ranking"][1]["source_rank_score"]
+
+
+def test_collect_sources_uses_relevance_when_quality_points_to_wrong_topic(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        google_api_key="google",
+        tavily_api_key="tavily",
+        max_sources=2,
+    )
+    artifacts = RunArtifacts.create(tmp_path, "relevance ranking")
+    registry = SourceRegistry(artifacts)
+    scraper = RecordingScraper()
+    context = ToolContext(
+        settings,
+        artifacts,
+        registry,
+        search_client=RelevanceSearchClient(),
+        scraper=scraper,
+    )
+    tools = build_tools(context)
+
+    result = tools["collect_sources"].invoke({"query": "fine tuning model adaptation", "target_count": 1})
+
+    assert scraper.urls == ["https://example.com/fine-tuning-adaptation"]
+    assert result["candidate_ranking"][0]["source_id"] == 2
+    assert result["candidate_ranking"][0]["source_relevance_score"] > result["candidate_ranking"][1]["source_relevance_score"]
 
 
 def test_deep_scrape_returns_unusable_source_for_quality_rejection(tmp_path: Path) -> None:

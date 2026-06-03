@@ -7,7 +7,7 @@ from typing import Callable
 from deep_research.models import SourceRecord, VerificationResult
 from deep_research.urls import canonicalize_url
 
-CITATION_RE = re.compile(r"\[(\d+)\]")
+CITATION_RE = re.compile(r"\[([0-9][0-9,\s]*)\]")
 SOURCE_LINE_RE = re.compile(r"^\[(\d+)\]\s+(.+?):\s+(https?://\S+)\s*$")
 TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
 SUPPORT_THRESHOLD = 0.28
@@ -60,7 +60,10 @@ STOPWORDS = {
 
 
 def parse_inline_citations(markdown: str) -> list[int]:
-    return [int(match.group(1)) for match in CITATION_RE.finditer(_without_sources(markdown))]
+    citations: list[int] = []
+    for match in CITATION_RE.finditer(_without_sources(markdown)):
+        citations.extend(_citation_ids_from_match(match.group(1)))
+    return citations
 
 
 def parse_source_list(markdown: str) -> dict[int, str]:
@@ -125,7 +128,7 @@ def verify_report(
     source_errors.extend(source_support_errors)
     weak_claims = [check for check in support_checks if not check["supported"]]
     source_support_score = _average_support_score(support_checks)
-    source_sequence_errors = _source_sequence_errors(source_list)
+    source_sequence_errors = _source_sequence_errors(source_list, registry_by_id)
     source_errors.extend(source_sequence_errors)
 
     denominator = max(len(cited_ids) + len(source_list) + len(unsupported) + len(support_checks), 1)
@@ -184,7 +187,7 @@ def _paragraphs_without_citations(markdown: str) -> list[str]:
             continue
         if text.startswith(("-", "*")) and len(text) < 80:
             continue
-        if not CITATION_RE.search(text):
+        if not _has_inline_citation(text):
             unsupported.append(text[:240])
     return unsupported
 
@@ -243,13 +246,26 @@ def _paragraphs_with_citations(markdown: str) -> list[str]:
         text = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
         if not text or text.startswith("#") or text.startswith("|"):
             continue
-        if CITATION_RE.search(text):
+        if _has_inline_citation(text):
             cited.append(text)
     return cited
 
 
 def _strip_citations(text: str) -> str:
     return CITATION_RE.sub("", text)
+
+
+def _has_inline_citation(text: str) -> bool:
+    return bool(parse_inline_citations(text))
+
+
+def _citation_ids_from_match(raw_ids: str) -> list[int]:
+    ids: list[int] = []
+    for part in raw_ids.split(","):
+        stripped = part.strip()
+        if stripped:
+            ids.append(int(stripped))
+    return ids
 
 
 def _significant_tokens(text: str) -> set[str]:
@@ -274,11 +290,21 @@ def _average_support_score(checks: list[dict[str, object]]) -> float:
     return round(sum(float(check["support_score"]) for check in checks) / len(checks), 4)
 
 
-def _source_sequence_errors(source_list: dict[int, str]) -> list[str]:
+def _source_sequence_errors(
+    source_list: dict[int, str],
+    registry_by_id: dict[int, SourceRecord],
+) -> list[str]:
     if not source_list:
         return []
-    expected = list(range(1, max(source_list) + 1))
     actual = sorted(source_list)
-    if actual != expected:
-        return [f"Sources must be sequential without gaps; found {actual}."]
+    scraped_ids = sorted(
+        source_id
+        for source_id, record in registry_by_id.items()
+        if record.content_path and record.content_hash
+    )
+    if scraped_ids and actual != scraped_ids:
+        return [
+            "Sources should list all scraped source IDs used for citation; "
+            f"found {actual}, scraped source IDs are {scraped_ids}."
+        ]
     return []

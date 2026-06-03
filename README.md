@@ -34,6 +34,7 @@ when needed:
 python -m deep_research --provider hybrid "question"
 python -m deep_research --provider groq "question"
 python -m deep_research --provider google "question"
+python -m deep_research --provider ollama --model qwen2.5-coder:7b "question"
 python -m deep_research --provider groq --model openai/gpt-oss-20b "question"
 ```
 
@@ -81,9 +82,20 @@ searches and scrapes candidates in one deterministic recovery loop until it has
 enough usable, citable sources or reports that more sources are needed.
 Candidates and scraped sources include deterministic quality metadata:
 `source_quality_score`, `source_quality_label`, `source_quality_type`, and
-`source_quality_reasons`. `collect_sources` spends scrape budget on higher
-quality candidates first, preferring official documentation, government,
-standards, and academic sources over generic blogs or user-content platforms.
+`source_quality_reasons`, plus relevance metadata:
+`source_relevance_score`, `source_relevance_matched_terms`, and
+`source_relevance_missing_terms`. `collect_sources` spends scrape budget on the
+best combined `source_rank_score`, which balances source quality with relevance
+to the query so a strong source on the wrong topic does not crowd out a relevant
+one. It still prefers official documentation, government, standards, and
+academic sources when relevance is comparable.
+
+By default, each run performs one deterministic pre-collection pass before the
+model graph starts. This writes `findings/precollected_sources.md`, emits
+visible search/scrape progress, and gives the model real scraped evidence even
+when a provider is inclined to answer from training data. Disable this only for
+debugging with `--no-precollect-sources` or
+`DEEP_RESEARCH_PRECOLLECT_SOURCES=false`.
 
 You can route individual roles to different model strings:
 
@@ -162,7 +174,7 @@ Artifacts are written to `runs/<timestamp-slug>/`:
 - `activity.html`
 - `run_manifest.json`
 - `model_routes.json`
-- `research_plan.md`
+- `research_plan.md` deterministic baseline plan, updated after pre-collection and optionally refined by the model
 - `sources.jsonl`
 - `findings/`
 - `source_docs/`
@@ -193,8 +205,9 @@ When final verification fails, the runner also writes
 unscraped-source, or source-support repairs needed before rerunning
 verification.
 
-`metrics.json` includes `avg_source_quality_score` and `strong_source_count` for
-scraped sources.
+`metrics.json` includes `avg_source_quality_score`, `strong_source_count`,
+`avg_source_relevance_score`, and `high_relevance_source_count` for scraped
+sources.
 
 ## Evaluate
 
@@ -206,10 +219,11 @@ python -m deep_research.eval_report eval_runs/<run>/results.jsonl
 Each eval row includes deterministic diagnostics alongside the LLM judge score:
 `expected_answer_recall`, `must_include_coverage`, `missing_must_include`,
 `source_requirement_coverage`, `missing_source_requirements`,
-`citation_verifier_score`, `source_support_score`, source-quality metrics,
-runtime/tool counts, failure category, retry metadata, judge error, run-failure
-state, and repair checklist path when present. A failed research case is written
-as a failed row and the remaining benchmark cases continue.
+`citation_verifier_score`, `source_support_score`, source-quality and
+source-relevance metrics, runtime/tool counts, failure category, retry metadata,
+judge error, run-failure state, and repair checklist path when present. A failed
+research case is written as a failed row and the remaining benchmark cases
+continue.
 
 ## Test
 

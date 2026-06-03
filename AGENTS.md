@@ -38,7 +38,7 @@ CLI (python -m deep_research "question")
 
 ## Research Workflow
 
-1. Orchestrator writes `research_plan.md` via the `planner` subagent.
+1. The runner writes a deterministic baseline `research_plan.md`; the orchestrator or planner may refine it.
 2. `researcher` subagent(s) prefer `collect_sources` for normal branches so blocked, bot-protected, and low-content pages are skipped.
 3. Researchers use manual `web_search` plus `deep_scrape` only for targeted follow-up on specific URLs.
 4. Findings are saved under `findings/`.
@@ -52,7 +52,7 @@ CLI (python -m deep_research "question")
 - Every factual paragraph must have at least one inline citation `[N]`.
 - Citation numbers must match `source_id` values from usable scraped sources.
 - The `## Sources` section must list entries as: `[N] Title: https://url`.
-- Entries must be sequential without gaps.
+- Source IDs may be sparse because search-only candidates also receive IDs; cite only usable scraped source IDs and list those exact IDs in `## Sources`.
 - Never cite search-only candidates, `collect_sources.unusable_sources`, or `deep_scrape` results with `source_usable: false`.
 - Use `model_routes.json` to verify role/model/key-slot and fallback routing without exposing API key values.
 - Use `run_manifest.json` to compare redacted settings, runtime metadata, and package versions across runs.
