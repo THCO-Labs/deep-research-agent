@@ -4,124 +4,85 @@ from pathlib import Path
 import pytest
 
 from deep_research import agent as agent_module
-from deep_research.agent import ResearchRunError, run_research
+from deep_research.acquisition import AcquisitionMetrics, AcquisitionResult
+from deep_research.agent import ResearchRunError, resume_research, run_research, verify_research_run
+from deep_research.schemas import ResearchBranch, SourceCandidate, SourceRecordV2
 from deep_research.settings import Settings
 
 
-class EmptyAgent:
-    def stream(self, *_args, **_kwargs):
-        return iter(())
+def test_run_research_writes_v2_artifacts_and_manifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", fake_acquire_sources)
+    settings = _settings(tmp_path)
 
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
 
-class FailingAgent:
-    def stream(self, *_args, **_kwargs):
-        raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 42.156s.")
-
-
-class ToolCallFailingAgent:
-    def stream(self, *_args, **_kwargs):
-        raise RuntimeError("tool_use_failed: Failed to call a function.")
-
-
-def test_run_research_writes_model_route_manifest(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: EmptyAgent())
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        provider="hybrid",
-        model="groq:main",
-        fast_model="groq:fast",
-        planner_model="google_genai:planner",
-        researcher_model="groq:researcher",
-        analyst_model="groq:analyst",
-        verifier_model="google_genai:verifier",
-        judge_model="google_genai:judge",
-        google_api_keys=("google-a", "google-b"),
-        groq_api_keys=("groq-a", "groq-b"),
-        tavily_api_key="tavily",
-        precollect_sources=False,
-    )
-
-    result = run_research("route manifest", settings, progress_mode="quiet")
-
-    manifest = json.loads((result.run_dir / "model_routes.json").read_text(encoding="utf-8"))
-    activity = (result.run_dir / "activity.md").read_text(encoding="utf-8")
-    plan = (result.run_dir / "research_plan.md").read_text(encoding="utf-8")
-    assert manifest["google_key_count"] == 2
-    assert manifest["groq_key_count"] == 2
-    assert "researcher=groq:researcher via GROQ_API_KEY1" in activity
-    assert "Deterministic baseline plan" in plan
-    assert "route manifest" in plan
-
-
-def test_run_research_writes_redacted_run_manifest(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: EmptyAgent())
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        provider="hybrid",
-        model="groq:main",
-        fast_model="groq:fast",
-        planner_model="google_genai:planner",
-        researcher_model="groq:researcher",
-        analyst_model="groq:analyst",
-        verifier_model="google_genai:verifier",
-        judge_model="google_genai:judge",
-        google_api_keys=("google-secret-a", "google-secret-b"),
-        groq_api_keys=("groq-secret-a", "groq-secret-b"),
-        tavily_api_key="tavily-secret",
-        precollect_sources=False,
-    )
-
-    result = run_research("manifest", settings, progress_mode="quiet")
-
-    manifest_text = (result.run_dir / "run_manifest.json").read_text(encoding="utf-8")
+    expected = {
+        "request.json",
+        "plan.json",
+        "sources.jsonl",
+        "evidence_cards.jsonl",
+        "coverage.json",
+        "report_blueprint.json",
+        "report.md",
+        "verification.json",
+        "metrics.json",
+        "manifest.json",
+    }
+    assert expected <= {path.name for path in result.run_dir.iterdir()}
+    manifest_text = (result.run_dir / "manifest.json").read_text(encoding="utf-8")
     manifest = json.loads(manifest_text)
-    assert manifest["schema_version"] == 1
-    assert manifest["settings"]["provider"] == "hybrid"
-    assert manifest["settings"]["google_key_count"] == 2
-    assert manifest["settings"]["groq_key_count"] == 2
-    assert manifest["settings"]["tavily_api_key_present"] is True
-    assert manifest["model_routes"]["google_key_count"] == 2
-    assert "python" in manifest["runtime"]
-    assert "google-secret" not in manifest_text
-    assert "groq-secret" not in manifest_text
-    assert "tavily-secret" not in manifest_text
-
-
-def test_run_research_writes_repair_checklist_when_verification_fails(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: EmptyAgent())
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        google_api_key="google",
-        google_api_keys=("google",),
-        tavily_api_key="tavily",
-        precollect_sources=False,
-    )
-
-    result = run_research("missing report", settings, progress_mode="quiet")
-
-    repair_path = result.run_dir / "findings" / "verification_repair.md"
+    verification = json.loads(result.verification_path.read_text(encoding="utf-8"))
     metrics = json.loads(result.metrics_path.read_text(encoding="utf-8"))
-    assert repair_path.exists()
-    assert "Create `report.md`" in repair_path.read_text(encoding="utf-8")
-    assert metrics["repair_checklist_path"].replace("\\", "/") == "findings/verification_repair.md"
+    assert manifest["schema_version"] == 2
+    assert manifest["engine"] == "local_langgraph"
+    assert manifest["settings"]["research_engine"] == "local_langgraph"
+    assert "google-secret" not in manifest_text
+    assert verification["valid"] is True
+    assert metrics["source_count"] >= 17
+    assert metrics["raw_evidence_card_count"] >= 17
+    assert metrics["evidence_card_count"] >= 7
+
+
+def test_verify_research_run_rechecks_existing_v2_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", fake_acquire_sources)
+    settings = _settings(tmp_path)
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
+    run_id = result.run_dir.name
+
+    verified = verify_research_run(run_id, settings)
+
+    verification = json.loads(verified.verification_path.read_text(encoding="utf-8"))
+    assert verification["valid"] is True
+
+
+def test_resume_reuses_checkpointed_sources_without_duplicate_fetches(tmp_path: Path, monkeypatch) -> None:
+    calls = {"fresh": 0, "resume": 0}
+
+    def tracked_acquire(**kwargs):
+        if kwargs.get("existing_sources"):
+            calls["resume"] += 1
+        else:
+            calls["fresh"] += 1
+        return fake_acquire_sources(**kwargs)
+
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", tracked_acquire)
+    settings = _settings(tmp_path)
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
+
+    resumed = resume_research(result.run_dir.name, settings, progress_mode="quiet")
+
+    sources = (resumed.run_dir / "sources.jsonl").read_text(encoding="utf-8").splitlines()
+    assert calls["fresh"] == 1
+    assert calls["resume"] == 1
+    assert len(sources) == 17
 
 
 def test_run_research_writes_structured_failure_artifacts(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: FailingAgent())
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        google_api_key="google",
-        google_api_keys=("google",),
-        tavily_api_key="tavily",
-        precollect_sources=False,
-    )
+    def fail_graph(**_kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 42.156s.")
+
+    monkeypatch.setattr(agent_module, "run_local_research_graph", fail_graph)
+    settings = _settings(tmp_path)
 
     with pytest.raises(ResearchRunError) as raised:
         run_research("quota failure", settings, progress_mode="quiet")
@@ -133,139 +94,150 @@ def test_run_research_writes_structured_failure_artifacts(tmp_path: Path, monkey
     assert metrics["error_category"] == "quota_or_rate_limit"
 
 
-def test_run_research_precollects_sources_before_agent(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: list[dict[str, object]] = []
+def test_run_research_treats_failed_verification_as_failed_run(tmp_path: Path, monkeypatch) -> None:
+    def invalid_graph(**kwargs):
+        artifacts = kwargs["artifacts"]
+        artifacts.write_text("report.md", "# Bad Report\n\nNo cited evidence.\n")
+        artifacts.write_json("verification.json", {"schema_version": 2, "valid": False, "failures": ["Report does not cite any sources."]})
+        return {
+            "metrics": {"engine": "local_langgraph", "verification_valid": False},
+            "verification": {"valid": False, "failures": ["Report does not cite any sources."]},
+        }
 
-    class FakeCollectSourcesTool:
-        def invoke(self, args: dict[str, object]) -> dict[str, object]:
-            calls.append(args)
-            return {
-                "usable_count": 1,
-                "unusable_count": 0,
-                "usable_sources": [
-                    {
-                        "source_id": 1,
-                        "title": "Example Source",
-                        "url": "https://example.com/source",
-                        "content_path": "source_docs/source_1.md",
-                        "excerpt": "Example source evidence.",
-                        "source_quality_label": "usable",
-                        "source_quality_score": 0.6,
-                        "source_quality_type": "general_web",
-                        "source_relevance_score": 1.0,
-                    }
-                ],
-                "unusable_sources": [],
-            }
+    monkeypatch.setattr(agent_module, "run_local_research_graph", invalid_graph)
+    settings = _settings(tmp_path)
 
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: EmptyAgent())
-    monkeypatch.setattr(
-        agent_module,
-        "build_tools",
-        lambda _context: {"collect_sources": FakeCollectSourcesTool()},
-    )
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        google_api_key="google",
-        google_api_keys=("google",),
-        tavily_api_key="tavily",
-        max_sources=2,
-        precollect_sources=True,
-    )
+    with pytest.raises(ResearchRunError) as raised:
+        run_research("invalid verification", settings, progress_mode="quiet")
 
-    result = run_research("precollect question", settings, progress_mode="quiet")
-
-    brief = (result.run_dir / "findings" / "precollected_sources.md").read_text(encoding="utf-8")
-    plan = (result.run_dir / "research_plan.md").read_text(encoding="utf-8")
-    activity = (result.run_dir / "activity.md").read_text(encoding="utf-8")
-    assert calls[0]["query"] == "precollect question"
-    assert calls[0]["target_count"] == 2
-    assert "Pre-collected Source Brief" in brief
-    assert "[1] Example Source" in brief
-    assert "## Pre-Collection Result" in plan
-    assert "[1] Example Source" in plan
-    assert "pre-collected 1/2 usable source" in activity
+    failure = json.loads((raised.value.result.run_dir / "failure.json").read_text(encoding="utf-8"))
+    assert failure["category"] == "verification_failed"
 
 
-def test_run_research_recovers_report_from_scraped_sources_after_tool_call_failure(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source_markdown = (
-        "Multi-agent frameworks improve LLM reasoning by assigning specialized agents "
-        "to planning, critique, validation, and answer refinement. Validator agents "
-        "check reasoning paths, while critic agents provide feedback that helps iterative "
-        "refinement. Multi-agent debate exposes alternative explanations before final synthesis."
-    )
+def test_gemini_managed_mode_writes_v2_artifacts(tmp_path: Path, monkeypatch) -> None:
+    def fake_managed(question, settings, artifacts):
+        artifacts.write_text(
+            "report.md",
+            "# Managed\n\nGemini managed report. [1]\n\n## Sources\n\n[1] Gemini Source: https://example.com/source\n",
+        )
+        artifacts.write_jsonl("sources.jsonl", [])
+        artifacts.write_json("verification.json", {"schema_version": 2, "valid": True})
+        artifacts.write_json("metrics.json", {"engine": "gemini_managed", "verification_valid": True})
 
-    def fake_build_tools(context):
-        class FakeCollectSourcesTool:
-            def invoke(self, args: dict[str, object]) -> dict[str, object]:
-                record = context.registry.upsert_search_result(
-                    url="https://example.com/multi-agent-reasoning",
-                    title="Multi-Agent Reasoning Evidence",
-                    query=str(args["query"]),
-                    snippet=source_markdown,
-                    search_score=0.95,
-                )
-                record = context.registry.record_scrape(
-                    url=record.url,
-                    title=record.title,
-                    markdown=source_markdown,
-                    extraction_method="test",
-                )
-                return {
-                    "query": args["query"],
-                    "target_count": args["target_count"],
-                    "candidate_count": 1,
-                    "usable_count": 1,
-                    "unusable_count": 0,
-                    "usable_sources": [
-                        {
-                            "source_id": record.id,
-                            "title": record.title,
-                            "url": record.url,
-                            "content_path": record.content_path,
-                            "excerpt": source_markdown,
-                            "source_quality_label": record.source_quality_label,
-                            "source_quality_score": record.source_quality_score,
-                            "source_quality_type": record.source_quality_type,
-                            "source_relevance_score": record.source_relevance_score,
-                        }
-                    ],
-                    "unusable_sources": [],
-                }
+    monkeypatch.setattr(agent_module, "run_gemini_managed_research", fake_managed)
+    settings = _settings(tmp_path, research_engine="gemini_managed", tavily_api_key="")
 
-        return {"collect_sources": FakeCollectSourcesTool()}
+    result = run_research("managed question", settings, progress_mode="quiet")
 
-    monkeypatch.setattr(agent_module, "create_agent", lambda _settings, _context: ToolCallFailingAgent())
-    monkeypatch.setattr(agent_module, "build_tools", fake_build_tools)
-    settings = Settings(
-        project_root=tmp_path,
-        out_dir=tmp_path,
-        google_api_key="google",
-        google_api_keys=("google",),
-        tavily_api_key="tavily",
-        max_sources=2,
-        precollect_sources=True,
-    )
-
-    result = run_research(
-        "How do multi-agent frameworks improve LLM reasoning?",
-        settings,
-        progress_mode="quiet",
-    )
-
-    report = result.report_path.read_text(encoding="utf-8")
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     verification = json.loads(result.verification_path.read_text(encoding="utf-8"))
-    metrics = json.loads(result.metrics_path.read_text(encoding="utf-8"))
-    activity = (result.run_dir / "activity.md").read_text(encoding="utf-8")
-    assert "Multi-agent frameworks improve LLM reasoning" in report
+    assert manifest["engine"] == "gemini_managed"
+    assert manifest["managed_provider"] == "gemini"
     assert verification["valid"] is True
-    assert metrics["deterministic_report_recovery"] is True
-    assert metrics["error_category"] == "tool_call_parse_error"
-    assert "complete with deterministic recovery" in activity
+
+
+def _settings(tmp_path: Path, **overrides) -> Settings:
+    values = {
+        "project_root": tmp_path,
+        "out_dir": tmp_path,
+        "provider": "google",
+        "google_api_key": "google-secret",
+        "google_api_keys": ("google-secret",),
+        "tavily_api_key": "tavily-secret",
+        "strict_tool_models": True,
+        "min_source_words": 40,
+        "min_usable_sources": 17,
+        "max_search_queries": 16,
+        "max_candidates": 80,
+        "llm_planning": False,
+        "llm_synthesis": False,
+        "semantic_verification": False,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def fake_acquire_sources(
+    *,
+    branches: list[ResearchBranch],
+    artifacts,
+    existing_candidates=None,
+    existing_sources=None,
+    existing_source_texts=None,
+    **_kwargs,
+) -> AcquisitionResult:
+    if existing_sources:
+        return AcquisitionResult(
+            candidates=list(existing_candidates or []),
+            sources=list(existing_sources),
+            source_texts=dict(existing_source_texts or {}),
+            metrics=AcquisitionMetrics(),
+        )
+
+    candidates: list[SourceCandidate] = []
+    sources: list[SourceRecordV2] = []
+    source_texts: dict[int, str] = {}
+    next_id = 1
+    for branch in branches:
+        for _index in range(branch.min_sources):
+            title = f"{branch.title} Evidence {next_id}"
+            url = f"https://example.com/{branch.id}/{next_id}"
+            text = _branch_text(branch, next_id)
+            path = f"source_docs/source_{next_id}.md"
+            artifacts.write_text(path, text)
+            candidates.append(
+                SourceCandidate(
+                    id=next_id,
+                    branch_id=branch.id,
+                    title=title,
+                    url=url,
+                    query=branch.queries[0],
+                    snippet=text[:120],
+                    search_score=0.9,
+                )
+            )
+            sources.append(
+                SourceRecordV2(
+                    id=next_id,
+                    branch_id=branch.id,
+                    title=title,
+                    url=url,
+                    canonical_url=url,
+                    provenance="web",
+                    content_path=path,
+                    content_hash=f"hash-{next_id}",
+                    extraction_method="test",
+                    word_count=len(text.split()),
+                    quality_score=0.9,
+                    quality_label="high",
+                    quality_type="official_docs",
+                    relevance_score=1.0,
+                )
+            )
+            source_texts[next_id] = text
+            next_id += 1
+    return AcquisitionResult(
+        candidates=candidates,
+        sources=sources,
+        source_texts=source_texts,
+        metrics=AcquisitionMetrics(
+            search_count=len(branches) * 2,
+            candidate_count=len(candidates),
+            scrape_count=len(candidates),
+            usable_source_count=len(sources),
+        ),
+    )
+
+
+def _branch_text(branch: ResearchBranch, source_id: int) -> str:
+    required = ", ".join(branch.required_terms)
+    source_context = f"neighborhood area{source_id}"
+    return (
+        f"{branch.title} evidence explains {required} for urban heat islands and public health in {source_context}. "
+        f"Urban heat islands affect public health through {required}, heat exposure, vulnerable populations, "
+        f"and higher local temperatures in dense built environments in {source_context}. "
+        f"Researchers connect {required} with public health planning, cooling strategies, tree canopy, reflective surfaces, "
+        f"emergency alerts, adaptation, and mitigation decisions in {source_context}. "
+        f"The evidence on {branch.title} describes why urban heat islands matter for health outcomes, exposure, "
+        f"risk reduction, implementation constraints, and local decision-making in {source_context}."
+    )

@@ -19,3 +19,52 @@ def test_source_quality_marks_official_docs() -> None:
 
     assert quality.source_type == "official_docs"
     assert quality.score >= 0.7
+
+
+def test_source_quality_recognizes_multilateral_and_public_sector_sources() -> None:
+    who = score_source(url="https://www.who.int/news-room/fact-sheets/detail/hypertension")
+    gov_uk = score_source(url="https://www.gov.uk/government/publications/example")
+
+    assert who.source_type == "government"
+    assert gov_uk.source_type == "government"
+    assert who.label in {"strong", "excellent"}
+    assert gov_uk.label in {"strong", "excellent"}
+
+
+def test_source_quality_recognizes_expanded_scholarly_publishers_and_repositories() -> None:
+    sage = score_source(
+        url="https://journals.sagepub.com/doi/10.1177/example",
+        title="Peer-reviewed article",
+    )
+    medrxiv = score_source(url="https://www.medrxiv.org/content/10.1101/example")
+    academic_suffix = score_source(url="https://www.ox.ac.uk/research/example")
+
+    assert sage.source_type == "academic"
+    assert sage.label in {"strong", "excellent"}
+    assert medrxiv.source_type == "academic"
+    assert medrxiv.label == "strong"
+    assert any("preprint" in reason for reason in medrxiv.reasons)
+    assert academic_suffix.source_type == "academic"
+
+
+def test_source_quality_recognizes_more_standards_and_docs_hosts() -> None:
+    standard = score_source(url="https://tc39.es/ecma262/", title="ECMAScript specification")
+    docs = score_source(
+        url="https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html",
+        title="Amazon S3 documentation",
+    )
+
+    assert standard.source_type == "standards_or_government"
+    assert standard.label == "excellent"
+    assert docs.source_type == "official_docs"
+    assert docs.label in {"strong", "excellent"}
+
+
+def test_source_quality_keeps_user_content_and_software_repositories_distinct() -> None:
+    repository = score_source(url="https://github.com/langchain-ai/langchain")
+    answer = score_source(url="https://stackoverflow.com/questions/1/example")
+
+    assert repository.source_type == "software_repository"
+    assert repository.label == "usable"
+    assert answer.source_type == "user_content"
+    assert answer.label == "weak"

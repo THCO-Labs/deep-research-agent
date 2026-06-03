@@ -26,7 +26,9 @@ def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert settings.google_api_key == "google-test"
     assert settings.tavily_api_key == "tavily-test"
     assert settings.provider == "google"
-    assert settings.max_sources == 12
+    assert settings.mode == "max_quality"
+    assert settings.max_sources == 80
+    assert settings.min_usable_sources == 40
 
 
 def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
@@ -59,8 +61,9 @@ def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
     assert settings.judge_model == "google_genai:gemini-2.5-flash"
     assert settings.scrape_char_limit == 6000
     assert settings.tool_excerpt_char_limit == 900
-    assert settings.max_sources == 3
-    assert settings.max_rounds == 1
+    assert settings.max_sources == 80
+    assert settings.min_usable_sources == 40
+    assert settings.max_rounds == 6
     assert settings.google_key_pool == ("google-test", "google-test-1")
     assert settings.groq_key_pool == ("groq-test", "groq-test-1")
 
@@ -171,6 +174,21 @@ def test_settings_supports_disabling_precollection(tmp_path: Path, monkeypatch: 
     assert settings.precollect_sources is False
 
 
+def test_settings_supports_disabling_llm_planning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_LLM_PLANNING=false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_LLM_PLANNING", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.llm_planning is False
+
+
 def test_settings_supports_ollama_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "DEEP_RESEARCH_PROVIDER=ollama\nTAVILY_API_KEY=tavily-test\n",
@@ -184,8 +202,64 @@ def test_settings_supports_ollama_provider(tmp_path: Path, monkeypatch: pytest.M
     settings = Settings.from_env(project_root=tmp_path)
 
     assert settings.provider == "ollama"
-    assert settings.model == "ollama:qwen2.5-coder:7b"
-    assert settings.fast_model == "ollama:qwen2.5-coder:1.5b"
+    assert settings.model == "ollama:qwen2.5:7b"
+    assert settings.fast_model == "ollama:qwen2.5:3b"
+
+
+def test_settings_prefixes_ollama_tagged_model_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DEEP_RESEARCH_PROVIDER=ollama\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    settings = Settings.from_env(
+        project_root=tmp_path,
+        provider="ollama",
+        model="qwen2.5:7b",
+        fast_model="qwen2.5:3b",
+    )
+
+    assert settings.model == "ollama:qwen2.5:7b"
+    assert settings.fast_model == "ollama:qwen2.5:3b"
+
+
+def test_explicit_provider_ignores_env_model_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\n"
+        "TAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_PROVIDER=groq\n"
+        "DEEP_RESEARCH_MODEL=groq:meta-llama/llama-4-scout-17b-16e-instruct\n"
+        "DEEP_RESEARCH_FAST_MODEL=groq:meta-llama/llama-4-scout-17b-16e-instruct\n"
+        "DEEP_RESEARCH_PLANNER_MODEL=groq:meta-llama/llama-4-scout-17b-16e-instruct\n"
+        "DEEP_RESEARCH_RESEARCHER_MODEL=groq:meta-llama/llama-4-scout-17b-16e-instruct\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MODEL", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_FAST_MODEL", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PLANNER_MODEL", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_RESEARCHER_MODEL", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path, provider="ollama")
+
+    assert settings.provider == "ollama"
+    assert settings.model == "ollama:qwen2.5:7b"
+    assert settings.fast_model == "ollama:qwen2.5:3b"
+    assert settings.planner_model == "ollama:qwen2.5:3b"
+    assert settings.researcher_model == "ollama:qwen2.5:3b"
 
 
 def test_settings_supports_provider_retry_window_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

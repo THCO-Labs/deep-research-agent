@@ -1,34 +1,8 @@
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
 
-TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
-
-STOPWORDS = {
-    "about",
-    "after",
-    "also",
-    "and",
-    "are",
-    "best",
-    "can",
-    "does",
-    "for",
-    "from",
-    "guide",
-    "how",
-    "into",
-    "its",
-    "learn",
-    "more",
-    "the",
-    "this",
-    "use",
-    "what",
-    "when",
-    "with",
-}
+from deep_research.text_terms import term_set
 
 
 @dataclass(frozen=True)
@@ -75,9 +49,4 @@ def score_source_relevance(
 
 
 def _tokens(text: str) -> set[str]:
-    normalized = text.lower().replace("_", " ").replace("-", " ")
-    return {
-        token
-        for token in TOKEN_RE.findall(normalized)
-        if token not in STOPWORDS and not token.isdigit()
-    }
+    return term_set(text)

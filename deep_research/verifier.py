@@ -5,58 +5,15 @@ from collections import Counter
 from typing import Callable
 
 from deep_research.models import SourceRecord, VerificationResult
+from deep_research.text_terms import term_set
 from deep_research.urls import canonicalize_url
 
 CITATION_RE = re.compile(r"\[([0-9][0-9,\s]*)\]")
 SOURCE_LINE_RE = re.compile(r"^\[(\d+)\]\s+(.+?):\s+(https?://\S+)\s*$")
-TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
 SUPPORT_THRESHOLD = 0.28
 MIN_SUPPORT_TOKENS = 6
 
 SourceLoader = Callable[[SourceRecord], str]
-
-STOPWORDS = {
-    "about",
-    "above",
-    "after",
-    "again",
-    "against",
-    "also",
-    "among",
-    "because",
-    "before",
-    "being",
-    "between",
-    "could",
-    "during",
-    "each",
-    "from",
-    "have",
-    "into",
-    "more",
-    "most",
-    "only",
-    "other",
-    "over",
-    "same",
-    "should",
-    "such",
-    "than",
-    "that",
-    "their",
-    "there",
-    "these",
-    "this",
-    "through",
-    "under",
-    "using",
-    "when",
-    "where",
-    "which",
-    "while",
-    "with",
-    "would",
-}
 
 
 def parse_inline_citations(markdown: str) -> list[int]:
@@ -269,11 +226,7 @@ def _citation_ids_from_match(raw_ids: str) -> list[int]:
 
 
 def _significant_tokens(text: str) -> set[str]:
-    return {
-        token
-        for token in TOKEN_RE.findall(text.lower())
-        if token not in STOPWORDS and not token.isdigit()
-    }
+    return term_set(text)
 
 
 def _token_support_score(claim_tokens: set[str], source_tokens: set[str]) -> float:

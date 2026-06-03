@@ -104,13 +104,13 @@ def test_eval_coverage_reports_missing_terms() -> None:
 def test_required_answer_match_uses_recall_and_must_include() -> None:
     case = BenchmarkCase(
         id="case-2",
-        question="Compare RAG and fine-tuning.",
-        expected_answer="RAG retrieves external context while fine-tuning changes model weights.",
-        must_include=["external context", "model weights"],
+        question="Compare cool roofs and tree canopy for urban heat mitigation.",
+        expected_answer="Cool roofs reflect solar radiation while tree canopy adds shade and cooling.",
+        must_include=["reflect solar radiation", "shade"],
         source_requirements=[],
         difficulty="easy",
     )
-    report = "RAG retrieves external context, while fine-tuning changes model weights."
+    report = "Cool roofs reflect solar radiation, while tree canopy adds shade and cooling."
 
     assert expected_answer_recall_score(case.expected_answer, report) == 1.0
     assert required_answer_match(case, report) is True

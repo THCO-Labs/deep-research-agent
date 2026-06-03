@@ -13,6 +13,7 @@ from deep_research.models import Metrics
 from deep_research.progress import ActivityLog, ProgressCallback, progress_line
 from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
 from deep_research.settings import Settings
+from deep_research.source_limits import MAX_TAVILY_RESULTS_PER_QUERY, MINIMUM_SOURCE_TARGET, source_floor
 from deep_research.source_registry import SourceRegistry
 from deep_research.urls import canonicalize_url
 from deep_research.verifier import verify_report
@@ -143,13 +144,13 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
         return payload
 
     @tool
-    def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+    def web_search(query: str, max_results: int = MINIMUM_SOURCE_TARGET) -> dict[str, Any]:
         """Search the public web and register source candidates.
 
         This returns candidates only. Call deep_scrape or collect_sources before
         relying on sources or citing source IDs.
         """
-        bounded_results = max(1, min(max_results, context.settings.max_sources))
+        bounded_results = _bounded_source_request_count(max_results, context.settings.max_sources)
         cleaned, results = search_candidates(query, bounded_results)
         return {"query": cleaned, "results": results}
 
@@ -159,16 +160,16 @@ def build_tools(context: ToolContext) -> dict[str, BaseTool]:
         return scrape_candidate(url)
 
     @tool
-    def collect_sources(query: str, target_count: int = 3, max_results: int = 0) -> dict[str, Any]:
+    def collect_sources(query: str, target_count: int = MINIMUM_SOURCE_TARGET, max_results: int = 0) -> dict[str, Any]:
         """Search and scrape candidates until enough usable, citeable sources are collected.
 
         Prefer this over manually pairing web_search and deep_scrape for normal
         research. It skips failed, blocked, and low-quality pages and returns
         only scraped sources as usable.
         """
-        target = max(1, min(target_count, context.settings.max_sources))
+        target = _bounded_source_request_count(target_count, context.settings.max_sources)
         candidate_limit = max_results if max_results > 0 else max(target * 3, context.settings.max_sources)
-        candidate_limit = max(target, min(candidate_limit, 10))
+        candidate_limit = max(target, min(candidate_limit, MAX_TAVILY_RESULTS_PER_QUERY))
         cleaned, candidates = search_candidates(query, candidate_limit)
         usable_sources = []
         unusable_sources = []
@@ -405,6 +406,11 @@ def _source_rank_score(
     quality = _float_or_none(quality_score) or 0.0
     relevance = _float_or_none(relevance_score) or 0.0
     return round((quality * 0.55) + (relevance * 0.45), 4)
+
+
+def _bounded_source_request_count(requested_count: int, settings_max_sources: int) -> int:
+    source_cap = source_floor(settings_max_sources)
+    return max(MINIMUM_SOURCE_TARGET, min(max(requested_count, MINIMUM_SOURCE_TARGET), source_cap))
 
 
 def _float_or_none(value: Any) -> float | None:

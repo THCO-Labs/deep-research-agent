@@ -30,19 +30,16 @@ class MultiSearchClient:
                 "content": "blocked snippet",
                 "score": 0.9,
             },
-            {
-                "title": "Useful Source One",
-                "url": "https://example.com/one",
-                "content": "useful snippet one",
-                "score": 0.8,
-            },
-            {
-                "title": "Useful Source Two",
-                "url": "https://example.com/two",
-                "content": "useful snippet two",
-                "score": 0.7,
-            },
         ]
+        results.extend(
+            {
+                "title": f"Useful Source {index}",
+                "url": f"https://example.com/useful-{index}",
+                "content": f"useful snippet {index}",
+                "score": 0.8,
+            }
+            for index in range(1, 18)
+        )
         return {"results": results[:max_results]}
 
 
@@ -50,14 +47,14 @@ class QualitySearchClient:
     def search(self, query: str, max_results: int) -> dict:
         results = [
             {
-                "title": "What is fine-tuning?",
-                "url": "https://medium.com/example/fine-tuning",
+                "title": "What are urban heat islands?",
+                "url": "https://medium.com/example/urban-heat-islands",
                 "content": "blog snippet",
                 "score": 1.0,
             },
             {
-                "title": "Fine-tuning API documentation",
-                "url": "https://docs.example.com/fine-tuning",
+                "title": "Urban heat island public health documentation",
+                "url": "https://docs.example.com/urban-heat",
                 "content": "official documentation snippet",
                 "score": 0.2,
             },
@@ -75,9 +72,9 @@ class RelevanceSearchClient:
                 "score": 1.0,
             },
             {
-                "title": "Fine tuning model adaptation",
-                "url": "https://example.com/fine-tuning-adaptation",
-                "content": "fine tuning adapts pretrained models to specific tasks",
+                "title": "Urban heat island health adaptation",
+                "url": "https://example.com/urban-heat-health",
+                "content": "urban heat islands affect public health and vulnerable populations",
                 "score": 0.4,
             },
         ]
@@ -123,7 +120,7 @@ class RecordingScraper:
         return ScrapeResult(
             url=url,
             title=f"Title for {url}",
-            markdown="Official documentation contains substantial fine-tuning guidance. " * 20,
+            markdown="Official documentation contains substantial urban heat island public health guidance. " * 20,
         )
 
 
@@ -174,7 +171,6 @@ def test_collect_sources_skips_bad_candidates_and_returns_usable_sources(tmp_pat
         out_dir=tmp_path,
         google_api_key="google",
         tavily_api_key="tavily",
-        max_sources=2,
     )
     artifacts = RunArtifacts.create(tmp_path, "collect sources")
     registry = SourceRegistry(artifacts)
@@ -188,13 +184,13 @@ def test_collect_sources_skips_bad_candidates_and_returns_usable_sources(tmp_pat
     tools = build_tools(context)
 
     result = tools["collect_sources"].invoke(
-        {"query": "fine tuning definition", "target_count": 2}
+        {"query": "urban heat island definition", "target_count": 2}
     )
 
-    assert result["usable_count"] == 2
+    assert result["usable_count"] == 17
     assert result["unusable_count"] == 1
     assert result["needs_more_sources"] is False
-    assert [source["source_id"] for source in result["usable_sources"]] == [2, 3]
+    assert [source["source_id"] for source in result["usable_sources"]] == list(range(2, 19))
     assert result["unusable_sources"][0]["source_id"] == 1
     assert registry.records[0].content_path is None
     assert registry.records[1].content_path == "source_docs/source_2.md"
@@ -206,7 +202,6 @@ def test_collect_sources_ranks_higher_quality_candidates_before_scraping(tmp_pat
         out_dir=tmp_path,
         google_api_key="google",
         tavily_api_key="tavily",
-        max_sources=2,
     )
     artifacts = RunArtifacts.create(tmp_path, "quality ranking")
     registry = SourceRegistry(artifacts)
@@ -220,9 +215,9 @@ def test_collect_sources_ranks_higher_quality_candidates_before_scraping(tmp_pat
     )
     tools = build_tools(context)
 
-    result = tools["collect_sources"].invoke({"query": "fine tuning docs", "target_count": 1})
+    result = tools["collect_sources"].invoke({"query": "urban heat island docs", "target_count": 1})
 
-    assert scraper.urls == ["https://docs.example.com/fine-tuning"]
+    assert scraper.urls[0] == "https://docs.example.com/urban-heat"
     assert result["usable_sources"][0]["source_quality_type"] == "official_docs"
     assert result["candidate_ranking"][0]["source_id"] == 2
     assert result["candidate_ranking"][0]["source_rank_score"] >= result["candidate_ranking"][1]["source_rank_score"]
@@ -234,7 +229,6 @@ def test_collect_sources_uses_relevance_when_quality_points_to_wrong_topic(tmp_p
         out_dir=tmp_path,
         google_api_key="google",
         tavily_api_key="tavily",
-        max_sources=2,
     )
     artifacts = RunArtifacts.create(tmp_path, "relevance ranking")
     registry = SourceRegistry(artifacts)
@@ -248,9 +242,9 @@ def test_collect_sources_uses_relevance_when_quality_points_to_wrong_topic(tmp_p
     )
     tools = build_tools(context)
 
-    result = tools["collect_sources"].invoke({"query": "fine tuning model adaptation", "target_count": 1})
+    result = tools["collect_sources"].invoke({"query": "urban heat island public health", "target_count": 1})
 
-    assert scraper.urls == ["https://example.com/fine-tuning-adaptation"]
+    assert scraper.urls[0] == "https://example.com/urban-heat-health"
     assert result["candidate_ranking"][0]["source_id"] == 2
     assert result["candidate_ranking"][0]["source_relevance_score"] > result["candidate_ranking"][1]["source_relevance_score"]
 

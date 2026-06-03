@@ -41,14 +41,14 @@ def test_build_run_manifest_includes_routes_and_runtime(tmp_path: Path) -> None:
     routes = describe_model_routes(settings)
 
     manifest = build_run_manifest(
-        question="What is fine-tuning?",
+        question="What are urban heat islands?",
         settings=settings,
         run_dir=tmp_path / "runs" / "run",
         model_routes=routes,
         progress_mode="quiet",
     )
 
-    assert manifest["question"] == "What is fine-tuning?"
+    assert manifest["question"] == "What are urban heat islands?"
     assert manifest["progress_mode"] == "quiet"
     assert manifest["model_routes"] == routes
     assert "packages" in manifest["runtime"]

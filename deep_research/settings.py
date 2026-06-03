@@ -7,14 +7,20 @@ from typing import Iterable, Literal
 
 from dotenv import load_dotenv
 
+from deep_research.source_limits import MINIMUM_SOURCE_TARGET, source_floor
+
 Mode = Literal["fast", "balanced", "max_quality"]
 Provider = Literal["auto", "google", "groq", "hybrid", "ollama"]
 ResolvedProvider = Literal["google", "groq", "hybrid", "ollama"]
+ResearchEngineName = Literal["local_langgraph", "gemini_managed", "openai_managed"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
 GOOGLE_DEFAULT_FAST_MODEL = "google_genai:gemini-2.5-flash"
 GROQ_DEFAULT_MODEL = "groq:openai/gpt-oss-20b"
 GROQ_DEFAULT_FAST_MODEL = "groq:openai/gpt-oss-20b"
+OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
+OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GROQ_DEFAULT_MODEL,
     "fast": GROQ_DEFAULT_FAST_MODEL,
@@ -33,10 +39,26 @@ class ConfigError(RuntimeError):
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
-    mode: Mode = "balanced"
+    mode: Mode = "max_quality"
     out_dir: Path = Path("runs")
-    max_sources: int = 12
-    max_rounds: int = 2
+    max_sources: int = 80
+    max_rounds: int = 6
+    research_engine: ResearchEngineName = "local_langgraph"
+    min_usable_sources: int = MINIMUM_SOURCE_TARGET
+    max_search_queries: int = 12
+    max_candidates: int = 80
+    min_source_words: int = 250
+    min_relevant_chunks: int = 1
+    search_depth: str = "advanced"
+    allow_raw_content: bool = True
+    semantic_verification: bool = True
+    llm_planning: bool = True
+    report_quality_gate: bool = True
+    llm_synthesis: bool = True
+    allow_failed_verification: bool = False
+    strict_tool_models: bool = True
+    local_input_paths: tuple[str, ...] = field(default_factory=tuple)
+    mcp_manifest: str = ""
     provider: ResolvedProvider = "google"
     model: str = GOOGLE_DEFAULT_MODEL
     fast_model: str = GOOGLE_DEFAULT_FAST_MODEL
@@ -63,10 +85,26 @@ class Settings:
         cls,
         *,
         project_root: Path | str | None = None,
-        mode: Mode = "balanced",
+        mode: Mode = "max_quality",
         out_dir: Path | str | None = None,
         max_sources: int | None = None,
         max_rounds: int | None = None,
+        research_engine: ResearchEngineName | None = None,
+        min_usable_sources: int | None = None,
+        max_search_queries: int | None = None,
+        max_candidates: int | None = None,
+        min_source_words: int | None = None,
+        min_relevant_chunks: int | None = None,
+        search_depth: str | None = None,
+        allow_raw_content: bool | None = None,
+        semantic_verification: bool | None = None,
+        llm_planning: bool | None = None,
+        report_quality_gate: bool | None = None,
+        llm_synthesis: bool | None = None,
+        allow_failed_verification: bool | None = None,
+        strict_tool_models: bool | None = None,
+        local_input_paths: tuple[str, ...] | None = None,
+        mcp_manifest: str | None = None,
         provider: Provider | None = None,
         model: str | None = None,
         fast_model: str | None = None,
@@ -94,57 +132,127 @@ class Settings:
         google_api_key = google_api_keys[0] if google_api_keys else ""
         groq_api_key = groq_api_keys[0] if groq_api_keys else ""
         tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        provider_explicit = provider is not None
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
         resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys)
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
+        depth = _depth_defaults(mode)
         resolved_fast_model = _resolve_model(
             resolved_provider,
-            fast_model or os.environ.get("DEEP_RESEARCH_FAST_MODEL"),
+            fast_model or _env_model_override("DEEP_RESEARCH_FAST_MODEL", provider_explicit=provider_explicit),
             fast=True,
             role="fast",
+        )
+
+        resolved_min_usable_sources = source_floor(
+            min_usable_sources
+            if min_usable_sources is not None
+            else int(os.environ.get("DEEP_RESEARCH_MIN_USABLE_SOURCES") or depth["min_usable_sources"])
+        )
+        resolved_max_sources = 0 if max_sources == 0 else source_floor(max_sources if max_sources is not None else mode_sources)
+        resolved_max_candidates = max(
+            resolved_min_usable_sources,
+            int(
+                max_candidates
+                if max_candidates is not None
+                else int(os.environ.get("DEEP_RESEARCH_MAX_CANDIDATES") or depth["max_candidates"])
+            ),
         )
 
         settings = cls(
             project_root=root,
             mode=mode,
             out_dir=resolved_out.resolve(),
-            max_sources=max_sources if max_sources is not None else mode_sources,
+            max_sources=resolved_max_sources,
             max_rounds=max_rounds if max_rounds is not None else mode_rounds,
+            research_engine=research_engine
+            or os.environ.get("DEEP_RESEARCH_ENGINE", "local_langgraph"),  # type: ignore[arg-type]
+            min_usable_sources=resolved_min_usable_sources,
+            max_search_queries=max_search_queries
+            if max_search_queries is not None
+            else int(os.environ.get("DEEP_RESEARCH_MAX_SEARCH_QUERIES") or depth["max_search_queries"]),
+            max_candidates=resolved_max_candidates,
+            min_source_words=min_source_words
+            if min_source_words is not None
+            else int(os.environ.get("DEEP_RESEARCH_MIN_SOURCE_WORDS") or depth["min_source_words"]),
+            min_relevant_chunks=min_relevant_chunks
+            if min_relevant_chunks is not None
+            else int(os.environ.get("DEEP_RESEARCH_MIN_RELEVANT_CHUNKS") or "1"),
+            search_depth=search_depth or os.environ.get("DEEP_RESEARCH_SEARCH_DEPTH", "advanced"),
+            allow_raw_content=_resolve_bool(
+                allow_raw_content,
+                os.environ.get("DEEP_RESEARCH_ALLOW_RAW_CONTENT"),
+                default=True,
+            ),
+            semantic_verification=_resolve_bool(
+                semantic_verification,
+                os.environ.get("DEEP_RESEARCH_SEMANTIC_VERIFICATION"),
+                default=True,
+            ),
+            llm_planning=_resolve_bool(
+                llm_planning,
+                os.environ.get("DEEP_RESEARCH_LLM_PLANNING"),
+                default=True,
+            ),
+            report_quality_gate=_resolve_bool(
+                report_quality_gate,
+                os.environ.get("DEEP_RESEARCH_REPORT_QUALITY_GATE"),
+                default=True,
+            ),
+            llm_synthesis=_resolve_bool(
+                llm_synthesis,
+                os.environ.get("DEEP_RESEARCH_LLM_SYNTHESIS"),
+                default=True,
+            ),
+            allow_failed_verification=_resolve_bool(
+                allow_failed_verification,
+                os.environ.get("DEEP_RESEARCH_ALLOW_FAILED_VERIFICATION"),
+                default=False,
+            ),
+            strict_tool_models=_resolve_bool(
+                strict_tool_models,
+                os.environ.get("DEEP_RESEARCH_STRICT_TOOL_MODELS"),
+                default=True,
+            ),
+            local_input_paths=local_input_paths
+            if local_input_paths is not None
+            else _split_env_list(os.environ.get("DEEP_RESEARCH_LOCAL_INPUTS", "")),
+            mcp_manifest=mcp_manifest if mcp_manifest is not None else os.environ.get("DEEP_RESEARCH_MCP_MANIFEST", ""),
             provider=resolved_provider,
             model=_resolve_model(
                 resolved_provider,
-                model or os.environ.get("DEEP_RESEARCH_MODEL"),
+                model or _env_model_override("DEEP_RESEARCH_MODEL", provider_explicit=provider_explicit),
                 fast=False,
                 role="orchestrator",
             ),
             fast_model=resolved_fast_model,
             planner_model=_resolve_role_model(
                 resolved_provider,
-                planner_model or os.environ.get("DEEP_RESEARCH_PLANNER_MODEL"),
+                planner_model or _env_model_override("DEEP_RESEARCH_PLANNER_MODEL", provider_explicit=provider_explicit),
                 fallback=resolved_fast_model,
                 role="planner",
             ),
             researcher_model=_resolve_role_model(
                 resolved_provider,
-                researcher_model or os.environ.get("DEEP_RESEARCH_RESEARCHER_MODEL"),
+                researcher_model or _env_model_override("DEEP_RESEARCH_RESEARCHER_MODEL", provider_explicit=provider_explicit),
                 fallback=resolved_fast_model,
                 role="researcher",
             ),
             analyst_model=_resolve_role_model(
                 resolved_provider,
-                analyst_model or os.environ.get("DEEP_RESEARCH_ANALYST_MODEL"),
+                analyst_model or _env_model_override("DEEP_RESEARCH_ANALYST_MODEL", provider_explicit=provider_explicit),
                 fallback=resolved_fast_model,
                 role="analyst",
             ),
             verifier_model=_resolve_role_model(
                 resolved_provider,
-                verifier_model or os.environ.get("DEEP_RESEARCH_VERIFIER_MODEL"),
+                verifier_model or _env_model_override("DEEP_RESEARCH_VERIFIER_MODEL", provider_explicit=provider_explicit),
                 fallback=resolved_fast_model,
                 role="verifier",
             ),
             judge_model=_resolve_role_model(
                 resolved_provider,
-                judge_model or os.environ.get("DEEP_RESEARCH_JUDGE_MODEL"),
+                judge_model or _env_model_override("DEEP_RESEARCH_JUDGE_MODEL", provider_explicit=provider_explicit),
                 fallback=resolved_fast_model,
                 role="judge",
             ),
@@ -189,12 +297,15 @@ class Settings:
 
     def validate(self) -> None:
         missing = []
-        if self._uses_model_provider("google_genai") and not self.google_key_pool:
+        if self.research_engine == "gemini_managed" and not self.google_key_pool:
             missing.append("GOOGLE_API_KEY")
-        if self._uses_model_provider("groq") and not self.groq_key_pool:
-            missing.append("GROQ_API_KEY")
-        if not self.tavily_api_key:
-            missing.append("TAVILY_API_KEY")
+        if self.research_engine == "local_langgraph":
+            if self._uses_model_provider("google_genai") and not self.google_key_pool:
+                missing.append("GOOGLE_API_KEY")
+            if self._uses_model_provider("groq") and not self.groq_key_pool:
+                missing.append("GROQ_API_KEY")
+            if not self.tavily_api_key:
+                missing.append("TAVILY_API_KEY")
         if missing:
             joined = ", ".join(missing)
             raise ConfigError(
@@ -205,8 +316,10 @@ class Settings:
             raise ConfigError(f"Unsupported mode: {self.mode}")
         if self.provider not in {"google", "groq", "hybrid", "ollama"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
-        if self.max_sources < 1:
-            raise ConfigError("max_sources must be at least 1.")
+        if self.research_engine not in {"local_langgraph", "gemini_managed", "openai_managed"}:
+            raise ConfigError(f"Unsupported research engine: {self.research_engine}")
+        if self.max_sources != 0 and self.max_sources < MINIMUM_SOURCE_TARGET:
+            raise ConfigError(f"max_sources must be 0 for no explicit cap or at least {MINIMUM_SOURCE_TARGET}.")
         if self.max_rounds < 0:
             raise ConfigError("max_rounds must be zero or greater.")
         if self.provider_retry_attempts < 0:
@@ -217,6 +330,16 @@ class Settings:
             raise ConfigError("scrape_char_limit must be at least 1000.")
         if self.tool_excerpt_char_limit < 500:
             raise ConfigError("tool_excerpt_char_limit must be at least 500.")
+        if self.min_usable_sources < MINIMUM_SOURCE_TARGET:
+            raise ConfigError(f"min_usable_sources must be at least {MINIMUM_SOURCE_TARGET}.")
+        if self.max_search_queries < 1:
+            raise ConfigError("max_search_queries must be at least 1.")
+        if self.max_candidates < self.min_usable_sources:
+            raise ConfigError("max_candidates must be at least min_usable_sources.")
+        if self.min_source_words < 40:
+            raise ConfigError("min_source_words must be at least 40.")
+        if self.min_relevant_chunks < 1:
+            raise ConfigError("min_relevant_chunks must be at least 1.")
 
     def _uses_model_provider(self, provider_prefix: str) -> bool:
         if self.provider == "google" and provider_prefix == "google_genai":
@@ -240,15 +363,38 @@ class Settings:
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
     if provider in {"groq", "hybrid", "ollama"}:
         if mode == "fast":
-            return 2, 1
+            return 24, 2
         if mode == "max_quality":
-            return 5, 2
-        return 3, 1
+            return 80, 6
+        return 40, 4
     if mode == "fast":
-        return 6, 1
+        return 24, 2
     if mode == "max_quality":
-        return 24, 3
-    return 12, 2
+        return 80, 6
+    return 40, 4
+
+
+def _depth_defaults(mode: Mode) -> dict[str, int]:
+    if mode == "fast":
+        return {
+            "min_usable_sources": MINIMUM_SOURCE_TARGET,
+            "max_search_queries": 16,
+            "max_candidates": 160,
+            "min_source_words": 180,
+        }
+    if mode == "max_quality":
+        return {
+            "min_usable_sources": 40,
+            "max_search_queries": 96,
+            "max_candidates": 900,
+            "min_source_words": 350,
+        }
+    return {
+        "min_usable_sources": 24,
+        "max_search_queries": 48,
+        "max_candidates": 420,
+        "min_source_words": 250,
+    }
 
 
 def _resolve_provider(
@@ -276,7 +422,7 @@ def _resolve_model(
     role: str,
 ) -> str:
     chosen = model.strip() if model else _default_model(provider, fast=fast, role=role)
-    if ":" in chosen:
+    if _has_provider_prefix(chosen):
         return chosen
     if provider == "hybrid":
         default_provider, _, _ = _default_model(provider, fast=fast, role=role).partition(":")
@@ -304,7 +450,7 @@ def _resolve_role_model(
 
 def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
     if provider == "ollama":
-        return "ollama:qwen2.5-coder:1.5b" if fast else "ollama:qwen2.5-coder:7b"
+        return OLLAMA_DEFAULT_FAST_MODEL if fast else OLLAMA_DEFAULT_MODEL
     if provider == "hybrid":
         return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
     if provider == "groq":
@@ -318,6 +464,17 @@ def _default_scrape_limit(provider: ResolvedProvider) -> int:
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:
     return 900 if provider in {"groq", "hybrid", "ollama"} else 2_500
+
+
+def _has_provider_prefix(model_spec: str) -> bool:
+    provider, separator, model_name = model_spec.partition(":")
+    return bool(separator and model_name and provider in MODEL_PROVIDER_PREFIXES)
+
+
+def _env_model_override(name: str, *, provider_explicit: bool) -> str | None:
+    if provider_explicit:
+        return None
+    return os.environ.get(name)
 
 
 def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:
@@ -342,6 +499,12 @@ def _resolve_bool(value: bool | None, raw: str | None, *, default: bool) -> bool
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"Unsupported boolean value: {raw}")
+
+
+def _split_env_list(raw: str) -> tuple[str, ...]:
+    if not raw.strip():
+        return ()
+    return tuple(part.strip() for part in raw.split(";") if part.strip())
 
 
 def _numbered_env_names(base_name: str) -> list[str]:

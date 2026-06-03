@@ -17,27 +17,9 @@ from deep_research.agent import ResearchRunError, ResearchRunResult, run_researc
 from deep_research.errors import classify_exception
 from deep_research.model_router import model_for_role
 from deep_research.settings import Settings
+from deep_research.text_terms import term_set
 
 EXPECTED_ANSWER_RECALL_THRESHOLD = 0.65
-EVAL_TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
-EVAL_STOPWORDS = {
-    "and",
-    "are",
-    "but",
-    "can",
-    "for",
-    "from",
-    "has",
-    "into",
-    "its",
-    "not",
-    "that",
-    "the",
-    "their",
-    "this",
-    "while",
-    "with",
-}
 
 
 @dataclass(frozen=True)
@@ -390,11 +372,7 @@ def _normalize_for_phrase_match(text: str) -> str:
 
 
 def _significant_eval_terms(text: str) -> set[str]:
-    return {
-        token
-        for token in EVAL_TOKEN_RE.findall(text.lower())
-        if token not in EVAL_STOPWORDS and not token.isdigit()
-    }
+    return term_set(text)
 
 
 def _load_source_corpus(run_dir: Path | None) -> str:
