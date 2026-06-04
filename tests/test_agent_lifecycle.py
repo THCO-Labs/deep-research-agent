@@ -6,6 +6,7 @@ import pytest
 from deep_research import agent as agent_module
 from deep_research.acquisition import AcquisitionMetrics, AcquisitionResult
 from deep_research.agent import ResearchRunError, resume_research, run_research, verify_research_run
+from deep_research.research_graph import _resume_entry_point, load_latest_checkpoint
 from deep_research.schemas import ResearchBranch, SourceCandidate, SourceRecordV2
 from deep_research.settings import Settings
 
@@ -75,10 +76,46 @@ def test_resume_reuses_checkpointed_sources_without_duplicate_fetches(tmp_path: 
     sources = (resumed.run_dir / "sources.jsonl").read_text(encoding="utf-8").splitlines()
     metrics = json.loads(resumed.metrics_path.read_text(encoding="utf-8"))
     assert calls["fresh"] == 1
-    assert calls["resume"] == 1
+    assert calls["resume"] == 0
     assert len(sources) == 17
     assert metrics["max_rounds"] == 12
     assert metrics["max_search_queries"] == 22
+
+
+def test_resume_entry_point_continues_after_checkpoint_phase(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "latest.json").write_text(json.dumps({"request": {"question": "q"}}), encoding="utf-8")
+    hygiene_checkpoint = checkpoint_dir / "evidence_hygiene.json"
+    hygiene_checkpoint.write_text(json.dumps({"request": {"question": "q"}}), encoding="utf-8")
+
+    state = load_latest_checkpoint(run_dir)
+
+    assert state["checkpoint_phase"] == "evidence_hygiene"
+    assert _resume_entry_point(state) == "semantic_enrichment"
+
+
+def test_resume_entry_point_recovers_from_corrupt_latest_and_rich_replay_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "latest.json").write_text("", encoding="utf-8")
+    (checkpoint_dir / "classify_request.json").write_text(
+        json.dumps(
+            {
+                "request": {"question": "q"},
+                "source_records": [{"source_id": 1}],
+                "evidence_cards": [{"id": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = load_latest_checkpoint(run_dir)
+
+    assert state["checkpoint_phase"] == "classify_request"
+    assert _resume_entry_point(state) == "semantic_enrichment"
 
 
 def test_resume_research_writes_structured_failure_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -140,6 +177,35 @@ def test_run_research_treats_failed_verification_as_failed_run(tmp_path: Path, m
     assert failure["category"] == "verification_failed"
     assert "Research Run Failed Verification" in report
     assert "No cited evidence" in failed_report
+
+
+def test_run_research_stops_without_draft_when_acquisition_returns_no_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def empty_acquire_sources(**_kwargs):
+        return AcquisitionResult(
+            candidates=[],
+            sources=[],
+            source_texts={},
+            metrics=AcquisitionMetrics(
+                search_count=2,
+                failures=["Search failed for 'query': This request exceeds your plan's set usage limit."],
+            ),
+        )
+
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", empty_acquire_sources)
+    settings = _settings(tmp_path)
+
+    with pytest.raises(ResearchRunError) as raised:
+        run_research("Why does the body of a report drift away from the topic?", settings, progress_mode="quiet")
+
+    report = (raised.value.result.run_dir / "report.md").read_text(encoding="utf-8")
+    verification = json.loads(raised.value.result.verification_path.read_text(encoding="utf-8"))
+    assert "Research Run Failed Verification" in report
+    assert "No evidence cards were retrieved" in report
+    assert "No evidence cards were retrieved" in verification["failures"][0]
+    assert not (raised.value.result.run_dir / "draft_report.md").exists()
 
 
 def test_gemini_managed_mode_writes_v2_artifacts(tmp_path: Path, monkeypatch) -> None:

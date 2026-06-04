@@ -429,10 +429,10 @@ def _report_depth_score(report: str, plan: ResearchPlan, evidence_cards: list[Ev
     evidence_source_count = len({card.source_id for card in evidence_cards})
     criteria_rich = _criteria_rich_plan(plan)
     expected_paragraphs = min(
-        28 if criteria_rich else 12,
+        40 if criteria_rich else 12,
         max(
             3,
-            len(plan.branches),
+            len(plan.branches) * 2 if criteria_rich else len(plan.branches),
             evidence_source_count // 4,
             len(plan.acceptance_criteria) // 3,
         ),
@@ -442,7 +442,7 @@ def _report_depth_score(report: str, plan: ResearchPlan, evidence_cards: list[Ev
     avg_terms = sum(paragraph_term_counts) / max(len(paragraph_term_counts), 1)
     term_depth_score = min(1.0, avg_terms / 18)
     headings = re.findall(r"(?m)^##\s+(.+?)\s*$", body)
-    heading_score = min(1.0, len(headings) / max(min(6, max(2, len(plan.branches) // 2)), 1))
+    heading_score = min(1.0, len(headings) / _target_heading_count(plan, criteria_rich=criteria_rich))
     synthesis_score = 1.0 if _has_synthesis_language(body) else 0.0
     limits_score = 1.0 if _has_uncertainty_or_limits(body) else 0.0
     word_score = min(1.0, _report_word_count(body) / max(_required_report_word_count(plan, evidence_cards), 1))
@@ -464,6 +464,19 @@ def _report_depth_threshold(plan: ResearchPlan) -> float:
     return CRITERIA_RICH_REPORT_DEPTH_THRESHOLD if _criteria_rich_plan(plan) else REPORT_DEPTH_THRESHOLD
 
 
+def _target_heading_count(plan: ResearchPlan, *, criteria_rich: bool) -> int:
+    if criteria_rich:
+        return min(
+            30,
+            max(
+                16,
+                len(plan.branches) + 7,
+                len(_report_level_criteria(plan.acceptance_criteria)) // 2,
+            ),
+        )
+    return max(min(6, max(2, len(plan.branches) // 2)), 1)
+
+
 def _criteria_rich_plan(plan: ResearchPlan) -> bool:
     return len(_report_level_criteria(plan.acceptance_criteria)) >= 8 or any(
         "task-specific" in criterion.lower() and "criterion" in criterion.lower()
@@ -477,12 +490,12 @@ def _required_report_word_count(plan: ResearchPlan, evidence_cards: list[Evidenc
     evidence_source_count = len({card.source_id for card in evidence_cards})
     if _criteria_rich_plan(plan):
         return min(
-            7500,
+            9000,
             max(
-                4800,
-                criteria_count * 180,
-                branch_count * 380,
-                evidence_source_count * 120,
+                6500,
+                criteria_count * 220,
+                branch_count * 520,
+                evidence_source_count * 150,
             ),
         )
     if evidence_source_count >= 30 or branch_count >= 8:

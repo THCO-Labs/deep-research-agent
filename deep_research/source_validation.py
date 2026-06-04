@@ -52,6 +52,13 @@ def validate_source_content(
     branch_anchor_matches = _matched_anchor_groups(branch_anchor_groups, content_terms)
     question_anchor_matches = _matched_anchor_groups(question_anchor_groups, content_terms)
     partial_question_anchor_collisions = _partial_anchor_collisions(question_anchor_groups, content_terms, question_anchor_matches)
+    matched_terms = _matched_terms(terms, content_terms)
+    branch_semantic_match = _has_strong_branch_semantic_match(
+        matched_terms=matched_terms,
+        branch_terms=terms,
+        question_terms=question_terms,
+        content_terms=content_terms,
+    )
     if question_terms:
         question_matches = _matched_terms(question_terms, content_terms)
         if len(question_matches) < min(2, len(question_terms)):
@@ -60,13 +67,14 @@ def validate_source_content(
             reasons.append("source lacks a question-specific anchor phrase")
         elif partial_question_anchor_collisions and len(question_anchor_matches) < 2:
             reasons.append("source partially matches a question anchor without the complete phrase")
-    if branch_anchor_groups and not branch_anchor_matches:
+    if branch_anchor_groups and not branch_anchor_matches and not branch_semantic_match:
         reasons.append("source lacks a branch-specific anchor phrase")
     reasons.extend(_concept_dominance_rejections(title=title, content=normalized, branch=branch, question=question))
-    matched_terms = _matched_terms(terms, content_terms)
     term_score = len(matched_terms) / max(len(terms), 1)
     anchor_score = len(branch_anchor_matches) / max(len(branch_anchor_groups), 1) if branch_anchor_groups else term_score
     relevance_score = round((term_score * 0.70) + (anchor_score * 0.30), 4)
+    if branch_semantic_match:
+        relevance_score = max(relevance_score, 0.30)
     if relevance_score < 0.30:
         reasons.append("branch relevance below threshold")
 
@@ -170,6 +178,22 @@ def _partial_anchor_collisions(
                 continue
             collisions.append(group)
     return collisions
+
+
+def _has_strong_branch_semantic_match(
+    *,
+    matched_terms: set[str],
+    branch_terms: set[str],
+    question_terms: set[str],
+    content_terms: set[str],
+) -> bool:
+    if not matched_terms:
+        return False
+    if question_terms and len(_matched_terms(question_terms, content_terms)) < min(2, len(question_terms)):
+        return False
+    absolute_hits = len(matched_terms)
+    relative_hits = absolute_hits / max(len(branch_terms), 1)
+    return absolute_hits >= 6 or (absolute_hits >= 4 and relative_hits >= 0.28)
 
 
 def _anchor_groups_from_text(text: str) -> list[frozenset[str]]:

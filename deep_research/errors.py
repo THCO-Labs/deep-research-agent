@@ -45,6 +45,15 @@ def classify_exception(exc: BaseException) -> FailureClassification:
             error_type=type(exc).__name__,
             message=message,
         )
+    if _is_provider_timeout_error(lower):
+        return FailureClassification(
+            category="provider_timeout",
+            retryable=True,
+            retry_after_seconds=retry_after,
+            suggested_action="Retry the request or route affected roles to a different provider/key pool.",
+            error_type=type(exc).__name__,
+            message=message,
+        )
     if _is_tool_call_error(lower):
         return FailureClassification(
             category="tool_call_parse_error",
@@ -94,7 +103,25 @@ def _is_quota_error(lower_message: str) -> bool:
         "rate_limit",
         "rate limit",
         "quota",
+        "usage limit",
+        "set usage limit",
+        "plan's set usage limit",
         "429",
+    )
+    return any(token in lower_message for token in tokens)
+
+
+def _is_provider_timeout_error(lower_message: str) -> bool:
+    tokens = (
+        "deadline_exceeded",
+        "deadline exceeded",
+        "request timed out",
+        "timed out",
+        "timeout",
+        "504",
+        "503",
+        "service unavailable",
+        "temporarily unavailable",
     )
     return any(token in lower_message for token in tokens)
 

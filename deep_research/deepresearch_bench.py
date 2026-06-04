@@ -1536,7 +1536,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-output-dir", type=Path, default=None, help="Directory for planning audit outputs.")
     parser.add_argument("--mode", choices=["fast", "balanced", "max_quality"], default="max_quality")
     parser.add_argument("--out", default="runs")
-    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid", "ollama"], default=None)
+    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid", "ollama", "openrouter"], default=None)
     parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-rounds", type=int, default=None)
     parser.add_argument("--min-usable-sources", type=int, default=None)
@@ -1547,6 +1547,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-semantic-verification", action="store_true")
     parser.add_argument("--semantic-evidence-max-llm-cards", type=int, default=None)
     parser.add_argument("--allow-failed-verification", action="store_true")
+    parser.add_argument("--no-model-fallbacks", action="store_true")
+    parser.add_argument("--provider-retry-attempts", type=int, default=None)
+    parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
+    parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
     parser.add_argument(
         "--score-proxy",
         action="store_true",
@@ -1663,6 +1667,10 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         semantic_verification=not args.no_semantic_verification,
         semantic_evidence_max_llm_cards=args.semantic_evidence_max_llm_cards,
         allow_failed_verification=args.allow_failed_verification,
+        model_fallbacks=not args.no_model_fallbacks,
+        provider_retry_attempts=args.provider_retry_attempts,
+        provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
+        model_request_timeout_seconds=args.model_request_timeout_seconds,
     )
 
 

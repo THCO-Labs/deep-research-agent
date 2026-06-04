@@ -9,7 +9,7 @@ from deep_research.settings import ConfigError, Settings
 @pytest.fixture(autouse=True)
 def clear_research_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
-        if name.startswith(("GOOGLE_API_KEY", "GROQ_API_KEY", "DEEP_RESEARCH_")) or name == "TAVILY_API_KEY":
+        if name.startswith(("GOOGLE_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "TAVILY_API_KEY", "DEEP_RESEARCH_")):
             monkeypatch.delenv(name, raising=False)
 
 
@@ -27,7 +27,7 @@ def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert settings.tavily_api_key == "tavily-test"
     assert settings.provider == "google"
     assert settings.mode == "max_quality"
-    assert settings.max_sources == 80
+    assert settings.max_sources == 0
     assert settings.min_usable_sources == 40
 
 
@@ -53,7 +53,7 @@ def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
     settings = Settings.from_env(project_root=tmp_path)
 
     assert settings.provider == "hybrid"
-    assert settings.model == "groq:openai/gpt-oss-20b"
+    assert settings.model == "google_genai:gemini-2.5-flash"
     assert settings.fast_model == "groq:openai/gpt-oss-20b"
     assert settings.planner_model == "google_genai:gemini-2.5-flash"
     assert settings.researcher_model == "groq:openai/gpt-oss-20b"
@@ -61,7 +61,7 @@ def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
     assert settings.judge_model == "google_genai:gemini-2.5-flash"
     assert settings.scrape_char_limit == 6000
     assert settings.tool_excerpt_char_limit == 900
-    assert settings.max_sources == 80
+    assert settings.max_sources == 0
     assert settings.min_usable_sources == 40
     assert settings.max_rounds == 6
     assert settings.google_key_pool == ("google-test", "google-test-1")
@@ -125,6 +125,63 @@ def test_settings_loads_numbered_google_keys(tmp_path: Path, monkeypatch: pytest
     assert settings.google_key_pool == ("google-one", "google-two")
 
 
+def test_settings_auto_uses_openrouter_when_only_openrouter_is_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "OPENROUTER_API_KEY=openrouter-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_PROVIDER", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.provider == "openrouter"
+    assert settings.model == "openrouter:openrouter/free"
+    assert settings.fast_model == "openrouter:openrouter/free"
+    assert settings.openrouter_key_pool == ("openrouter-test",)
+
+
+def test_settings_loads_numbered_tavily_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GOOGLE_API_KEY=google-test\n"
+        "TAVILY_API_KEY1=tavily-one\n"
+        "TAVILY_API_KEY2=tavily-two\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY1", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY2", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.tavily_api_key == "tavily-one"
+    assert settings.tavily_key_pool == ("tavily-one", "tavily-two")
+
+
+def test_settings_loads_delimited_and_underscore_key_pools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GOOGLE_API_KEY=google-test\n"
+        "TAVILY_API_KEY=tavily-one\n"
+        "TAVILY_API_KEY_2=tavily-two\n"
+        "TAVILY_API_KEYS=tavily-three,tavily-four;tavily-two\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY_2", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEYS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.tavily_api_key == "tavily-one"
+    assert settings.tavily_key_pool == ("tavily-one", "tavily-two", "tavily-three", "tavily-four")
+
+
 def test_settings_supports_role_model_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
@@ -157,6 +214,21 @@ def test_settings_supports_disabling_model_fallbacks(tmp_path: Path, monkeypatch
     settings = Settings.from_env(project_root=tmp_path)
 
     assert settings.model_fallbacks is False
+
+
+def test_settings_supports_model_request_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MODEL_REQUEST_TIMEOUT_SECONDS=45\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MODEL_REQUEST_TIMEOUT_SECONDS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.model_request_timeout_seconds == 45
 
 
 def test_settings_supports_disabling_precollection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

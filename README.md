@@ -24,6 +24,7 @@ For local LangGraph web research:
 ```text
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...       # optional, depending on provider routing
+OPENROUTER_API_KEY=... # optional free-model fallback/provider lane
 TAVILY_API_KEY=...
 ```
 
@@ -89,7 +90,8 @@ Key options:
 - `--max-search-queries N`
 - `--max-candidates N`
 - `--min-source-words N`
-- `--provider auto|google|groq|hybrid|ollama`
+- `--provider auto|google|groq|hybrid|ollama|openrouter`
+- `--provider openrouter`: use OpenRouter-compatible chat completions; the default model is `openrouter/free`
 - `--allow-weak-tool-models`: opt out of strict tool-model policy
 - `--no-llm-planning`: disable JSON-only semantic plan enrichment
 - `--no-llm-synthesis`: use deterministic evidence-card report synthesis
@@ -157,3 +159,35 @@ python -m deep_research.eval_report eval_runs/<run>/results.jsonl
 ```
 
 Benchmarks should define topic-specific must-include requirements, source requirements, and coverage expectations without relying on hardcoded planner branches for any single subject.
+
+## OpenRouter Free Models
+
+OpenRouter is supported through model specs like:
+
+```text
+DEEP_RESEARCH_PROVIDER=openrouter
+DEEP_RESEARCH_MODEL=openrouter:openrouter/free
+```
+
+You can also use it for cheaper utility roles while keeping stronger providers for planning/synthesis:
+
+```text
+DEEP_RESEARCH_JUDGE_MODEL=openrouter:openrouter/free
+DEEP_RESEARCH_FAST_MODEL=openrouter:openrouter/free
+```
+
+OpenRouter's free router has lower and changing rate limits, so it is best as an explicit fallback or utility lane rather than the default source-acquisition or final-writing bottleneck. Specific free variants can be used with model IDs ending in `:free`, for example `openrouter:meta-llama/llama-3.2-3b-instruct:free`.
+
+## Tavily Key Pool
+
+Search acquisition rotates numbered Tavily keys:
+
+```text
+TAVILY_API_KEY=...
+TAVILY_API_KEY1=...
+TAVILY_API_KEY2=...
+TAVILY_API_KEY_3=...
+TAVILY_API_KEYS=key-a,key-b
+```
+
+If one key hits a usage/rate limit, the search client tries the next configured key before failing the query.

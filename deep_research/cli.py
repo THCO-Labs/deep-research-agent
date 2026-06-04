@@ -52,7 +52,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--mcp-manifest", default=None, help="JSON manifest for MCP connector source payloads.")
     parser.add_argument(
         "--provider",
-        choices=["auto", "google", "groq", "hybrid", "ollama"],
+        choices=["auto", "google", "groq", "hybrid", "ollama", "openrouter"],
         default=None,
         help="Model provider for local utility/model policy routing.",
     )
@@ -65,6 +65,9 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--judge-model", default=None)
     parser.add_argument("--scrape-char-limit", type=int, default=None)
     parser.add_argument("--no-model-fallbacks", action="store_true")
+    parser.add_argument("--provider-retry-attempts", type=int, default=None)
+    parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
+    parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
     parser.add_argument("--no-llm-planning", action="store_true")
     parser.add_argument("--no-llm-synthesis", action="store_true")
     parser.add_argument("--no-semantic-verification", action="store_true")
@@ -160,6 +163,9 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         llm_synthesis=not args.no_llm_synthesis,
         allow_failed_verification=args.allow_failed_verification,
         model_fallbacks=not args.no_model_fallbacks,
+        provider_retry_attempts=args.provider_retry_attempts,
+        provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
+        model_request_timeout_seconds=args.model_request_timeout_seconds,
         strict_tool_models=not args.allow_weak_tool_models,
         live=args.live,
     )

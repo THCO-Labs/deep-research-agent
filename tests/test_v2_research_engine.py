@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.evidence import build_evidence_cards
 from deep_research.evidence_hygiene import apply_evidence_hygiene, report_quality_issues
-from deep_research.acquisition import _trim_search_query
+from deep_research.acquisition import TavilySearchClientPool, _branch_queries, _trim_search_query
 from deep_research.ingestion import ingest_local_paths, ingest_mcp_manifest
 from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
@@ -26,13 +26,14 @@ from deep_research.synthesis import (
     _evidence_backed_sources,
     _normalize_report_markdown,
     _repair_weak_citation_support,
+    _synthesis_model_spec,
     _synthesis_prompt,
     _target_report_profile,
     build_report_blueprint,
     synthesize_report,
 )
-from deep_research.verifier_v2 import verify_report_v2
-from deep_research.research_graph import _focus_terms_from_state, _verification_route
+from deep_research.verifier_v2 import _report_depth_score, verify_report_v2
+from deep_research.research_graph import _acquire_route, _coverage_route, _focus_terms_from_state, _verification_route
 
 
 def test_generic_plan_handles_paragraph_length_medical_question() -> None:
@@ -63,6 +64,50 @@ def test_acquisition_trims_overlong_search_queries() -> None:
 
     assert len(trimmed) <= 380
     assert trimmed.split()[-1] in {"criterion", "coverage", "phrase"}
+
+
+def test_acquisition_followup_queries_stay_evidence_neutral() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Theoretical mechanism",
+        objective="Explain a theoretical mechanism.",
+        queries=["theoretical mechanism evidence"],
+        required_terms=["mediating factor"],
+    )
+
+    queries = _branch_queries(
+        branch,
+        forced_terms=["source credibility"],
+        question="What is the relationship between two constructs?",
+    )
+    query_text = " ".join(queries).lower()
+
+    assert "source credibility" in query_text
+    assert "implementation" not in query_text
+    assert "best practices" not in query_text
+
+
+def test_tavily_key_pool_rotates_when_key_hits_usage_limit(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeTavilyClient:
+        def __init__(self, *, api_key: str) -> None:
+            self.api_key = api_key
+
+        def search(self, query: str, **kwargs):
+            calls.append(self.api_key)
+            if self.api_key == "tavily-one":
+                raise RuntimeError("This request exceeds your plan's set usage limit.")
+            return {"results": [{"url": "https://example.com", "title": query, "content": "ok"}]}
+
+    monkeypatch.setattr("deep_research.acquisition.TavilyClient", FakeTavilyClient)
+    settings = SimpleNamespace(tavily_key_pool=("tavily-one", "tavily-two"), tavily_api_key="tavily-one")
+
+    client = TavilySearchClientPool(settings)
+    response = client.search("test query", max_results=1)
+
+    assert response["results"][0]["url"] == "https://example.com"
+    assert calls == ["tavily-one", "tavily-two"]
 
 
 def test_generic_plan_handles_food_question_without_topic_specific_branches() -> None:
@@ -357,6 +402,113 @@ def test_llm_semantic_planning_does_not_use_lexical_scope_blacklists(tmp_path: P
     assert sum(branch.min_sources for branch in result.plan.branches) >= 17
 
 
+def test_semantic_evidence_reuses_prior_judgments_without_recalling_model(tmp_path: Path) -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Direct relationship",
+        objective="Explain the relationship.",
+        queries=["relationship evidence"],
+        required_terms=["relationship evidence"],
+    )
+    plan = ResearchPlan(
+        question="How does one construct affect another?",
+        intent="general",
+        audience="general",
+        report_outline=[],
+        branches=[branch],
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id="branch_1",
+        claim="The evidence directly explains the relationship between the constructs.",
+        supporting_excerpt="The evidence directly explains the relationship between the constructs.",
+        source_url="https://example.com",
+        source_title="Source",
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    first_model = FakeSemanticJudge(
+        {
+            "cards": [
+                {
+                    "id": 1,
+                    "keep": True,
+                    "branch_alignment_score": 1.0,
+                    "entailment_score": 1.0,
+                    "evidence_relevance_score": 1.0,
+                    "normalized_claim": "The evidence directly explains the relationship between the constructs.",
+                    "key_points": ["direct relationship"],
+                    "limitations": [],
+                    "failure_reasons": [],
+                }
+            ]
+        }
+    )
+    settings = Settings(project_root=tmp_path, out_dir=tmp_path, semantic_verification=True)
+
+    first = enrich_evidence_cards_with_semantics(
+        plan=plan,
+        evidence_cards=[card],
+        settings=settings,
+        model=first_model,
+    )
+    second = enrich_evidence_cards_with_semantics(
+        plan=plan,
+        evidence_cards=[card],
+        settings=settings,
+        model=RaisingSemanticJudge(),
+        prior_judgments=first.judgments,
+    )
+
+    assert len(first_model.prompts) == 1
+    assert len(second.cards) == 1
+    assert second.metrics["semantic_evidence_cached_judgment_count"] == 1
+    assert second.metrics["semantic_evidence_batches"] == 0
+
+
+def test_semantic_evidence_uses_deterministic_fallback_on_provider_quota(tmp_path: Path) -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Direct relationship",
+        objective="Explain the relationship.",
+        queries=["relationship evidence"],
+        required_terms=["relationship evidence"],
+    )
+    plan = ResearchPlan(
+        question="How does one construct affect another?",
+        intent="general",
+        audience="general",
+        report_outline=[],
+        branches=[branch],
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id="branch_1",
+        claim="The evidence directly explains the relationship between the constructs.",
+        supporting_excerpt="The evidence directly explains the relationship between the constructs.",
+        source_url="https://example.com",
+        source_title="Source",
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    settings = Settings(project_root=tmp_path, out_dir=tmp_path, semantic_verification=True)
+
+    result = enrich_evidence_cards_with_semantics(
+        plan=plan,
+        evidence_cards=[card],
+        settings=settings,
+        model=QuotaSemanticJudge(),
+    )
+
+    assert len(result.cards) == 1
+    assert result.metrics["semantic_evidence_provider_failure_count"] == 1
+    assert any("deterministic fallback" in failure for failure in result.failures)
+
+
 def test_generic_source_validation_accepts_medical_topic() -> None:
     plan = build_research_plan(
         "Do Mediterranean diets help adults with hypertension? Cover blood pressure mechanisms and evidence."
@@ -637,6 +789,172 @@ def test_source_validation_accepts_direct_single_concept_context_source() -> Non
     )
 
     assert result.usable is True
+
+
+def test_coverage_allows_partial_soft_required_term_coverage() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Mechanisms and evidence",
+        objective="Explain the mechanisms and evidence for a relationship.",
+        queries=["mechanisms evidence relationship"],
+        min_sources=1,
+        required_terms=[
+            "mechanisms",
+            "empirical evidence",
+            "mediating factors",
+            "moderating factors",
+            "boundary conditions",
+            "limitations",
+            "future research",
+            "source credibility",
+            "information processing",
+            "uncertainty",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Mechanism Source",
+        url="https://example.com/mechanism",
+        canonical_url="https://example.com/mechanism",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=200,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim=(
+            "The evidence explains mechanisms, empirical evidence, mediating factors, "
+            "source credibility, information processing, and uncertainty."
+        ),
+        supporting_excerpt=(
+            "The evidence explains mechanisms, empirical evidence, mediating factors, "
+            "source credibility, information processing, and uncertainty."
+        ),
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+
+    coverage = build_coverage_matrix(branches=[branch], evidence_cards=[card], sources=[source])
+
+    assert coverage.complete is True
+    assert coverage.missing_branches == []
+    assert any("required term coverage" in point for point in coverage.branches[0].covered_points)
+
+
+def test_coverage_keeps_sparse_required_term_coverage_incomplete() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Mechanisms and evidence",
+        objective="Explain the mechanisms and evidence for a relationship.",
+        queries=["mechanisms evidence relationship"],
+        min_sources=1,
+        required_terms=[
+            "mechanisms",
+            "empirical evidence",
+            "mediating factors",
+            "moderating factors",
+            "boundary conditions",
+            "limitations",
+            "future research",
+            "source credibility",
+            "information processing",
+            "uncertainty",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Sparse Source",
+        url="https://example.com/sparse",
+        canonical_url="https://example.com/sparse",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=200,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="The evidence mentions mechanisms only.",
+        supporting_excerpt="The evidence mentions mechanisms only.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+
+    coverage = build_coverage_matrix(branches=[branch], evidence_cards=[card], sources=[source])
+
+    assert coverage.complete is False
+    assert coverage.missing_branches == [branch.id]
+    assert any("actual" in point for point in coverage.branches[0].missing_points)
+
+
+def test_evidence_builder_uses_strong_branch_overlap_without_exact_anchor_phrase() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Mediating and moderating factors",
+        objective="Identify factors that influence a misinformation acceptance relationship.",
+        queries=["source credibility information complexity misinformation acceptance"],
+        min_sources=1,
+        required_terms=[
+            "source cues",
+            "information processing depth",
+            "emotional responses",
+            "mediating factors",
+            "moderating factors",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Source Credibility Study",
+        url="https://example.com/source-credibility",
+        canonical_url="https://example.com/source-credibility",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=200,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    text = (
+        "Credibility, information complexity, and platform context can influence misinformation "
+        "acceptance by changing how much people scrutinize false claims before accepting them. "
+        "This sentence intentionally does not repeat the planned anchor phrases verbatim."
+    )
+
+    cards = build_evidence_cards(
+        branches=[branch],
+        sources=[source],
+        source_texts={1: text},
+        question="What factors influence misinformation acceptance?",
+    )
+
+    assert cards
+    assert "misinformation acceptance" in cards[0].claim
 
 
 def test_evidence_builder_skips_stale_neighboring_concept_source() -> None:
@@ -1883,6 +2201,74 @@ def test_synthesis_appends_evidence_coverage_for_missing_branches_and_sources() 
     assert "[2]" in repaired.split("## Sources")[0]
 
 
+def test_synthesis_does_not_append_fragmented_coverage_for_criteria_rich_reports() -> None:
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="Cooling centers",
+            objective="Explain how cooling centers reduce heat illness risk.",
+            queries=["cooling centers heat illness risk"],
+            required_terms=["cooling centers", "heat illness risk"],
+        ),
+        ResearchBranch(
+            id="branch_2",
+            title="Access barriers",
+            objective="Explain barriers that limit access.",
+            queries=["cooling center access barriers"],
+            required_terms=["access barriers", "heat illness risk"],
+        ),
+    ]
+    plan = ResearchPlan(
+        question="How do cooling centers reduce heat illness risk, and what limits their use?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title for branch in branches],
+        branches=branches,
+        acceptance_criteria=[
+            f"Cover this task-specific insight criterion in synthesis: Criterion {index} requires evidence, mechanisms, limits, and implications."
+            for index in range(1, 10)
+        ],
+    )
+    cards = [
+        EvidenceCard(
+            id=1,
+            source_id=1,
+            branch_id="branch_1",
+            claim="Cooling centers reduce heat illness risk by giving residents cooler indoor spaces.",
+            supporting_excerpt="Cooling centers reduce heat illness risk by giving residents cooler indoor spaces.",
+            source_url="https://example.com/1",
+            source_title="Source 1",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        ),
+        EvidenceCard(
+            id=2,
+            source_id=2,
+            branch_id="branch_2",
+            claim="Access barriers limit whether residents can use cooling centers during heat waves.",
+            supporting_excerpt="Access barriers limit whether residents can use cooling centers during heat waves.",
+            source_url="https://example.com/2",
+            source_title="Source 2",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        ),
+    ]
+    report = (
+        "# Cooling Centers\n\n"
+        "Cooling centers reduce heat illness risk by giving residents cooler indoor spaces. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Source 1: https://example.com/1\n"
+    )
+
+    repaired = _append_evidence_coverage_if_needed(report, plan, cards)
+
+    assert repaired == report
+    assert "Additional Source-Backed Analysis" not in repaired
+    assert "[2]" not in repaired.split("## Sources")[0]
+
+
 def test_evidence_hygiene_rejects_boilerplate_and_metadata_cards() -> None:
     clean = EvidenceCard(
         id=1,
@@ -2403,11 +2789,114 @@ def test_criteria_rich_synthesis_profile_requires_reference_grade_depth() -> Non
     )
 
     assert profile["criteria_rich"] is True
-    assert profile["minimum_words"] >= 4800
+    assert profile["minimum_words"] >= 6500
+    assert profile["target_words"] >= 8000
     assert profile["target_words"] > profile["minimum_words"]
-    assert profile["minimum_cited_paragraphs"] >= 20
-    assert profile["minimum_major_sections_before_sources"] >= 8
+    assert profile["minimum_cited_paragraphs"] >= 28
+    assert profile["minimum_major_sections_before_sources"] >= 16
     assert any(row["purpose"] == "Mechanisms and causal logic" for row in profile["section_plan"])
+
+
+def test_criteria_rich_synthesis_uses_large_context_google_model_when_available(tmp_path: Path) -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain mechanisms and evidence.",
+        queries=["need for closure misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="academic",
+        report_outline=[branch.title],
+        branches=[branch],
+        acceptance_criteria=[
+            f"Cover this task-specific insight criterion in synthesis: Criterion {index} requires depth."
+            for index in range(1, 10)
+        ],
+    )
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:openai/gpt-oss-20b",
+        google_api_keys=("google-a",),
+        groq_api_keys=("groq-a",),
+    )
+
+    assert _synthesis_model_spec(settings, plan) == "google_genai:gemini-2.5-flash"
+
+
+def test_normal_synthesis_keeps_configured_model(tmp_path: Path) -> None:
+    plan = build_research_plan("What are urban heat islands?")
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:openai/gpt-oss-20b",
+        google_api_keys=("google-a",),
+        groq_api_keys=("groq-a",),
+    )
+
+    assert _synthesis_model_spec(settings, plan) == "groq:openai/gpt-oss-20b"
+
+
+def test_criteria_rich_depth_score_rewards_rich_natural_sectioning() -> None:
+    branches = [
+        ResearchBranch(
+            id=f"branch_{index}",
+            title=f"Analytical branch {index}",
+            objective=f"Explain analytical branch {index} with evidence, mechanisms, limits, and implications.",
+            queries=[f"analytical branch {index} evidence"],
+            min_sources=1,
+            required_terms=[f"analytical branch {index}", "evidence", "mechanisms"],
+        )
+        for index in range(1, 6)
+    ]
+    plan = ResearchPlan(
+        question="How should this benchmark-style relationship be explained?",
+        intent="general",
+        audience="academic",
+        report_outline=[branch.title for branch in branches],
+        branches=branches,
+        acceptance_criteria=[
+            f"Cover this task-specific insight criterion in synthesis: Criterion {index} requires depth, evidence, mechanisms, limitations, and implications."
+            for index in range(1, 18)
+        ],
+    )
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=index,
+            branch_id=branches[(index - 1) % len(branches)].id,
+            claim=f"Evidence item {index} supports analytical branch mechanisms and implications.",
+            supporting_excerpt=f"Evidence item {index} supports analytical branch mechanisms and implications.",
+            source_url=f"https://example.com/{index}",
+            source_title=f"Source {index}",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        )
+        for index in range(1, 18)
+    ]
+    paragraph = (
+        "This cited paragraph explains analytical branch evidence, mechanisms, limitations, implications, "
+        "uncertainty, comparison, synthesis, and future research with enough terminology to count as a "
+        "substantive report paragraph for a benchmark-style task. [1]"
+    )
+    thin_heading_report = (
+        "# Benchmark Report\n\n"
+        "## Direct Answer\n\n"
+        + "\n\n".join(paragraph for _ in range(90))
+        + "\n\n## Evidence\n\n"
+        + "\n\n".join(paragraph for _ in range(20))
+        + "\n\n## Sources\n\n[1] Source 1: https://example.com/1\n"
+    )
+
+    score = _report_depth_score(thin_heading_report, plan, cards)
+
+    assert score < 0.90
 
 
 def test_synthesis_prompt_requires_user_request_language() -> None:
@@ -2745,6 +3234,107 @@ def test_synthesis_card_selection_prefers_question_phrase_overlap() -> None:
     assert selected[0].id == 2
 
 
+def test_synthesis_card_selection_keeps_rare_required_term_under_budget() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Mechanisms and boundary conditions",
+        objective="Explain the evidence, mechanisms, and boundary conditions.",
+        queries=["mechanisms evidence boundary conditions"],
+        required_terms=["mechanisms", "evidence", "boundary conditions"],
+    )
+    plan = ResearchPlan(
+        question="Explain the mechanisms and boundary conditions for misinformation acceptance.",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+        acceptance_criteria=["Cover mechanisms, evidence quality, and boundary conditions."],
+    )
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=1,
+            branch_id=branch.id,
+            claim="Mechanisms and evidence explain misinformation acceptance through repeated exposure.",
+            supporting_excerpt="Mechanisms and evidence explain misinformation acceptance through repeated exposure.",
+            source_url="https://example.com/repeated",
+            source_title="Repeated Exposure",
+            quality_score=1.0,
+            relevance_score=1.0,
+            confidence=1.0,
+        )
+        for index in range(1, 130)
+    ]
+    rare_card = EvidenceCard(
+        id=500,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Boundary conditions include uncertainty, prior beliefs, and the information environment.",
+        supporting_excerpt="Boundary conditions include uncertainty, prior beliefs, and the information environment.",
+        source_url="https://example.com/boundary",
+        source_title="Boundary Conditions",
+        quality_score=0.45,
+        relevance_score=0.45,
+        confidence=0.45,
+    )
+
+    selected = _cards_for_synthesis(plan, cards + [rare_card])
+
+    assert len(selected) <= 96
+    assert rare_card.id in {card.id for card in selected}
+
+
+def test_synthesis_card_selection_preserves_source_diversity() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Evidence diversity",
+        objective="Synthesize findings across independent sources.",
+        queries=["evidence diversity synthesis"],
+        required_terms=["independent sources", "evidence diversity"],
+    )
+    plan = ResearchPlan(
+        question="Synthesize the evidence across independent sources.",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=1,
+            branch_id=branch.id,
+            claim="One source repeatedly reports the same evidence pattern.",
+            supporting_excerpt="One source repeatedly reports the same evidence pattern.",
+            source_url="https://example.com/source-1",
+            source_title="Source 1",
+            quality_score=1.0,
+            relevance_score=1.0,
+            confidence=1.0,
+        )
+        for index in range(1, 80)
+    ]
+    cards.extend(
+        EvidenceCard(
+            id=100 + source_id,
+            source_id=source_id,
+            branch_id=branch.id,
+            claim=f"Independent source {source_id} contributes evidence diversity and a distinct context.",
+            supporting_excerpt=f"Independent source {source_id} contributes evidence diversity and a distinct context.",
+            source_url=f"https://example.com/source-{source_id}",
+            source_title=f"Source {source_id}",
+            quality_score=0.7,
+            relevance_score=0.7,
+            confidence=0.7,
+        )
+        for source_id in range(2, 8)
+    )
+
+    selected = _cards_for_synthesis(plan, cards)
+
+    assert len({card.source_id for card in selected[:12]}) >= 6
+
+
 def test_report_normalizer_repairs_heading_sources_and_uncited_paragraphs() -> None:
     source = SourceRecordV2(
         id=1,
@@ -2810,6 +3400,80 @@ def test_semantic_repair_focus_targets_missing_branches_only() -> None:
     assert "targeted follow-up" in focus["branch_2"]
 
 
+def test_repair_focus_strips_internal_coverage_labels() -> None:
+    state = {
+        "plan": {
+            "branches": [
+                {
+                    "id": "branch_2",
+                    "required_terms": ["domain-specific misinformation", "information environment"],
+                }
+            ]
+        },
+        "coverage_matrix": {
+            "missing_branches": ["branch_2"],
+            "branches": [
+                {
+                    "branch_id": "branch_2",
+                    "complete": False,
+                    "missing_points": [
+                        "required term coverage >= 55% (actual 33%)",
+                        "required term: domain-specific misinformation",
+                        "required term: information environment",
+                        "branch evidence cards",
+                    ],
+                    "required_points": [],
+                }
+            ],
+        },
+        "verification": {},
+    }
+
+    focus = _focus_terms_from_state(state)
+
+    assert focus["branch_2"] == ["domain-specific misinformation", "information environment"]
+    assert all("required term" not in term.lower() for term in focus["branch_2"])
+    assert all(">=" not in term for term in focus["branch_2"])
+
+
+def test_acquire_route_reuses_existing_evidence_when_no_new_sources_or_candidates() -> None:
+    no_progress_state = {
+        "metrics": {
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "last_acquire_searches": 9,
+        },
+        "evidence_cards": [{"id": 1, "source_id": 1}],
+    }
+    progress_state = {
+        "metrics": {
+            "last_acquire_added_sources": 1,
+            "last_acquire_added_candidates": 2,
+            "last_acquire_searches": 0,
+        },
+        "evidence_cards": [{"id": 1, "source_id": 1}],
+    }
+
+    assert _acquire_route(no_progress_state) == "reuse_evidence"
+    assert _acquire_route(progress_state) == "read_sources"
+
+
+def test_coverage_route_finishes_when_no_evidence_and_acquisition_plateaued() -> None:
+    state = {
+        "coverage_matrix": {"complete": False},
+        "evidence_cards": [],
+        "metrics": {
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "coverage_rounds": 1,
+            "search_count": 30,
+            "max_search_queries": 96,
+        },
+    }
+
+    assert _coverage_route(state) == "finish"
+
+
 def test_verification_route_rewrites_unsupported_claims_before_more_search() -> None:
     state = {
         "verification": {
@@ -2820,6 +3484,27 @@ def test_verification_route_rewrites_unsupported_claims_before_more_search() -> 
             ],
         },
         "metrics": {"verification_rounds": 1, "max_rounds": 4},
+    }
+
+    assert _verification_route(state) == "rewrite"
+
+
+def test_verification_route_rewrites_instead_of_researching_after_source_plateau() -> None:
+    state = {
+        "verification": {
+            "valid": False,
+            "failures": [
+                "Branch coverage incomplete: branch_2",
+                "Branch coverage below threshold: 0.64",
+            ],
+        },
+        "metrics": {
+            "verification_rounds": 1,
+            "max_rounds": 4,
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "last_acquire_searches": 0,
+        },
     }
 
     assert _verification_route(state) == "rewrite"
@@ -2928,6 +3613,11 @@ class FakeSemanticJudge:
 class InvalidSemanticJudge:
     def invoke(self, _messages):
         return SimpleNamespace(content='{"cards": [{"id": 1, "keep": true}')
+
+
+class QuotaSemanticJudge:
+    def invoke(self, _messages):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 37s.")
 
 
 class RaisingSemanticJudge:

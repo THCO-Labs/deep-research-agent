@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,7 @@ class ResearchGraphRuntime:
 
     def checkpoint(self, phase: str, state: ResearchState) -> None:
         serializable = dict(state)
+        serializable["checkpoint_phase"] = phase
         self.artifacts.write_json("checkpoints/latest.json", serializable)
         self.artifacts.write_json(f"checkpoints/{phase}.json", serializable)
 
@@ -86,7 +88,6 @@ def run_local_research_graph(
         local_documents=list(local_documents or []),
         mcp_documents=list(mcp_documents or []),
     )
-    graph = build_research_graph(runtime)
     if initial_state:
         state = dict(initial_state)
         request = dict(state.get("request", {}))
@@ -102,6 +103,7 @@ def run_local_research_graph(
         metrics["max_rounds"] = settings.max_rounds
         metrics["started_at_monotonic"] = time.perf_counter()
         state["metrics"] = metrics
+        entry_point = _resume_entry_point(state)
     else:
         state = {
             "request": {
@@ -122,11 +124,13 @@ def run_local_research_graph(
             },
             "failures": [],
         }
+        entry_point = "classify_request"
+    graph = build_research_graph(runtime, entry_point=entry_point)
     final_state = graph.invoke(state, config={"configurable": {"thread_id": artifacts.run_dir.name}})
     return final_state
 
 
-def build_research_graph(runtime: ResearchGraphRuntime):
+def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "classify_request"):
     graph = StateGraph(ResearchState)
 
     def classify_request(state: ResearchState) -> ResearchState:
@@ -190,6 +194,7 @@ def build_research_graph(runtime: ResearchGraphRuntime):
         runtime.artifacts.write_jsonl("sources.jsonl", [source.to_dict() for source in result.sources])
         metrics = _merge_metrics(state.get("metrics", {}), result.metrics.to_dict())
         metrics["last_acquire_added_sources"] = len(result.sources) - len(existing_sources)
+        metrics["last_acquire_added_candidates"] = len(result.candidates) - len(existing_candidates)
         metrics["last_acquire_searches"] = result.metrics.search_count
         metrics["source_count"] = len(result.sources)
         metrics["candidate_count_total"] = len(result.candidates)
@@ -266,6 +271,7 @@ def build_research_graph(runtime: ResearchGraphRuntime):
             plan=plan_obj,
             evidence_cards=cards,
             settings=runtime.settings,
+            prior_judgments=list(dict(state.get("semantic_judgments", {})).get("judgments", [])),
         )
         semantic_payload = {
             "enabled": runtime.settings.semantic_verification,
@@ -309,6 +315,25 @@ def build_research_graph(runtime: ResearchGraphRuntime):
         metrics = dict(state.get("metrics", {}))
         metrics["coverage_score"] = coverage.coverage_score
         metrics["coverage_rounds"] = int(metrics.get("coverage_rounds", 0)) + 1
+        no_evidence_failures: list[str] = []
+        if not cards and _source_acquisition_plateaued(metrics):
+            no_evidence_failures = [
+                "No evidence cards were retrieved; synthesis was skipped because source acquisition made no progress.",
+            ]
+            no_evidence_failures.extend(str(failure) for failure in list(metrics.get("failures", []))[:5])
+            runtime.artifacts.write_json(
+                "verification.json",
+                {
+                    "schema_version": 2,
+                    "valid": False,
+                    "failures": no_evidence_failures,
+                    "semantic_verification": {
+                        "enabled": runtime.settings.semantic_verification,
+                        "overall_score": 0.0,
+                        "failures": ["No evidence cards were retrieved to support any claim"],
+                    },
+                },
+            )
         runtime.emit_status(
             "check_coverage",
             f"coverage {coverage.coverage_score:.2f}; missing: {', '.join(coverage.missing_branches) or 'none'}",
@@ -319,7 +344,18 @@ def build_research_graph(runtime: ResearchGraphRuntime):
             runtime,
             "check_coverage",
             state,
-            {"coverage_matrix": coverage.to_dict(), "metrics": metrics},
+            {
+                "coverage_matrix": coverage.to_dict(),
+                "metrics": metrics,
+                **(
+                    {
+                        "verification": {"schema_version": 2, "valid": False, "failures": no_evidence_failures},
+                        "failures": no_evidence_failures,
+                    }
+                    if no_evidence_failures
+                    else {}
+                ),
+            },
         )
 
     def synthesize(state: ResearchState) -> ResearchState:
@@ -412,6 +448,8 @@ def build_research_graph(runtime: ResearchGraphRuntime):
         elif draft:
             runtime.artifacts.write_text("failed_report.md", draft)
             runtime.artifacts.write_text("report.md", _failed_report_notice(verification))
+        else:
+            runtime.artifacts.write_text("report.md", _failed_report_notice(verification))
         runtime.artifacts.write_json("metrics.json", _public_metrics(metrics))
         runtime.emit_status("finish", "local LangGraph run complete", valid=state.get("verification", {}).get("valid"))
         return _with_checkpoint(runtime, "finish", state, {"metrics": metrics})
@@ -428,10 +466,17 @@ def build_research_graph(runtime: ResearchGraphRuntime):
     graph.add_node("verify", verify)
     graph.add_node("repair_or_finish", repair_or_finish)
 
-    graph.set_entry_point("classify_request")
+    graph.set_entry_point(entry_point)
     graph.add_edge("classify_request", "plan")
     graph.add_edge("plan", "acquire_sources")
-    graph.add_edge("acquire_sources", "read_sources")
+    graph.add_conditional_edges(
+        "acquire_sources",
+        _acquire_route,
+        {
+            "read_sources": "read_sources",
+            "reuse_evidence": "check_coverage",
+        },
+    )
     graph.add_edge("read_sources", "build_evidence")
     graph.add_edge("build_evidence", "evidence_hygiene")
     graph.add_edge("evidence_hygiene", "semantic_enrichment")
@@ -442,6 +487,7 @@ def build_research_graph(runtime: ResearchGraphRuntime):
         {
             "more_sources": "acquire_sources",
             "synthesize": "synthesize",
+            "finish": "repair_or_finish",
         },
     )
     graph.add_edge("synthesize", "verify")
@@ -463,16 +509,54 @@ def _coverage_route(state: ResearchState) -> str:
     metrics = state.get("metrics", {})
     if coverage.get("complete"):
         return "synthesize"
+    if not state.get("evidence_cards") and _source_acquisition_plateaued(metrics):
+        return "finish"
     rounds = int(metrics.get("coverage_rounds", 0))
     search_count = int(metrics.get("search_count", 0))
     max_rounds = int(metrics.get("max_rounds", 4) or 4)
-    if int(metrics.get("last_acquire_added_sources", 1)) <= 0 and int(metrics.get("last_acquire_searches", 1)) <= 0:
+    if _source_acquisition_plateaued(metrics):
         return "synthesize"
     if rounds <= max_rounds and search_count < int(metrics.get("max_search_queries", 10_000) or 10_000):
         return "more_sources"
     if rounds <= max_rounds and _has_unsearched_branch_queries(state):
         return "more_sources"
     return "synthesize"
+
+
+def _resume_entry_point(state: ResearchState) -> str:
+    phase = str(state.get("checkpoint_phase") or "").strip()
+    if phase in {"classify_request", "plan"} and state.get("evidence_cards"):
+        return "semantic_enrichment"
+    if phase in {"classify_request", "plan"} and state.get("source_records"):
+        return "read_sources"
+    return {
+        "classify_request": "plan",
+        "plan": "acquire_sources",
+        "acquire_sources": "read_sources",
+        "read_sources": "build_evidence",
+        "build_evidence": "evidence_hygiene",
+        "evidence_hygiene": "semantic_enrichment",
+        "semantic_enrichment": "check_coverage",
+        "check_coverage": "check_coverage",
+        "synthesize": "verify",
+        "verify": "verify",
+        "repair_or_finish": "repair_or_finish",
+        "finish": "repair_or_finish",
+    }.get(phase, "classify_request")
+
+
+def _acquire_route(state: ResearchState) -> str:
+    metrics = state.get("metrics", {})
+    if _source_acquisition_plateaued(metrics) and state.get("evidence_cards"):
+        return "reuse_evidence"
+    return "read_sources"
+
+
+def _source_acquisition_plateaued(metrics: dict[str, Any]) -> bool:
+    return (
+        int(metrics.get("last_acquire_added_sources", 1)) <= 0
+        and int(metrics.get("last_acquire_added_candidates", 1)) <= 0
+    )
 
 
 def _verification_route(state: ResearchState) -> str:
@@ -500,7 +584,9 @@ def _verification_route(state: ResearchState) -> str:
         or any("semantic report verification below threshold" in failure for failure in failures)
         or any("missing context" in failure for failure in failures)
     )
-    return "more_sources" if needs_more_sources else "rewrite"
+    if needs_more_sources:
+        return "rewrite" if _source_acquisition_plateaued(metrics) else "more_sources"
+    return "rewrite"
 
 
 def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
@@ -511,11 +597,12 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
         if row.get("complete"):
             continue
         branch_id = str(row.get("branch_id", ""))
-        terms = list(row.get("missing_points", [])) or list(row.get("required_points", []))
-        if terms and all(str(term).startswith(("usable sources", "branch evidence")) for term in terms):
+        raw_terms = list(row.get("missing_points", [])) or list(row.get("required_points", []))
+        terms = _clean_focus_terms(raw_terms)
+        if not terms and raw_terms and all(str(term).startswith(("usable sources", "branch evidence")) for term in raw_terms):
             for branch in state.get("plan", {}).get("branches", []):
                 if str(branch.get("id", "")) == branch_id:
-                    terms = list(branch.get("required_terms", [])) or terms
+                    terms = _clean_focus_terms(list(branch.get("required_terms", [])) or terms)
                     break
         if branch_id and terms:
             focus[branch_id] = terms
@@ -525,7 +612,7 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
         plan = state.get("plan", {})
         for branch in plan.get("branches", []):
             branch_id = str(branch.get("id", ""))
-            terms = list(branch.get("required_terms", []))
+            terms = _clean_focus_terms(list(branch.get("required_terms", [])))
             if branch_id and terms:
                 focus.setdefault(branch_id, terms)
     semantic = verification.get("semantic_verification", {})
@@ -536,8 +623,39 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
             branch_id = str(branch.get("id", ""))
             if branch_id and (not missing_branch_ids or branch_id in missing_branch_ids):
                 focus.setdefault(branch_id, [])
-                focus[branch_id].extend(str(term) for term in semantic_focus)
-    return focus
+                focus[branch_id].extend(_clean_focus_terms(semantic_focus))
+    return {branch_id: _dedupe_focus_terms(terms) for branch_id, terms in focus.items() if terms}
+
+
+def _clean_focus_terms(terms: list[Any]) -> list[str]:
+    cleaned_terms: list[str] = []
+    for term in terms:
+        cleaned = str(term).strip()
+        if not cleaned:
+            continue
+        lower = cleaned.lower()
+        if lower.startswith(("usable sources", "branch evidence")):
+            continue
+        if "required term coverage" in lower:
+            continue
+        cleaned = re.sub(r"(?i)^required\s+term\s*:\s*", "", cleaned).strip()
+        cleaned = re.sub(r"\s*\(\s*actual\s+\d+%?\s*\)\s*$", "", cleaned, flags=re.I).strip()
+        if not cleaned or ">=" in cleaned:
+            continue
+        cleaned_terms.append(cleaned)
+    return _dedupe_focus_terms(cleaned_terms)
+
+
+def _dedupe_focus_terms(terms: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for term in terms:
+        key = " ".join(term.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(term)
+    return result
 
 
 def _has_unsearched_branch_queries(state: ResearchState) -> bool:
@@ -721,6 +839,43 @@ def _failed_report_notice(verification: dict[str, Any]) -> str:
 
 def load_latest_checkpoint(run_dir: Path) -> ResearchState:
     path = run_dir / "checkpoints" / "latest.json"
-    if not path.exists():
-        raise FileNotFoundError(f"No checkpoint found at {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            state = _load_newest_valid_checkpoint(run_dir)
+    else:
+        state = _load_newest_valid_checkpoint(run_dir)
+    if isinstance(state, dict) and not state.get("checkpoint_phase"):
+        state["checkpoint_phase"] = _infer_checkpoint_phase(run_dir)
+    return state
+
+
+def _load_newest_valid_checkpoint(run_dir: Path) -> ResearchState:
+    checkpoint_dir = run_dir / "checkpoints"
+    candidates = [
+        path
+        for path in checkpoint_dir.glob("*.json")
+        if path.name != "latest.json" and path.is_file()
+    ]
+    for candidate in sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            state = json.loads(candidate.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(state, dict):
+            state.setdefault("checkpoint_phase", candidate.stem)
+            return state
+    raise FileNotFoundError(f"No readable checkpoint found under {checkpoint_dir}")
+
+
+def _infer_checkpoint_phase(run_dir: Path) -> str:
+    checkpoint_dir = run_dir / "checkpoints"
+    candidates = [
+        path
+        for path in checkpoint_dir.glob("*.json")
+        if path.name != "latest.json" and path.is_file()
+    ]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda path: path.stat().st_mtime).stem

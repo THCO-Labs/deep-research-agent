@@ -18,6 +18,7 @@ PACKAGE_NAMES = (
     "langchain-google-genai",
     "langchain-groq",
     "langchain-ollama",
+    "httpx",
     "playwright",
     "tavily-python",
 )
@@ -84,7 +85,9 @@ def redacted_settings(settings: Settings) -> dict[str, Any]:
         "live": settings.live,
         "google_key_count": len(settings.google_key_pool),
         "groq_key_count": len(settings.groq_key_pool),
+        "openrouter_key_count": len(settings.openrouter_key_pool),
         "tavily_api_key_present": bool(settings.tavily_api_key),
+        "tavily_key_count": len(settings.tavily_key_pool),
     }
 
 

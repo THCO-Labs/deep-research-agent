@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 
 from deep_research.model_router import model_for_role
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2
-from deep_research.settings import Settings
+from deep_research.settings import GOOGLE_DEFAULT_MODEL, Settings
 from deep_research.source_validation import content_terms
 from deep_research.text_terms import preferred_output_language
 
@@ -218,7 +218,7 @@ def synthesize_report_with_model(
 ) -> str:
     if not evidence_cards:
         return synthesize_report(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
-    model = model_for_role(settings, "orchestrator", settings.model)
+    model = model_for_role(settings, "orchestrator", _synthesis_model_spec(settings, plan, writing_guidance))
     if not isinstance(model, BaseChatModel):
         raise RuntimeError(f"Synthesis role did not resolve to a chat model: {model!r}")
     synthesis_cards = _cards_for_synthesis(plan, evidence_cards)
@@ -247,6 +247,14 @@ def synthesize_report_with_model(
     citation_repaired = _repair_weak_citation_support(normalized, synthesis_cards, evidence_sources)
     coverage_repaired = _append_evidence_coverage_if_needed(citation_repaired, plan, synthesis_cards)
     return _normalize_report_markdown(coverage_repaired, evidence_sources)
+
+
+def _synthesis_model_spec(settings: Settings, plan: ResearchPlan, writing_guidance: str = "") -> str:
+    if _criteria_rich_plan(plan, writing_guidance=writing_guidance) and settings.google_key_pool:
+        provider, _, _model = settings.model.partition(":")
+        if provider != "google_genai":
+            return GOOGLE_DEFAULT_MODEL
+    return settings.model
 
 
 def _synthesis_prompt(
@@ -571,6 +579,8 @@ def _append_evidence_coverage_if_needed(
 ) -> str:
     if not evidence_cards:
         return report
+    if _criteria_rich_plan(plan):
+        return report
     body, separator, source_tail = _split_sources(report)
     cited_source_ids = set(_numeric_citation_ids(body))
     report_terms = content_terms(body)
@@ -789,8 +799,11 @@ def _evidence_backed_sources(
 
 
 def _cards_for_synthesis(plan: ResearchPlan, evidence_cards: list[EvidenceCard]) -> list[EvidenceCard]:
+    if not evidence_cards:
+        return []
     cards_by_branch = _cards_by_branch(evidence_cards)
     selected: list[EvidenceCard] = []
+    selected_ids: set[int] = set()
     branch_count = max(len(plan.branches), 1)
     per_branch_limit = max(2, min(MAX_SYNTHESIS_CARDS_PER_BRANCH, MAX_SYNTHESIS_CARDS_TOTAL // branch_count))
     for branch in plan.branches:
@@ -798,14 +811,151 @@ def _cards_for_synthesis(plan: ResearchPlan, evidence_cards: list[EvidenceCard])
             cards_by_branch.get(branch.id, []),
             key=lambda item: _card_rank_key(item, question=plan.question),
         )
-        selected.extend(_source_diverse_cards(branch_cards, limit=per_branch_limit))
-    selected_ids = {card.id for card in selected}
+        for card in _source_diverse_cards(branch_cards, limit=per_branch_limit):
+            if len(selected) >= MAX_SYNTHESIS_CARDS_TOTAL:
+                return selected
+            if card.id in selected_ids:
+                continue
+            selected.append(card)
+            selected_ids.add(card.id)
+
+    if len(selected) >= MAX_SYNTHESIS_CARDS_TOTAL:
+        return selected[:MAX_SYNTHESIS_CARDS_TOTAL]
+
+    remaining = [card for card in evidence_cards if card.id not in selected_ids]
     selected.extend(
-        card
-        for card in sorted(evidence_cards, key=lambda item: (-item.confidence, item.id))
-        if card.id not in selected_ids
+        _marginal_coverage_cards(
+            plan=plan,
+            candidates=remaining,
+            selected=selected,
+            limit=MAX_SYNTHESIS_CARDS_TOTAL - len(selected),
+        )
     )
     return selected[:MAX_SYNTHESIS_CARDS_TOTAL]
+
+
+def _marginal_coverage_cards(
+    *,
+    plan: ResearchPlan,
+    candidates: list[EvidenceCard],
+    selected: list[EvidenceCard],
+    limit: int,
+) -> list[EvidenceCard]:
+    if limit <= 0 or not candidates:
+        return []
+
+    branch_terms = _plan_branch_terms(plan)
+    global_terms = _plan_global_terms(plan, branch_terms)
+    card_terms = {card.id: _card_terms(card) for card in candidates + selected}
+    covered_global_terms: set[str] = set()
+    covered_branch_terms: dict[str, set[str]] = defaultdict(set)
+    selected_term_sets: list[set[str]] = []
+    branch_counts: dict[str, int] = defaultdict(int)
+    source_counts: dict[int, int] = defaultdict(int)
+
+    for card in selected:
+        terms = card_terms[card.id]
+        covered_global_terms.update(terms & global_terms)
+        covered_branch_terms[card.branch_id].update(terms & branch_terms.get(card.branch_id, set()))
+        selected_term_sets.append(terms)
+        branch_counts[card.branch_id] += 1
+        source_counts[card.source_id] += 1
+
+    remaining = list(candidates)
+    chosen: list[EvidenceCard] = []
+    while remaining and len(chosen) < limit:
+        best_index = 0
+        best_score: tuple[float, float, float, int] | None = None
+        for index, card in enumerate(remaining):
+            terms = card_terms[card.id]
+            global_gain = len(terms & (global_terms - covered_global_terms))
+            branch_gain = len(terms & (branch_terms.get(card.branch_id, set()) - covered_branch_terms[card.branch_id]))
+            new_source_bonus = 1.0 if source_counts[card.source_id] == 0 else 1.0 / (source_counts[card.source_id] + 2)
+            branch_balance_bonus = 1.0 / (branch_counts[card.branch_id] + 1)
+            redundancy_penalty = _max_term_overlap(terms, selected_term_sets)
+            relevance = _card_relevance_score(card, question=plan.question)
+            score = (
+                (branch_gain * 4.0)
+                + (global_gain * 3.0)
+                + (new_source_bonus * 1.25)
+                + (branch_balance_bonus * 0.75)
+                + relevance
+                - (redundancy_penalty * 1.5),
+                relevance,
+                card.confidence,
+                -card.id,
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_index = index
+
+        card = remaining.pop(best_index)
+        terms = card_terms[card.id]
+        chosen.append(card)
+        covered_global_terms.update(terms & global_terms)
+        covered_branch_terms[card.branch_id].update(terms & branch_terms.get(card.branch_id, set()))
+        selected_term_sets.append(terms)
+        branch_counts[card.branch_id] += 1
+        source_counts[card.source_id] += 1
+
+    return chosen
+
+
+def _plan_branch_terms(plan: ResearchPlan) -> dict[str, set[str]]:
+    return {
+        branch.id: content_terms(
+            " ".join(
+                [
+                    branch.title,
+                    branch.objective,
+                    " ".join(branch.queries),
+                    " ".join(branch.required_terms),
+                    " ".join(branch.completion_criteria),
+                ]
+            )
+        )
+        for branch in plan.branches
+    }
+
+
+def _plan_global_terms(plan: ResearchPlan, branch_terms: dict[str, set[str]]) -> set[str]:
+    terms = content_terms(
+        " ".join(
+            [
+                plan.question,
+                " ".join(plan.report_outline),
+                " ".join(plan.acceptance_criteria),
+                " ".join(requirement.source_type + " " + requirement.rationale for requirement in plan.source_requirements),
+            ]
+        )
+    )
+    for values in branch_terms.values():
+        terms.update(values)
+    return terms
+
+
+def _card_terms(card: EvidenceCard) -> set[str]:
+    return content_terms(" ".join([card.claim, card.supporting_excerpt, card.source_title, " ".join(card.limitations)]))
+
+
+def _card_relevance_score(card: EvidenceCard, *, question: str) -> float:
+    return (
+        _question_phrase_score(question, f"{card.claim} {card.supporting_excerpt} {card.source_title}") * 2.0
+        + _question_term_score(question, f"{card.claim} {card.supporting_excerpt} {card.source_title}")
+        + card.confidence
+        + card.quality_score
+        + card.relevance_score
+        + (card.semantic_score or 0.0)
+    )
+
+
+def _max_term_overlap(terms: set[str], selected_term_sets: list[set[str]]) -> float:
+    if not terms or not selected_term_sets:
+        return 0.0
+    return max(
+        (len(terms & selected_terms) / max(len(terms | selected_terms), 1) for selected_terms in selected_term_sets),
+        default=0.0,
+    )
 
 
 def _source_diverse_cards(cards: list[EvidenceCard], *, limit: int) -> list[EvidenceCard]:
@@ -1204,17 +1354,17 @@ def _target_report_profile(
     criteria_rich = _criteria_rich_plan(plan, writing_guidance=writing_guidance)
     if criteria_rich:
         min_words = min(
-            7500,
+            9000,
             max(
-                4800,
-                criteria_count * 180,
-                branch_count * 380,
-                evidence_sources * 120,
+                6500,
+                criteria_count * 220,
+                branch_count * 520,
+                evidence_sources * 150,
             ),
         )
-        target_words = min(9000, max(min_words + 1200, int(min_words * 1.25)))
-        min_cited_paragraphs = min(38, max(20, criteria_count, branch_count * 2))
-        min_major_sections = min(14, max(8, branch_count + 3))
+        target_words = min(11000, max(min_words + 1500, int(min_words * 1.25)))
+        min_cited_paragraphs = min(52, max(28, criteria_count + 4, branch_count * 3))
+        min_major_sections = min(30, max(16, branch_count + 7, criteria_count // 2))
     elif evidence_sources >= 30 or branch_count >= 8:
         min_words = 3200
         target_words = 5600

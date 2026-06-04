@@ -4,7 +4,9 @@ from pathlib import Path
 from deep_research.agent import ResearchRunError, ResearchRunResult
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.deepresearch_bench import (
+    _settings_from_args,
     audit_benchmark_planning,
+    build_parser,
     evaluate_raw_submission_fact_proxy,
     evaluate_raw_submission_proxy,
     generate_raw_submission,
@@ -46,6 +48,52 @@ def test_generate_raw_submission_writes_deepresearch_bench_format(tmp_path: Path
             "prompt": "English task",
         }
     ]
+
+
+def test_benchmark_settings_enable_model_fallbacks_by_default(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\n"
+        "TAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MODEL_FALLBACKS=false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(["--benchmark-dir", str(_bench_dir(tmp_path)), "--provider", "groq"])
+
+    settings = _settings_from_args(args)
+
+    assert settings.model_fallbacks is True
+
+
+def test_benchmark_settings_can_disable_model_fallbacks_explicitly(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(["--benchmark-dir", str(_bench_dir(tmp_path)), "--provider", "groq", "--no-model-fallbacks"])
+
+    settings = _settings_from_args(args)
+
+    assert settings.model_fallbacks is False
+
+
+def test_benchmark_settings_accept_model_timeout_flag(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--benchmark-dir", str(_bench_dir(tmp_path)), "--provider", "groq", "--model-request-timeout-seconds", "45"]
+    )
+
+    settings = _settings_from_args(args)
+
+    assert settings.model_request_timeout_seconds == 45
 
 
 def test_generate_raw_submission_resumes_without_duplicate_rows(tmp_path: Path) -> None:

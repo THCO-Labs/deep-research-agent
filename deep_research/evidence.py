@@ -86,20 +86,24 @@ def _rank_sentences(
     ]
     minimum_question_hits = _minimum_question_hits(question_terms)
     ranked = sorted(
-        enumerate(sentences),
+        ((index, sentence, content_terms(sentence)) for index, sentence in enumerate(sentences)),
         key=lambda item: (
-            -len(content_terms(item[1]) & question_terms),
-            -len(content_terms(item[1]) & terms),
-            -len(content_terms(item[1])),
+            -len(item[2] & question_terms),
+            -len(item[2] & terms),
+            -len(item[2]),
             item[0],
         ),
     )
     return [
         sentence
-        for _, sentence in ranked
-        if len(content_terms(sentence) & terms) > 0
-        and len(content_terms(sentence) & question_terms) >= minimum_question_hits
-        and (not anchor_groups or _matches_anchor_group(content_terms(sentence), anchor_groups))
+        for _, sentence, sentence_terms in ranked
+        if _sentence_matches_branch(
+            sentence_terms,
+            branch_terms=terms,
+            question_terms=question_terms,
+            anchor_groups=anchor_groups,
+            minimum_question_hits=minimum_question_hits,
+        )
     ]
 
 
@@ -114,6 +118,29 @@ def _matches_anchor_group(sentence_terms: set[str], anchor_groups: list[frozense
         if group <= sentence_terms:
             return True
     return False
+
+
+def _sentence_matches_branch(
+    sentence_terms: set[str],
+    *,
+    branch_terms: set[str],
+    question_terms: set[str],
+    anchor_groups: list[frozenset[str]],
+    minimum_question_hits: int,
+) -> bool:
+    branch_hits = len(sentence_terms & branch_terms)
+    if branch_hits <= 0:
+        return False
+    question_hits = len(sentence_terms & question_terms)
+    if question_hits < minimum_question_hits:
+        return False
+    if not anchor_groups or _matches_anchor_group(sentence_terms, anchor_groups):
+        return True
+    return branch_hits >= _strong_branch_overlap_threshold(branch_terms)
+
+
+def _strong_branch_overlap_threshold(branch_terms: set[str]) -> int:
+    return max(3, min(6, len(branch_terms) // 8))
 
 
 def _clean_claim(sentence: str) -> str:

@@ -40,3 +40,12 @@ def test_classify_tool_call_parse_error() -> None:
 
     assert failure.category == "tool_call_parse_error"
     assert failure.retryable is False
+
+
+def test_classify_provider_deadline_as_retryable_timeout() -> None:
+    exc = RuntimeError("504 DEADLINE_EXCEEDED. The request timed out. Please try again.")
+
+    failure = classify_exception(exc)
+
+    assert failure.category == "provider_timeout"
+    assert failure.retryable is True

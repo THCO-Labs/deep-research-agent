@@ -269,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-rounds", type=int, default=None)
     parser.add_argument("--scrape-char-limit", type=int, default=None)
-    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid", "ollama"], default=None)
+    parser.add_argument("--provider", choices=["auto", "google", "groq", "hybrid", "ollama", "openrouter"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--planner-model", default=None)

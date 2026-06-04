@@ -8,6 +8,7 @@ from typing import Any
 from tavily import TavilyClient
 
 from deep_research.artifacts_v2 import ResearchArtifactsV2
+from deep_research.errors import classify_exception
 from deep_research.ingestion import IngestedDocument
 from deep_research.schemas import ResearchBranch, SourceCandidate, SourceRecordV2
 from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
@@ -45,6 +46,35 @@ class AcquisitionResult:
     metrics: AcquisitionMetrics
 
 
+class TavilySearchClientPool:
+    def __init__(self, settings: Any) -> None:
+        keys = tuple(getattr(settings, "tavily_key_pool", ()) or ())
+        if not keys:
+            single = str(getattr(settings, "tavily_api_key", "") or "").strip()
+            keys = (single,) if single else ()
+        if not keys:
+            raise ValueError("Tavily API key pool cannot be empty.")
+        self._clients = tuple(TavilyClient(api_key=key) for key in keys)
+        self.key_count = len(self._clients)
+        self._cursor = 0
+
+    def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for offset in range(self.key_count):
+            index = (self._cursor + offset) % self.key_count
+            try:
+                response = self._clients[index].search(query, **kwargs)
+                self._cursor = (index + 1) % self.key_count
+                return response
+            except Exception as exc:
+                last_error = exc
+                if classify_exception(exc).category != "quota_or_rate_limit":
+                    raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Tavily search clients were available.")
+
+
 def acquire_sources(
     *,
     question: str,
@@ -62,7 +92,7 @@ def acquire_sources(
     focus_terms_by_branch: dict[str, list[str]] | None = None,
 ) -> AcquisitionResult:
     metrics = AcquisitionMetrics()
-    client = search_client or TavilyClient(api_key=settings.tavily_api_key)
+    client = search_client or TavilySearchClientPool(settings)
     page_scraper = scraper or PlaywrightScraper()
     min_words = int(getattr(settings, "min_source_words", 250))
     min_chunks = int(getattr(settings, "min_relevant_chunks", 1))
@@ -382,8 +412,8 @@ def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: s
         branch.queries
         + [
             f"{question} {branch.title} {focus}",
-            f"{branch.title} {focus} evidence best practices limitations",
-            f"{branch.title} {focus} methods comparison implementation",
+            f"{branch.title} {focus} evidence review findings",
+            f"{branch.title} {focus} mechanisms context limitations",
         ]
     )
     return followups

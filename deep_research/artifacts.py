@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,7 +47,9 @@ class RunArtifacts:
     def write_text(self, file_path: str | Path, content: str) -> Path:
         target = self.resolve_path(file_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(target)
         return target
 
     def read_text(self, file_path: str | Path) -> str:

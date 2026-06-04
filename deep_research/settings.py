@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
@@ -10,8 +11,8 @@ from dotenv import load_dotenv
 from deep_research.source_limits import MINIMUM_SOURCE_TARGET, source_floor
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq", "hybrid", "ollama"]
-ResolvedProvider = Literal["google", "groq", "hybrid", "ollama"]
+Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter"]
+ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter"]
 ResearchEngineName = Literal["local_langgraph", "gemini_managed", "openai_managed"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
@@ -20,9 +21,11 @@ GROQ_DEFAULT_MODEL = "groq:openai/gpt-oss-20b"
 GROQ_DEFAULT_FAST_MODEL = "groq:openai/gpt-oss-20b"
 OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
 OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
-MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama"})
+OPENROUTER_DEFAULT_MODEL = "openrouter:openrouter/free"
+OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:openrouter/free"
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter"})
 HYBRID_DEFAULT_MODELS = {
-    "orchestrator": GROQ_DEFAULT_MODEL,
+    "orchestrator": GOOGLE_DEFAULT_MODEL,
     "fast": GROQ_DEFAULT_FAST_MODEL,
     "planner": GOOGLE_DEFAULT_FAST_MODEL,
     "researcher": GROQ_DEFAULT_FAST_MODEL,
@@ -74,12 +77,18 @@ class Settings:
     model_fallbacks: bool = True
     provider_retry_attempts: int = 1
     provider_retry_max_wait_seconds: int = 60
+    model_request_timeout_seconds: int = 120
     live: bool = False
     google_api_key: str = field(default="", repr=False)
     google_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
     groq_api_key: str = field(default="", repr=False)
     groq_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    openrouter_api_key: str = field(default="", repr=False)
+    openrouter_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    openrouter_http_referer: str = ""
+    openrouter_app_title: str = "Deep Research Agent"
     tavily_api_key: str = field(default="", repr=False)
+    tavily_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
     @classmethod
     def from_env(
@@ -120,6 +129,7 @@ class Settings:
         model_fallbacks: bool | None = None,
         provider_retry_attempts: int | None = None,
         provider_retry_max_wait_seconds: int | None = None,
+        model_request_timeout_seconds: int | None = None,
         live: bool = False,
     ) -> "Settings":
         root = Path(project_root or Path.cwd()).resolve()
@@ -131,12 +141,17 @@ class Settings:
 
         google_api_keys = _collect_numbered_env_values("GOOGLE_API_KEY")
         groq_api_keys = _collect_numbered_env_values("GROQ_API_KEY")
+        openrouter_api_keys = _collect_numbered_env_values("OPENROUTER_API_KEY")
         google_api_key = google_api_keys[0] if google_api_keys else ""
         groq_api_key = groq_api_keys[0] if groq_api_keys else ""
+        openrouter_api_key = openrouter_api_keys[0] if openrouter_api_keys else ""
+        tavily_api_keys = _collect_numbered_env_values("TAVILY_API_KEY")
         tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        if not tavily_api_key and tavily_api_keys:
+            tavily_api_key = tavily_api_keys[0]
         provider_explicit = provider is not None
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
-        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys)
+        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys)
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
         depth = _depth_defaults(mode)
         resolved_fast_model = _resolve_model(
@@ -151,7 +166,11 @@ class Settings:
             if min_usable_sources is not None
             else int(os.environ.get("DEEP_RESEARCH_MIN_USABLE_SOURCES") or depth["min_usable_sources"])
         )
-        resolved_max_sources = 0 if max_sources == 0 else source_floor(max_sources if max_sources is not None else mode_sources)
+        resolved_max_sources = (
+            0
+            if max_sources == 0 or (max_sources is None and mode_sources == 0)
+            else source_floor(max_sources if max_sources is not None else mode_sources)
+        )
         resolved_max_candidates = max(
             resolved_min_usable_sources,
             int(
@@ -282,12 +301,21 @@ class Settings:
             provider_retry_max_wait_seconds=provider_retry_max_wait_seconds
             if provider_retry_max_wait_seconds is not None
             else int(os.environ.get("DEEP_RESEARCH_PROVIDER_RETRY_MAX_WAIT_SECONDS") or "60"),
+            model_request_timeout_seconds=model_request_timeout_seconds
+            if model_request_timeout_seconds is not None
+            else int(os.environ.get("DEEP_RESEARCH_MODEL_REQUEST_TIMEOUT_SECONDS") or "120"),
             live=live,
             google_api_key=google_api_key,
             google_api_keys=google_api_keys,
             groq_api_key=groq_api_key,
             groq_api_keys=groq_api_keys,
+            openrouter_api_key=openrouter_api_key,
+            openrouter_api_keys=openrouter_api_keys,
+            openrouter_http_referer=os.environ.get("OPENROUTER_HTTP_REFERER", "").strip(),
+            openrouter_app_title=os.environ.get("OPENROUTER_APP_TITLE", "Deep Research Agent").strip()
+            or "Deep Research Agent",
             tavily_api_key=tavily_api_key,
+            tavily_api_keys=tavily_api_keys,
         )
         settings.validate()
         return settings
@@ -300,6 +328,14 @@ class Settings:
     def groq_key_pool(self) -> tuple[str, ...]:
         return self.groq_api_keys or ((self.groq_api_key,) if self.groq_api_key else ())
 
+    @property
+    def openrouter_key_pool(self) -> tuple[str, ...]:
+        return self.openrouter_api_keys or ((self.openrouter_api_key,) if self.openrouter_api_key else ())
+
+    @property
+    def tavily_key_pool(self) -> tuple[str, ...]:
+        return self.tavily_api_keys or ((self.tavily_api_key,) if self.tavily_api_key else ())
+
     def validate(self) -> None:
         missing = []
         if self.research_engine == "gemini_managed" and not self.google_key_pool:
@@ -309,7 +345,9 @@ class Settings:
                 missing.append("GOOGLE_API_KEY")
             if self._uses_model_provider("groq") and not self.groq_key_pool:
                 missing.append("GROQ_API_KEY")
-            if not self.tavily_api_key:
+            if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
+                missing.append("OPENROUTER_API_KEY")
+            if not self.tavily_key_pool:
                 missing.append("TAVILY_API_KEY")
         if missing:
             joined = ", ".join(missing)
@@ -319,7 +357,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq", "hybrid", "ollama"}:
+        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.research_engine not in {"local_langgraph", "gemini_managed", "openai_managed"}:
             raise ConfigError(f"Unsupported research engine: {self.research_engine}")
@@ -355,6 +393,8 @@ class Settings:
             return True
         if self.provider == "ollama" and provider_prefix == "ollama":
             return True
+        if self.provider == "openrouter" and provider_prefix == "openrouter":
+            return True
         models = (
             self.model,
             self.fast_model,
@@ -368,16 +408,16 @@ class Settings:
 
 
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
-    if provider in {"groq", "hybrid", "ollama"}:
+    if provider in {"groq", "hybrid", "ollama", "openrouter"}:
         if mode == "fast":
             return 24, 2
         if mode == "max_quality":
-            return 80, 6
+            return 0, 6
         return 40, 4
     if mode == "fast":
         return 24, 2
     if mode == "max_quality":
-        return 80, 6
+        return 0, 6
     return 40, 4
 
 
@@ -408,15 +448,23 @@ def _resolve_provider(
     provider: str,
     google_api_keys: Iterable[str],
     groq_api_keys: Iterable[str],
+    openrouter_api_keys: Iterable[str],
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
         has_google = bool(tuple(google_api_keys))
         has_groq = bool(tuple(groq_api_keys))
+        has_openrouter = bool(tuple(openrouter_api_keys))
         if has_google and has_groq:
             return "hybrid"
-        return "groq" if has_groq else "google"
-    if normalized in {"google", "groq", "hybrid", "ollama"}:
+        if has_groq:
+            return "groq"
+        if has_google:
+            return "google"
+        if has_openrouter:
+            return "openrouter"
+        return "google"
+    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 
@@ -436,6 +484,8 @@ def _resolve_model(
         prefix = default_provider
     elif provider == "ollama":
         prefix = "ollama"
+    elif provider == "openrouter":
+        prefix = "openrouter"
     else:
         prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
@@ -458,6 +508,8 @@ def _resolve_role_model(
 def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
     if provider == "ollama":
         return OLLAMA_DEFAULT_FAST_MODEL if fast else OLLAMA_DEFAULT_MODEL
+    if provider == "openrouter":
+        return OPENROUTER_DEFAULT_FAST_MODEL if fast else OPENROUTER_DEFAULT_MODEL
     if provider == "hybrid":
         return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
     if provider == "groq":
@@ -466,11 +518,11 @@ def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
 
 
 def _default_scrape_limit(provider: ResolvedProvider) -> int:
-    return 6_000 if provider in {"groq", "hybrid", "ollama"} else 15_000
+    return 6_000 if provider in {"groq", "hybrid", "ollama", "openrouter"} else 15_000
 
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:
-    return 900 if provider in {"groq", "hybrid", "ollama"} else 2_500
+    return 900 if provider in {"groq", "hybrid", "ollama", "openrouter"} else 2_500
 
 
 def _has_provider_prefix(model_spec: str) -> bool:
@@ -487,11 +539,12 @@ def _env_model_override(name: str, *, provider_explicit: bool) -> str | None:
 def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:
     values: list[str] = []
     seen: set[str] = set()
-    for name in _numbered_env_names(base_name):
-        value = os.environ.get(name, "").strip()
-        if value and value not in seen:
-            values.append(value)
-            seen.add(value)
+    for name in [*_numbered_env_names(base_name), *_list_env_names(base_name)]:
+        raw_value = os.environ.get(name, "").strip()
+        for value in _split_env_value_pool(raw_value):
+            if value and value not in seen:
+                values.append(value)
+                seen.add(value)
     return tuple(values)
 
 
@@ -514,6 +567,12 @@ def _split_env_list(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(";") if part.strip())
 
 
+def _split_env_value_pool(raw: str) -> tuple[str, ...]:
+    if not raw.strip():
+        return ()
+    return tuple(part.strip() for part in re.split(r"[;,\n]+", raw) if part.strip())
+
+
 def _numbered_env_names(base_name: str) -> list[str]:
     indexed: list[tuple[int, str]] = []
     prefixes = (base_name, f"{base_name}_")
@@ -527,3 +586,11 @@ def _numbered_env_names(base_name: str) -> list[str]:
                 indexed.append((int(suffix), name))
                 break
     return [name for _, name in sorted(indexed, key=lambda item: (item[0], item[1]))]
+
+
+def _list_env_names(base_name: str) -> list[str]:
+    names = []
+    for candidate in (f"{base_name}S", f"{base_name}_POOL"):
+        if candidate in os.environ:
+            names.append(candidate)
+    return names

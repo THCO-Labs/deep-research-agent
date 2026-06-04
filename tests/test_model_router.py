@@ -5,9 +5,10 @@ from deep_research.settings import Settings
 
 
 class FakeChatModel:
-    def __init__(self, *, model: str, api_key: str) -> None:
+    def __init__(self, *, model: str, api_key: str, **kwargs) -> None:
         self.model = model
         self.api_key = api_key
+        self.kwargs = kwargs
 
     def bind_tools(self, tools, **kwargs):
         return FakeRunnable(self)
@@ -25,6 +26,8 @@ class FakeRunnable:
         self.calls += 1
         if self.model.model == "rate-limited" and self.model.api_key.endswith("a"):
             raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 42s.")
+        if self.model.model == "timeout" and self.model.api_key.endswith("a"):
+            raise RuntimeError("504 DEADLINE_EXCEEDED. The request timed out. Please try again.")
         if self.model.model == "retry-once" and self.calls == 1:
             raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 2s.")
         return self.model.model
@@ -60,6 +63,8 @@ def test_model_router_distributes_groq_role_models(
     assert _primary(models.researcher).api_key == "groq-b"
     assert _primary(models.planner).api_key == "groq-a"
     assert _primary(models.verifier).api_key == "groq-b"
+    assert _primary(models.orchestrator).kwargs["timeout"] == 120
+    assert _primary(models.orchestrator).kwargs["max_retries"] == 0
 
 
 def test_model_router_distributes_google_judge_model(
@@ -86,6 +91,8 @@ def test_model_router_distributes_google_judge_model(
 
     assert _primary(model).model == "judge"
     assert _primary(model).api_key == "google-b"
+    assert _primary(model).kwargs["request_timeout"] == 120
+    assert _primary(model).kwargs["retries"] == 0
 
 
 def test_model_router_uses_four_keys_in_hybrid_defaults(
@@ -171,6 +178,69 @@ def test_model_route_manifest_describes_ollama_without_api_key(tmp_path: Path) -
     assert routes["orchestrator"]["key_count"] == 1
 
 
+def test_model_router_supports_openrouter_free_provider(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_router, "ChatOpenRouter", FakeChatModel)
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="openrouter",
+        model="openrouter:openrouter/free",
+        fast_model="openrouter:meta-llama/llama-3.2-3b-instruct:free",
+        planner_model="openrouter:openrouter/free",
+        researcher_model="openrouter:openrouter/free",
+        analyst_model="openrouter:openrouter/free",
+        verifier_model="openrouter:openrouter/free",
+        judge_model="openrouter:openrouter/free",
+        openrouter_api_keys=("openrouter-a", "openrouter-b"),
+        openrouter_http_referer="https://example.com",
+        openrouter_app_title="Research Test",
+        tavily_api_key="tavily",
+    )
+
+    model = model_router.model_for_role(settings, "planner", settings.planner_model)
+    manifest = model_router.describe_model_routes(settings)
+    routes = {route["role"]: route for route in manifest["roles"]}
+
+    assert _primary(model).model == "openrouter/free"
+    assert _primary(model).api_key == "openrouter-a"
+    assert _primary(model).kwargs["referer"] == "https://example.com"
+    assert _primary(model).kwargs["app_title"] == "Research Test"
+    assert _primary(model).kwargs["timeout_seconds"] == 120
+    assert manifest["openrouter_key_count"] == 2
+    assert manifest["model_request_timeout_seconds"] == 120
+    assert routes["planner"]["provider"] == "openrouter"
+    assert routes["planner"]["key_label"] == "OPENROUTER_API_KEY"
+
+
+def test_openrouter_free_is_available_as_cross_provider_fallback(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="google",
+        model="google_genai:main",
+        fast_model="google_genai:fast",
+        planner_model="google_genai:planner",
+        researcher_model="google_genai:researcher",
+        analyst_model="google_genai:analyst",
+        verifier_model="google_genai:verifier",
+        judge_model="google_genai:judge",
+        google_api_keys=("google-a",),
+        openrouter_api_keys=("openrouter-a",),
+        tavily_api_key="tavily",
+    )
+
+    manifest = model_router.describe_model_routes(settings)
+    routes = {route["role"]: route for route in manifest["roles"]}
+
+    assert {
+        "provider": "openrouter",
+        "model": "openrouter/free",
+        "key_slot": 0,
+        "key_label": "OPENROUTER_API_KEY",
+        "fallback_type": "free_provider",
+    } in routes["orchestrator"]["fallback_routes"]
+
+
 def test_model_router_can_disable_fallback_wrapping(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(model_router, "ChatGroq", FakeChatModel)
     settings = Settings(
@@ -234,6 +304,36 @@ def test_bound_model_falls_back_on_rate_limit(tmp_path: Path, monkeypatch) -> No
     result = model.bind_tools([]).invoke("input")
 
     assert result == "rate-limited"
+    assert events
+
+
+def test_bound_model_falls_back_on_provider_timeout(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_router, "ChatGroq", FakeChatModel)
+    events: list[str] = []
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:timeout",
+        fast_model="groq:fast",
+        planner_model="groq:planner",
+        researcher_model="groq:researcher",
+        analyst_model="groq:analyst",
+        verifier_model="groq:verifier",
+        judge_model="groq:judge",
+        groq_api_keys=("groq-a", "groq-b"),
+        tavily_api_key="tavily",
+    )
+
+    model = model_router.model_for_role(
+        settings,
+        "orchestrator",
+        settings.model,
+        on_fallback=events.append,
+    )
+    result = model.bind_tools([]).invoke("input")
+
+    assert result == "timeout"
     assert events
 
 

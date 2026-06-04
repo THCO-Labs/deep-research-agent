@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from deep_research.errors import classify_exception
 from deep_research.model_router import model_for_role
 from deep_research.schemas import EvidenceCard, ResearchPlan, VerificationResultV2
 from deep_research.settings import Settings
@@ -14,6 +16,12 @@ from deep_research.settings import Settings
 EVIDENCE_BATCH_SIZE = 20
 SEMANTIC_CARD_THRESHOLD = 0.55
 SEMANTIC_REPORT_THRESHOLD = 0.75
+RECOVERABLE_SEMANTIC_PROVIDER_FAILURES = {
+    "quota_or_rate_limit",
+    "provider_timeout",
+    "token_budget_exceeded",
+    "tool_call_parse_error",
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,7 @@ def enrich_evidence_cards_with_semantics(
     evidence_cards: list[EvidenceCard],
     settings: Settings,
     model: Any | None = None,
+    prior_judgments: list[dict[str, Any]] | None = None,
 ) -> SemanticEvidenceResult:
     if not settings.semantic_verification:
         return SemanticEvidenceResult(
@@ -57,12 +66,14 @@ def enrich_evidence_cards_with_semantics(
         )
 
     judge = model if model is not None else _judge_model(settings)
+    cached_judgments, cards_to_judge = _reuse_prior_card_judgments(evidence_cards, prior_judgments or [])
     max_llm_cards = int(getattr(settings, "semantic_evidence_max_llm_cards", 120))
-    if max_llm_cards > 0 and len(evidence_cards) > max_llm_cards:
+    if max_llm_cards > 0 and len(cards_to_judge) > max_llm_cards:
         judgments = _fallback_card_judgments(
-            evidence_cards,
-            reason=f"evidence deck has {len(evidence_cards)} cards; configured semantic LLM card limit is {max_llm_cards}",
+            cards_to_judge,
+            reason=f"evidence deck has {len(cards_to_judge)} uncached cards; configured semantic LLM card limit is {max_llm_cards}",
         )
+        judgments = cached_judgments + judgments
         cards, rejected, application_failures = _apply_card_judgments(evidence_cards, judgments)
         return SemanticEvidenceResult(
             cards=cards,
@@ -73,6 +84,7 @@ def enrich_evidence_cards_with_semantics(
                 "semantic_evidence_enabled": True,
                 "semantic_evidence_batches": 0,
                 "semantic_evidence_judgment_count": len(judgments),
+                "semantic_evidence_cached_judgment_count": len(cached_judgments),
                 "semantic_evidence_rejected_count": len(rejected),
                 "semantic_evidence_large_deck_fallback": True,
                 "semantic_evidence_max_llm_cards": max_llm_cards,
@@ -80,11 +92,12 @@ def enrich_evidence_cards_with_semantics(
                 "semantic_evidence_failure_count": len(application_failures),
             },
         )
-    judgments: list[dict[str, Any]] = []
+    judgments: list[dict[str, Any]] = list(cached_judgments)
     failures: list[str] = []
     parse_failures = 0
+    provider_failures = 0
     batches = 0
-    for batch in _chunks(evidence_cards, EVIDENCE_BATCH_SIZE):
+    for batch in _chunks(cards_to_judge, EVIDENCE_BATCH_SIZE):
         batches += 1
         try:
             payload = _invoke_json(judge, _evidence_prompt(plan, batch))
@@ -92,6 +105,15 @@ def enrich_evidence_cards_with_semantics(
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             parse_failures += 1
             judgments.extend(_fallback_card_judgments(batch, reason=str(exc)))
+        except Exception as exc:
+            failure = classify_exception(exc)
+            if failure.category not in RECOVERABLE_SEMANTIC_PROVIDER_FAILURES:
+                raise
+            provider_failures += 1
+            failures.append(
+                f"Semantic evidence judge unavailable for batch; used deterministic fallback ({failure.category})."
+            )
+            judgments.extend(_fallback_card_judgments(batch, reason=f"{failure.category}: {failure.message}"))
 
     cards, rejected, application_failures = _apply_card_judgments(evidence_cards, judgments)
     failures.extend(application_failures)
@@ -104,8 +126,10 @@ def enrich_evidence_cards_with_semantics(
             "semantic_evidence_enabled": True,
             "semantic_evidence_batches": batches,
             "semantic_evidence_judgment_count": len(judgments),
+            "semantic_evidence_cached_judgment_count": len(cached_judgments),
             "semantic_evidence_rejected_count": len(rejected),
             "semantic_evidence_parse_failure_count": parse_failures,
+            "semantic_evidence_provider_failure_count": provider_failures,
             "semantic_evidence_failure_count": len(failures),
         },
     )
@@ -129,6 +153,15 @@ def verify_report_with_semantics(
         return SemanticReportResult(
             judgment={"enabled": True, "valid": False, "error": str(exc)},
             failures=[f"Semantic report judge returned invalid structured output: {exc}"],
+            score=0.0,
+        )
+    except Exception as exc:
+        failure = classify_exception(exc)
+        if failure.category not in RECOVERABLE_SEMANTIC_PROVIDER_FAILURES:
+            raise
+        return SemanticReportResult(
+            judgment={"enabled": True, "valid": False, "error": failure.message, "failure_category": failure.category},
+            failures=[f"Semantic report judge unavailable: {failure.category}"],
             score=0.0,
         )
 
@@ -236,6 +269,7 @@ def _fallback_card_judgments(batch: list[EvidenceCard], *, reason: str) -> list[
                 "failure_reasons": [],
                 "fallback": "deterministic_after_invalid_judge_output",
                 "fallback_reason": reason[:240],
+                "card_fingerprint": _card_fingerprint(card),
             }
         )
     return judgments
@@ -268,6 +302,7 @@ def _validate_card_judgments(payload: dict[str, Any], batch: list[EvidenceCard])
                 "key_points": _string_list_field(row, "key_points"),
                 "limitations": _string_list_field(row, "limitations"),
                 "failure_reasons": _string_list_field(row, "failure_reasons"),
+                "card_fingerprint": _card_fingerprint(next(card for card in batch if card.id == card_id)),
             }
         )
     returned_ids = {row["id"] for row in judgments}
@@ -514,6 +549,48 @@ def _string_list_field(payload: dict[str, Any], key: str) -> list[str]:
 
 def _chunks(values: list[EvidenceCard], size: int) -> list[list[EvidenceCard]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _reuse_prior_card_judgments(
+    cards: list[EvidenceCard],
+    prior_judgments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[EvidenceCard]]:
+    cache: dict[str, dict[str, Any]] = {}
+    for row in prior_judgments:
+        if not isinstance(row, dict):
+            continue
+        fingerprint = str(row.get("card_fingerprint") or "").strip()
+        if not fingerprint:
+            continue
+        cache[fingerprint] = row
+
+    reused: list[dict[str, Any]] = []
+    remaining: list[EvidenceCard] = []
+    for card in cards:
+        fingerprint = _card_fingerprint(card)
+        cached = cache.get(fingerprint)
+        if cached is None:
+            remaining.append(card)
+            continue
+        row = dict(cached)
+        row["id"] = card.id
+        row["card_fingerprint"] = fingerprint
+        reused.append(row)
+    return reused, remaining
+
+
+def _card_fingerprint(card: EvidenceCard) -> str:
+    payload = json.dumps(
+        {
+            "source_id": card.source_id,
+            "branch_id": card.branch_id,
+            "claim": card.claim,
+            "supporting_excerpt": card.supporting_excerpt,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _dedupe(values: list[str]) -> list[str]:

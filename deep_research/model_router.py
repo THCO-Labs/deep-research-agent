@@ -6,11 +6,12 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, TypeAlias
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatResult
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
+import httpx
 
 from deep_research.errors import classify_exception
 from deep_research.settings import Settings
@@ -21,6 +22,7 @@ RetryCallback: TypeAlias = Callable[[str], None]
 
 FALLBACK_ERROR_CATEGORIES = {
     "quota_or_rate_limit",
+    "provider_timeout",
     "token_budget_exceeded",
     "tool_call_parse_error",
 }
@@ -49,6 +51,7 @@ _KEY_ENV_BASE = {
     "groq": "GROQ_API_KEY",
     "google_genai": "GOOGLE_API_KEY",
     "ollama": "OLLAMA_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 
@@ -139,6 +142,68 @@ class FallbackChatModel(BaseChatModel):
             retry_attempts=self.retry_attempts,
             retry_max_wait_seconds=self.retry_max_wait_seconds,
         )
+
+
+class ChatOpenRouter(BaseChatModel):
+    model: str
+    api_key: str
+    referer: str = ""
+    app_title: str = "Deep Research Agent"
+    timeout_seconds: float = 120.0
+    base_url: str = "https://openrouter.ai/api/v1/chat/completions"
+
+    @property
+    def _llm_type(self) -> str:
+        return "openrouter"
+
+    def _get_ls_params(
+        self,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {"ls_provider": "openrouter", "ls_model_name": self.model}
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [_message_to_openrouter(message) for message in messages],
+        }
+        if stop:
+            payload["stop"] = stop
+        for key in ("temperature", "max_tokens", "top_p"):
+            if key in kwargs and kwargs[key] is not None:
+                payload[key] = kwargs[key]
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.referer:
+            headers["HTTP-Referer"] = self.referer
+        if self.app_title:
+            headers["X-Title"] = self.app_title
+            headers["X-OpenRouter-Title"] = self.app_title
+        response = httpx.post(self.base_url, headers=headers, json=payload, timeout=self.timeout_seconds)
+        if response.status_code >= 400:
+            raise RuntimeError(f"OpenRouter request failed with HTTP {response.status_code}: {response.text[:1000]}")
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"OpenRouter response did not include choices: {str(data)[:1000]}")
+        message = choices[0].get("message") or {}
+        content = _openrouter_content_to_text(message.get("content", ""))
+        response_metadata = {
+            "model": data.get("model") or self.model,
+            "id": data.get("id"),
+            "finish_reason": choices[0].get("finish_reason"),
+        }
+        generation = ChatGeneration(message=AIMessage(content=content, response_metadata=response_metadata))
+        return ChatResult(generations=[generation], llm_output={"usage": data.get("usage"), "model": data.get("model")})
 
 
 class ClassifiedFallbackRunnable(Runnable[Any, Any]):
@@ -248,8 +313,10 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
         "model_fallbacks": settings.model_fallbacks,
         "provider_retry_attempts": settings.provider_retry_attempts,
         "provider_retry_max_wait_seconds": settings.provider_retry_max_wait_seconds,
+        "model_request_timeout_seconds": settings.model_request_timeout_seconds,
         "google_key_count": len(settings.google_key_pool),
         "groq_key_count": len(settings.groq_key_pool),
+        "openrouter_key_count": len(settings.openrouter_key_pool),
         "roles": [route.to_dict() for route in routes],
     }
 
@@ -300,6 +367,8 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.groq_key_pool
     if provider == "google_genai":
         return settings.google_key_pool
+    if provider == "openrouter":
+        return settings.openrouter_key_pool
     if provider == "ollama":
         return ("ollama-local",)
     return ()
@@ -336,6 +405,9 @@ def _chat_model_for_role(
             "provider": provider,
             "model": model_name,
             "api_key": keys[key_slot],
+            "referer": settings.openrouter_http_referer,
+            "app_title": settings.openrouter_app_title,
+            "request_timeout_seconds": settings.model_request_timeout_seconds,
         }
     )
 
@@ -344,10 +416,24 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
     provider = str(route["provider"])
     model_name = str(route["model"])
     api_key = str(route["api_key"])
+    timeout_seconds = float(route.get("request_timeout_seconds") or 120)
     if provider == "groq":
-        return ChatGroq(model=model_name, api_key=api_key)
+        return ChatGroq(model=model_name, api_key=api_key, timeout=timeout_seconds, max_retries=0)
     if provider == "google_genai":
-        return ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            api_key=api_key,
+            request_timeout=timeout_seconds,
+            retries=0,
+        )
+    if provider == "openrouter":
+        return ChatOpenRouter(
+            model=model_name,
+            api_key=api_key,
+            referer=str(route.get("referer") or ""),
+            app_title=str(route.get("app_title") or "Deep Research Agent"),
+            timeout_seconds=timeout_seconds,
+        )
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(model=model_name)
@@ -376,6 +462,9 @@ def _fallback_routes(
                 "key_slot": slot,
                 "key_label": _key_label(provider, slot),
                 "fallback_type": "same_provider_key",
+                "referer": settings.openrouter_http_referer,
+                "app_title": settings.openrouter_app_title,
+                "request_timeout_seconds": settings.model_request_timeout_seconds,
             }
         )
 
@@ -392,8 +481,24 @@ def _fallback_routes(
                     "key_slot": alternate_slot,
                     "key_label": _key_label(alternate_provider, alternate_slot),
                     "fallback_type": "cross_provider",
+                    "request_timeout_seconds": settings.model_request_timeout_seconds,
                 }
             )
+    if settings.openrouter_key_pool and provider != "openrouter":
+        openrouter_slot = _key_slot_for_role(settings.openrouter_key_pool, role)
+        routes.append(
+            {
+                "provider": "openrouter",
+                "model": "openrouter/free",
+                "api_key": settings.openrouter_key_pool[openrouter_slot],
+                "key_slot": openrouter_slot,
+                "key_label": _key_label("openrouter", openrouter_slot),
+                "fallback_type": "free_provider",
+                "referer": settings.openrouter_http_referer,
+                "app_title": settings.openrouter_app_title,
+                "request_timeout_seconds": settings.model_request_timeout_seconds,
+            }
+        )
     return routes
 
 
@@ -402,6 +507,8 @@ def _alternate_hybrid_model(provider: str) -> tuple[str, str]:
         return "google_genai", "gemini-2.5-flash"
     if provider == "google_genai":
         return "groq", "openai/gpt-oss-20b"
+    if provider == "openrouter":
+        return "google_genai", "gemini-2.5-flash"
     return provider, ""
 
 
@@ -545,3 +652,33 @@ def _split_model_spec(model_spec: str) -> tuple[str, str]:
     if not separator:
         return "", model_spec
     return provider, model_name
+
+
+def _message_to_openrouter(message: BaseMessage) -> dict[str, Any]:
+    role_by_type = {
+        "human": "user",
+        "ai": "assistant",
+        "system": "system",
+        "tool": "tool",
+    }
+    role = role_by_type.get(message.type, message.type)
+    content = message.content
+    if not isinstance(content, str | list):
+        content = str(content)
+    return {"role": role, "content": content}
+
+
+def _openrouter_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if text is not None:
+                    parts.append(str(text))
+        return "\n".join(part for part in parts if part)
+    return str(content)
