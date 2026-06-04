@@ -1,0 +1,6 @@
+Error: Research verification failed after resume; inspect verification.json and failure.json.
+Failure category: verification_failed
+Suggested action: Inspect verification.json, evidence_rejections.jsonl, coverage.json, and failed_report.md; rerun or resume after fixing synthesis/verification failures.
+Run directory: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc
+Verification: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\verification.json
+Metrics: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\metrics.json

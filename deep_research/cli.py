@@ -64,10 +64,13 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--verifier-model", default=None)
     parser.add_argument("--judge-model", default=None)
     parser.add_argument("--scrape-char-limit", type=int, default=None)
+    parser.add_argument("--scrape-timeout-ms", type=int, default=None)
+    parser.add_argument("--scrape-retries", type=int, default=None)
     parser.add_argument("--no-model-fallbacks", action="store_true")
     parser.add_argument("--provider-retry-attempts", type=int, default=None)
     parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
     parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
+    parser.add_argument("--model-max-output-tokens", type=int, default=None)
     parser.add_argument("--no-llm-planning", action="store_true")
     parser.add_argument("--no-llm-synthesis", action="store_true")
     parser.add_argument("--no-semantic-verification", action="store_true")
@@ -157,6 +160,8 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         verifier_model=args.verifier_model,
         judge_model=args.judge_model,
         scrape_char_limit=args.scrape_char_limit,
+        scrape_timeout_ms=args.scrape_timeout_ms,
+        scrape_retries=args.scrape_retries,
         semantic_verification=not args.no_semantic_verification,
         semantic_evidence_max_llm_cards=args.semantic_evidence_max_llm_cards,
         llm_planning=not args.no_llm_planning,
@@ -166,6 +171,7 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         provider_retry_attempts=args.provider_retry_attempts,
         provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
         model_request_timeout_seconds=args.model_request_timeout_seconds,
+        model_max_output_tokens=args.model_max_output_tokens,
         strict_tool_models=not args.allow_weak_tool_models,
         live=args.live,
     )

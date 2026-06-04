@@ -100,9 +100,16 @@ def run_local_research_graph(
         metrics = dict(state.get("metrics", {}))
         metrics["engine"] = "local_langgraph"
         metrics["max_search_queries"] = settings.max_search_queries
+        metrics["max_candidates"] = settings.max_candidates
+        metrics["max_sources"] = settings.max_sources
         metrics["max_rounds"] = settings.max_rounds
         metrics["started_at_monotonic"] = time.perf_counter()
         state["metrics"] = metrics
+        runtime.searched_queries.update(
+            str(candidate.get("query", ""))
+            for candidate in state.get("source_candidates", [])
+            if str(candidate.get("query", "")).strip()
+        )
         entry_point = _resume_entry_point(state)
     else:
         state = {
@@ -119,6 +126,8 @@ def run_local_research_graph(
                 "engine": "local_langgraph",
                 "coverage_rounds": 0,
                 "max_search_queries": settings.max_search_queries,
+                "max_candidates": settings.max_candidates,
+                "max_sources": settings.max_sources,
                 "max_rounds": settings.max_rounds,
                 "started_at_monotonic": time.perf_counter(),
             },
@@ -188,6 +197,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             existing_source_texts=runtime.source_texts,
             searched_queries=runtime.searched_queries,
             focus_terms_by_branch=_focus_terms_from_state(state),
+            progress_callback=lambda message, data: runtime.emit_status("acquire_sources", message, **data),
         )
         runtime.source_texts.update(result.source_texts)
         runtime.searched_queries.update(candidate.query for candidate in result.candidates)
@@ -309,6 +319,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def check_coverage(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         sources = [_source_from_dict(row) for row in state.get("source_records", [])]
+        runtime.source_texts.update(_load_source_texts(runtime.artifacts, sources))
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
         coverage = build_coverage_matrix(branches=plan_obj.branches, evidence_cards=cards, sources=sources)
         runtime.artifacts.write_json("coverage.json", coverage.to_dict())
@@ -361,6 +372,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def synthesize(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         sources = [_source_from_dict(row) for row in state.get("source_records", [])]
+        runtime.source_texts.update(_load_source_texts(runtime.artifacts, sources))
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
         coverage = _coverage_from_dict(state.get("coverage_matrix", {}))
         blueprint = build_report_blueprint(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
@@ -392,6 +404,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def verify(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         sources = [_source_from_dict(row) for row in state.get("source_records", [])]
+        runtime.source_texts.update(_load_source_texts(runtime.artifacts, sources))
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
         coverage = _coverage_from_dict(state.get("coverage_matrix", {}))
         report = str(state.get("draft_report") or runtime.artifacts.read_text("report.md"))
@@ -553,6 +566,12 @@ def _acquire_route(state: ResearchState) -> str:
 
 
 def _source_acquisition_plateaued(metrics: dict[str, Any]) -> bool:
+    candidate_total = int(metrics.get("candidate_count_total", metrics.get("candidate_count", 0)) or 0)
+    candidate_budget = int(metrics.get("max_candidates", 0) or 0)
+    search_count = int(metrics.get("search_count", 0) or 0)
+    search_budget = int(metrics.get("max_search_queries", 0) or 0)
+    if candidate_budget > 0 and candidate_total < candidate_budget and (search_budget <= 0 or search_count < search_budget):
+        return False
     return (
         int(metrics.get("last_acquire_added_sources", 1)) <= 0
         and int(metrics.get("last_acquire_added_candidates", 1)) <= 0

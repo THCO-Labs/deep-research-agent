@@ -196,12 +196,18 @@ def verify_report_v2(
 def _source_support_checks(report: str, source_texts: dict[int, str]) -> tuple[list[dict[str, object]], float]:
     checks: list[float] = []
     weak: list[dict[str, object]] = []
+    source_terms_by_id = {
+        source_id: content_terms(text)
+        for source_id, text in source_texts.items()
+    }
     for paragraph in _paragraphs_with_citations(report):
         cited_ids = sorted(set(parse_inline_citations(paragraph)))
         claim_terms = content_terms(_strip_citations(paragraph))
         if len(claim_terms) < 5:
             continue
-        source_terms = content_terms(" ".join(source_texts.get(source_id, "") for source_id in cited_ids))
+        source_terms: set[str] = set()
+        for source_id in cited_ids:
+            source_terms.update(source_terms_by_id.get(source_id, set()))
         score = round(len(claim_terms & source_terms) / max(len(claim_terms), 1), 4)
         checks.append(score)
         if score < SUPPORT_THRESHOLD_V2:
@@ -215,7 +221,7 @@ def _source_support_checks(report: str, source_texts: dict[int, str]) -> tuple[l
                 }
             )
         for source_id in cited_ids:
-            individual_source_terms = content_terms(source_texts.get(source_id, ""))
+            individual_source_terms = source_terms_by_id.get(source_id, set())
             individual_score = round(len(claim_terms & individual_source_terms) / max(len(claim_terms), 1), 4)
             checks.append(individual_score)
             if individual_score < INDIVIDUAL_CITATION_SUPPORT_THRESHOLD:

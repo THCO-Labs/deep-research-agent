@@ -73,8 +73,8 @@ python -m deep_research run `
   --mode balanced `
   --engine local_langgraph `
   --min-usable-sources 17 `
-  --max-search-queries 16 `
-  --max-candidates 100 `
+  --max-search-queries 48 `
+  --max-candidates 1000 `
   --input .\docs `
   --mcp-manifest .\mcp_sources.json `
   "How do urban heat islands affect public health?"
@@ -92,6 +92,10 @@ Key options:
 - `--min-source-words N`
 - `--provider auto|google|groq|hybrid|ollama|openrouter`
 - `--provider openrouter`: use OpenRouter-compatible chat completions; the default model is `openrouter/free`
+- `--model-request-timeout-seconds N`: cap individual provider calls
+- `--model-max-output-tokens N`: give long synthesis/report calls enough output room
+- `--scrape-timeout-ms N`: cap each fallback scrape/fetch attempt
+- `--scrape-retries N`: control retry count for fallback fetches
 - `--allow-weak-tool-models`: opt out of strict tool-model policy
 - `--no-llm-planning`: disable JSON-only semantic plan enrichment
 - `--no-llm-synthesis`: use deterministic evidence-card report synthesis

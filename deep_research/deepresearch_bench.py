@@ -1551,6 +1551,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-retry-attempts", type=int, default=None)
     parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
     parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
+    parser.add_argument("--model-max-output-tokens", type=int, default=None)
+    parser.add_argument("--scrape-timeout-ms", type=int, default=None)
+    parser.add_argument("--scrape-retries", type=int, default=None)
     parser.add_argument(
         "--score-proxy",
         action="store_true",
@@ -1671,6 +1674,9 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         provider_retry_attempts=args.provider_retry_attempts,
         provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
         model_request_timeout_seconds=args.model_request_timeout_seconds,
+        model_max_output_tokens=args.model_max_output_tokens,
+        scrape_timeout_ms=args.scrape_timeout_ms,
+        scrape_retries=args.scrape_retries,
     )
 
 

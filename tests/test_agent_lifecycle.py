@@ -82,6 +82,28 @@ def test_resume_reuses_checkpointed_sources_without_duplicate_fetches(tmp_path: 
     assert metrics["max_search_queries"] == 22
 
 
+def test_resume_from_coverage_checkpoint_reloads_source_texts_for_verification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", fake_acquire_sources)
+    settings = _settings(tmp_path)
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
+    checkpoint_path = result.run_dir / "checkpoints" / "check_coverage.json"
+    latest_path = result.run_dir / "checkpoints" / "latest.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["checkpoint_phase"] = "check_coverage"
+    checkpoint.pop("draft_report", None)
+    checkpoint.pop("verification", None)
+    latest_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    resumed = resume_research(result.run_dir.name, settings, progress_mode="quiet")
+
+    verification = json.loads(resumed.verification_path.read_text(encoding="utf-8"))
+    assert verification["valid"] is True
+    assert verification["source_support_score"] >= 0.35
+
+
 def test_resume_entry_point_continues_after_checkpoint_phase(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     checkpoint_dir = run_dir / "checkpoints"

@@ -28,7 +28,7 @@ def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert settings.provider == "google"
     assert settings.mode == "max_quality"
     assert settings.max_sources == 0
-    assert settings.min_usable_sources == 40
+    assert settings.min_usable_sources == 60
 
 
 def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
@@ -62,7 +62,7 @@ def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
     assert settings.scrape_char_limit == 6000
     assert settings.tool_excerpt_char_limit == 900
     assert settings.max_sources == 0
-    assert settings.min_usable_sources == 40
+    assert settings.min_usable_sources == 60
     assert settings.max_rounds == 6
     assert settings.google_key_pool == ("google-test", "google-test-1")
     assert settings.groq_key_pool == ("groq-test", "groq-test-1")
@@ -229,6 +229,39 @@ def test_settings_supports_model_request_timeout(tmp_path: Path, monkeypatch: py
     settings = Settings.from_env(project_root=tmp_path)
 
     assert settings.model_request_timeout_seconds == 45
+
+
+def test_settings_supports_scrape_timeout_and_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_SCRAPE_TIMEOUT_MS=7000\n"
+        "DEEP_RESEARCH_SCRAPE_RETRIES=2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_SCRAPE_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_SCRAPE_RETRIES", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.scrape_timeout_ms == 7000
+    assert settings.scrape_retries == 2
+
+
+def test_settings_supports_model_max_output_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MODEL_MAX_OUTPUT_TOKENS=12000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MODEL_MAX_OUTPUT_TOKENS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.model_max_output_tokens == 12000
 
 
 def test_settings_supports_disabling_precollection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

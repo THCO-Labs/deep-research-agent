@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.evidence import build_evidence_cards
 from deep_research.evidence_hygiene import apply_evidence_hygiene, report_quality_issues
-from deep_research.acquisition import TavilySearchClientPool, _branch_queries, _trim_search_query
+from deep_research.acquisition import TavilySearchClientPool, acquire_sources, _branch_queries, _trim_search_query
 from deep_research.ingestion import ingest_local_paths, ingest_mcp_manifest
 from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
@@ -31,6 +31,7 @@ from deep_research.synthesis import (
     _target_report_profile,
     build_report_blueprint,
     synthesize_report,
+    synthesize_report_with_model,
 )
 from deep_research.verifier_v2 import _report_depth_score, verify_report_v2
 from deep_research.research_graph import _acquire_route, _coverage_route, _focus_terms_from_state, _verification_route
@@ -108,6 +109,75 @@ def test_tavily_key_pool_rotates_when_key_hits_usage_limit(monkeypatch) -> None:
 
     assert response["results"][0]["url"] == "https://example.com"
     assert calls == ["tavily-one", "tavily-two"]
+
+
+def test_acquisition_uses_configured_scrape_timeout_and_emits_progress(tmp_path: Path, monkeypatch) -> None:
+    captured_scraper_kwargs: dict[str, int] = {}
+
+    class CapturingScraper:
+        def __init__(self, *, timeout_ms: int, retries: int) -> None:
+            captured_scraper_kwargs["timeout_ms"] = timeout_ms
+            captured_scraper_kwargs["retries"] = retries
+
+        def fetch(self, url: str):  # pragma: no cover - raw Tavily content should bypass fetch.
+            raise AssertionError(f"unexpected scrape for {url}")
+
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            raw_content = (
+                "Need for closure is an epistemic motivation linked to fast belief formation, "
+                "misinformation acceptance, ambiguity reduction, and reliance on early cues. "
+                "Empirical research discusses how closure motivation shapes information processing, "
+                "confidence, evidence scrutiny, source evaluation, and false belief acceptance. "
+            ) * 8
+            return {
+                "results": [
+                    {
+                        "url": "https://example.com/need-for-closure-misinformation",
+                        "title": "Need for closure and misinformation",
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.9,
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("deep_research.acquisition.PlaywrightScraper", CapturingScraper)
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure shapes misinformation acceptance.",
+        queries=["need for closure misinformation acceptance evidence"],
+        source_types=["academic"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    settings = SimpleNamespace(
+        scrape_timeout_ms=7_000,
+        scrape_retries=2,
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=20,
+        max_sources=17,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+    )
+    progress_events: list[tuple[str, dict]] = []
+
+    result = acquire_sources(
+        question="What is the role of need for closure on misinformation acceptance?",
+        branches=[branch],
+        artifacts=ResearchArtifactsV2.create(tmp_path, "acquisition timeout"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        progress_callback=lambda message, data: progress_events.append((message, data)),
+    )
+
+    assert captured_scraper_kwargs == {"timeout_ms": 7_000, "retries": 2}
+    assert len(result.sources) == 1
+    assert any(message == "searching source candidates" for message, _ in progress_events)
+    assert any(message.startswith("accepted source") for message, _ in progress_events)
 
 
 def test_generic_plan_handles_food_question_without_topic_specific_branches() -> None:
@@ -907,6 +977,66 @@ def test_coverage_keeps_sparse_required_term_coverage_incomplete() -> None:
     assert coverage.complete is False
     assert coverage.missing_branches == [branch.id]
     assert any("actual" in point for point in coverage.branches[0].missing_points)
+
+
+def test_coverage_accepts_strong_semantic_evidence_without_exact_phrase_matches() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Mediators and boundary conditions",
+        objective="Explain factors that mediate and moderate the relationship.",
+        queries=["mediators moderators relationship"],
+        min_sources=3,
+        required_terms=[
+            "source credibility reliance",
+            "emotional states",
+            "cognitive load",
+            "situational urgency",
+            "message complexity",
+            "prior knowledge",
+        ],
+    )
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=branch.id,
+            title=f"Semantic Source {index}",
+            url=f"https://example.com/semantic/{index}",
+            canonical_url=f"https://example.com/semantic/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=400,
+            quality_score=0.9,
+            quality_label="excellent",
+            quality_type="academic",
+            relevance_score=0.9,
+        )
+        for index in range(1, 4)
+    ]
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=index,
+            branch_id=branch.id,
+            claim=f"Study {index} describes a distinct pathway that shapes the relationship.",
+            supporting_excerpt=f"Study {index} describes a distinct pathway that shapes the relationship.",
+            source_url=sources[index - 1].url,
+            source_title=sources[index - 1].title,
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+            semantic_score=0.86,
+            semantic_notes=[f"semantic pathway {index}", "boundary condition"],
+        )
+        for index in range(1, 4)
+    ]
+
+    coverage = build_coverage_matrix(branches=[branch], evidence_cards=cards, sources=sources)
+
+    assert coverage.complete is True
+    assert coverage.missing_branches == []
+    assert any("semantic evidence sufficiency" in point for point in coverage.branches[0].covered_points)
 
 
 def test_evidence_builder_uses_strong_branch_overlap_without_exact_anchor_phrase() -> None:
@@ -2746,6 +2876,69 @@ def test_report_blueprint_and_writer_use_professional_report_sections() -> None:
     assert "[1] Urban Heat Evidence: https://example.com/urban-heat" in report
 
 
+def test_model_synthesis_falls_back_when_model_returns_degenerate_report(tmp_path: Path, monkeypatch) -> None:
+    class NullReportModel:
+        def invoke(self, _messages):
+            return SimpleNamespace(content="None")
+
+    monkeypatch.setattr("deep_research.synthesis.model_for_role", lambda *_args, **_kwargs: NullReportModel())
+    monkeypatch.setattr("deep_research.synthesis.BaseChatModel", object)
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Urban heat health effects",
+        objective="Explain how urban heat affects public health.",
+        queries=["urban heat health effects"],
+        required_terms=["urban heat", "public health"],
+    )
+    plan = ResearchPlan(
+        question="How does urban heat affect public health?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Urban Heat Evidence",
+        url="https://example.com/urban-heat",
+        canonical_url="https://example.com/urban-heat",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="high",
+        quality_type="official_docs",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        supporting_excerpt="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+
+    report = synthesize_report_with_model(
+        plan=plan,
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        sources=[source],
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path),
+    )
+
+    assert "None" not in report.split("## Sources")[0]
+    assert "Urban heat increases public health risks" in report
+    assert "[1]" in report.split("## Sources")[0]
+
+
 def test_criteria_rich_synthesis_profile_requires_reference_grade_depth() -> None:
     branch = ResearchBranch(
         id="branch_1",
@@ -3472,6 +3665,25 @@ def test_coverage_route_finishes_when_no_evidence_and_acquisition_plateaued() ->
     }
 
     assert _coverage_route(state) == "finish"
+
+
+def test_coverage_route_continues_when_resume_budget_expands_after_plateau() -> None:
+    state = {
+        "coverage_matrix": {"complete": False},
+        "evidence_cards": [{"id": 1, "source_id": 1}],
+        "metrics": {
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "candidate_count_total": 900,
+            "max_candidates": 5000,
+            "coverage_rounds": 2,
+            "search_count": 0,
+            "max_search_queries": 192,
+            "max_rounds": 8,
+        },
+    }
+
+    assert _coverage_route(state) == "more_sources"
 
 
 def test_verification_route_rewrites_unsupported_claims_before_more_search() -> None:

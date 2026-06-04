@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from tavily import TavilyClient
 
@@ -90,10 +90,14 @@ def acquire_sources(
     existing_source_texts: dict[int, str] | None = None,
     searched_queries: set[str] | None = None,
     focus_terms_by_branch: dict[str, list[str]] | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AcquisitionResult:
     metrics = AcquisitionMetrics()
     client = search_client or TavilySearchClientPool(settings)
-    page_scraper = scraper or PlaywrightScraper()
+    page_scraper = scraper or PlaywrightScraper(
+        timeout_ms=int(getattr(settings, "scrape_timeout_ms", 20_000)),
+        retries=int(getattr(settings, "scrape_retries", 1)),
+    )
     min_words = int(getattr(settings, "min_source_words", 250))
     min_chunks = int(getattr(settings, "min_relevant_chunks", 1))
     max_candidates = int(getattr(settings, "max_candidates", 80))
@@ -113,6 +117,7 @@ def acquire_sources(
     source_texts: dict[int, str] = dict(existing_source_texts or {})
     seen_urls: set[str] = {source.canonical_url for source in sources}
     searched = set(searched_queries or ())
+    searched.update(candidate.query for candidate in candidates if candidate.query)
 
     ingested_documents = list(local_documents or []) + list(mcp_documents or [])
     if not existing_sources:
@@ -146,11 +151,39 @@ def acquire_sources(
                 continue
             searched.add(query)
             metrics.search_count += 1
+            _emit_progress(
+                progress_callback,
+                "searching source candidates",
+                branch_id=branch.id,
+                query=query,
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
             try:
                 search_results = _search(client, query, settings)
             except Exception as exc:
                 metrics.failures.append(f"Search failed for {query!r}: {exc}")
+                _emit_progress(
+                    progress_callback,
+                    "source search failed",
+                    branch_id=branch.id,
+                    query=query,
+                    error=str(exc),
+                    sources=len(sources),
+                    candidates=len(candidates),
+                    searches=metrics.search_count,
+                )
                 continue
+            _emit_progress(
+                progress_callback,
+                f"search returned {len(search_results)} candidate(s)",
+                branch_id=branch.id,
+                query=query,
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
             for item in search_results:
                 url = str(item.get("url") or "")
                 if not url:
@@ -188,6 +221,15 @@ def acquire_sources(
                     continue
                 sources.append(record.source)
                 source_texts[record.source.id] = record.text
+                _emit_progress(
+                    progress_callback,
+                    f"accepted source [{record.source.id}]",
+                    branch_id=branch.id,
+                    source_id=record.source.id,
+                    sources=len(sources),
+                    candidates=len(candidates),
+                    searches=metrics.search_count,
+                )
                 if sum(1 for source in sources if source.branch_id == branch.id) >= branch.min_sources:
                     break
 
@@ -198,6 +240,16 @@ def acquire_sources(
         source_texts=source_texts,
         metrics=metrics,
     )
+
+
+def _emit_progress(
+    callback: Callable[[str, dict[str, Any]], None] | None,
+    message: str,
+    **data: Any,
+) -> None:
+    if callback is None:
+        return
+    callback(message, data)
 
 
 @dataclass(frozen=True)

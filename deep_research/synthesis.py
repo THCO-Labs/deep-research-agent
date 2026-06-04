@@ -243,6 +243,8 @@ def synthesize_report_with_model(
     text = str(response.content).strip()
     if not text:
         raise RuntimeError("Synthesis model returned an empty report.")
+    if _is_degenerate_model_report(text, evidence_cards):
+        return synthesize_report(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
     normalized = _normalize_report_markdown(text, evidence_sources)
     citation_repaired = _repair_weak_citation_support(normalized, synthesis_cards, evidence_sources)
     coverage_repaired = _append_evidence_coverage_if_needed(citation_repaired, plan, synthesis_cards)
@@ -429,6 +431,21 @@ def _normalize_report_markdown(report: str, sources: list[SourceRecordV2]) -> st
     else:
         cleaned = cleaned.rstrip() + "\n\n" + source_section
     return cleaned.rstrip() + "\n"
+
+
+def _is_degenerate_model_report(report: str, evidence_cards: list[EvidenceCard]) -> bool:
+    body, _separator, _source_tail = _split_sources(report)
+    body_without_headings = "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    ).strip()
+    normalized = body_without_headings.lower().strip(" .`'\"")
+    if normalized in {"none", "null", "n/a", "na"}:
+        return True
+    if evidence_cards and len(content_terms(body_without_headings)) < 20:
+        return True
+    if evidence_cards and not _numeric_citation_ids(body_without_headings) and len(body_without_headings) < 1200:
+        return True
+    return False
 
 
 def _normalize_markdown_headings(report: str) -> str:

@@ -65,6 +65,7 @@ def test_model_router_distributes_groq_role_models(
     assert _primary(models.verifier).api_key == "groq-b"
     assert _primary(models.orchestrator).kwargs["timeout"] == 120
     assert _primary(models.orchestrator).kwargs["max_retries"] == 0
+    assert _primary(models.orchestrator).kwargs["max_tokens"] == 8192
 
 
 def test_model_router_distributes_google_judge_model(
@@ -93,6 +94,7 @@ def test_model_router_distributes_google_judge_model(
     assert _primary(model).api_key == "google-b"
     assert _primary(model).kwargs["request_timeout"] == 120
     assert _primary(model).kwargs["retries"] == 0
+    assert _primary(model).kwargs["max_output_tokens"] == 8192
 
 
 def test_model_router_uses_four_keys_in_hybrid_defaults(
@@ -206,8 +208,10 @@ def test_model_router_supports_openrouter_free_provider(tmp_path: Path, monkeypa
     assert _primary(model).kwargs["referer"] == "https://example.com"
     assert _primary(model).kwargs["app_title"] == "Research Test"
     assert _primary(model).kwargs["timeout_seconds"] == 120
+    assert _primary(model).kwargs["max_tokens"] == 8192
     assert manifest["openrouter_key_count"] == 2
     assert manifest["model_request_timeout_seconds"] == 120
+    assert manifest["model_max_output_tokens"] == 8192
     assert routes["planner"]["provider"] == "openrouter"
     assert routes["planner"]["key_label"] == "OPENROUTER_API_KEY"
 

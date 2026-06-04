@@ -72,12 +72,15 @@ class Settings:
     verifier_model: str = GOOGLE_DEFAULT_FAST_MODEL
     judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
     scrape_char_limit: int = 15_000
+    scrape_timeout_ms: int = 20_000
+    scrape_retries: int = 1
     tool_excerpt_char_limit: int = 2_500
     precollect_sources: bool = True
     model_fallbacks: bool = True
     provider_retry_attempts: int = 1
     provider_retry_max_wait_seconds: int = 60
     model_request_timeout_seconds: int = 120
+    model_max_output_tokens: int = 8192
     live: bool = False
     google_api_key: str = field(default="", repr=False)
     google_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
@@ -125,11 +128,14 @@ class Settings:
         verifier_model: str | None = None,
         judge_model: str | None = None,
         scrape_char_limit: int | None = None,
+        scrape_timeout_ms: int | None = None,
+        scrape_retries: int | None = None,
         precollect_sources: bool | None = None,
         model_fallbacks: bool | None = None,
         provider_retry_attempts: int | None = None,
         provider_retry_max_wait_seconds: int | None = None,
         model_request_timeout_seconds: int | None = None,
+        model_max_output_tokens: int | None = None,
         live: bool = False,
     ) -> "Settings":
         root = Path(project_root or Path.cwd()).resolve()
@@ -282,6 +288,12 @@ class Settings:
             ),
             scrape_char_limit=scrape_char_limit
             or int(os.environ.get("DEEP_RESEARCH_SCRAPE_CHAR_LIMIT") or _default_scrape_limit(resolved_provider)),
+            scrape_timeout_ms=scrape_timeout_ms
+            if scrape_timeout_ms is not None
+            else int(os.environ.get("DEEP_RESEARCH_SCRAPE_TIMEOUT_MS") or _default_scrape_timeout_ms(mode)),
+            scrape_retries=scrape_retries
+            if scrape_retries is not None
+            else int(os.environ.get("DEEP_RESEARCH_SCRAPE_RETRIES") or _default_scrape_retries(mode)),
             tool_excerpt_char_limit=int(
                 os.environ.get("DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT") or _default_excerpt_limit(resolved_provider)
             ),
@@ -304,6 +316,9 @@ class Settings:
             model_request_timeout_seconds=model_request_timeout_seconds
             if model_request_timeout_seconds is not None
             else int(os.environ.get("DEEP_RESEARCH_MODEL_REQUEST_TIMEOUT_SECONDS") or "120"),
+            model_max_output_tokens=model_max_output_tokens
+            if model_max_output_tokens is not None
+            else int(os.environ.get("DEEP_RESEARCH_MODEL_MAX_OUTPUT_TOKENS") or "8192"),
             live=live,
             google_api_key=google_api_key,
             google_api_keys=google_api_keys,
@@ -369,8 +384,16 @@ class Settings:
             raise ConfigError("provider_retry_attempts must be zero or greater.")
         if self.provider_retry_max_wait_seconds < 0:
             raise ConfigError("provider_retry_max_wait_seconds must be zero or greater.")
+        if self.model_request_timeout_seconds < 1:
+            raise ConfigError("model_request_timeout_seconds must be at least 1.")
+        if self.model_max_output_tokens < 512:
+            raise ConfigError("model_max_output_tokens must be at least 512.")
         if self.scrape_char_limit < 1_000:
             raise ConfigError("scrape_char_limit must be at least 1000.")
+        if self.scrape_timeout_ms < 1_000:
+            raise ConfigError("scrape_timeout_ms must be at least 1000.")
+        if self.scrape_retries < 1:
+            raise ConfigError("scrape_retries must be at least 1.")
         if self.tool_excerpt_char_limit < 500:
             raise ConfigError("tool_excerpt_char_limit must be at least 500.")
         if self.min_usable_sources < MINIMUM_SOURCE_TARGET:
@@ -431,9 +454,9 @@ def _depth_defaults(mode: Mode) -> dict[str, int]:
         }
     if mode == "max_quality":
         return {
-            "min_usable_sources": 40,
-            "max_search_queries": 96,
-            "max_candidates": 900,
+            "min_usable_sources": 60,
+            "max_search_queries": 192,
+            "max_candidates": 5000,
             "min_source_words": 350,
         }
     return {
@@ -519,6 +542,18 @@ def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
 
 def _default_scrape_limit(provider: ResolvedProvider) -> int:
     return 6_000 if provider in {"groq", "hybrid", "ollama", "openrouter"} else 15_000
+
+
+def _default_scrape_timeout_ms(mode: Mode) -> int:
+    if mode == "fast":
+        return 10_000
+    if mode == "max_quality":
+        return 20_000
+    return 15_000
+
+
+def _default_scrape_retries(mode: Mode) -> int:
+    return 2 if mode == "max_quality" else 1
 
 
 def _default_excerpt_limit(provider: ResolvedProvider) -> int:

@@ -150,6 +150,7 @@ class ChatOpenRouter(BaseChatModel):
     referer: str = ""
     app_title: str = "Deep Research Agent"
     timeout_seconds: float = 120.0
+    max_tokens: int | None = None
     base_url: str = "https://openrouter.ai/api/v1/chat/completions"
 
     @property
@@ -176,6 +177,8 @@ class ChatOpenRouter(BaseChatModel):
         }
         if stop:
             payload["stop"] = stop
+        if self.max_tokens and "max_tokens" not in kwargs:
+            payload["max_tokens"] = self.max_tokens
         for key in ("temperature", "max_tokens", "top_p"):
             if key in kwargs and kwargs[key] is not None:
                 payload[key] = kwargs[key]
@@ -314,6 +317,7 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
         "provider_retry_attempts": settings.provider_retry_attempts,
         "provider_retry_max_wait_seconds": settings.provider_retry_max_wait_seconds,
         "model_request_timeout_seconds": settings.model_request_timeout_seconds,
+        "model_max_output_tokens": settings.model_max_output_tokens,
         "google_key_count": len(settings.google_key_pool),
         "groq_key_count": len(settings.groq_key_pool),
         "openrouter_key_count": len(settings.openrouter_key_pool),
@@ -408,6 +412,7 @@ def _chat_model_for_role(
             "referer": settings.openrouter_http_referer,
             "app_title": settings.openrouter_app_title,
             "request_timeout_seconds": settings.model_request_timeout_seconds,
+            "max_output_tokens": settings.model_max_output_tokens,
         }
     )
 
@@ -417,15 +422,27 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
     model_name = str(route["model"])
     api_key = str(route["api_key"])
     timeout_seconds = float(route.get("request_timeout_seconds") or 120)
+    max_output_tokens = int(route.get("max_output_tokens") or 0)
     if provider == "groq":
-        return ChatGroq(model=model_name, api_key=api_key, timeout=timeout_seconds, max_retries=0)
+        kwargs: dict[str, object] = {
+            "model": model_name,
+            "api_key": api_key,
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatGroq(**kwargs)
     if provider == "google_genai":
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            api_key=api_key,
-            request_timeout=timeout_seconds,
-            retries=0,
-        )
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "request_timeout": timeout_seconds,
+            "retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_output_tokens"] = max_output_tokens
+        return ChatGoogleGenerativeAI(**kwargs)
     if provider == "openrouter":
         return ChatOpenRouter(
             model=model_name,
@@ -433,6 +450,7 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
             referer=str(route.get("referer") or ""),
             app_title=str(route.get("app_title") or "Deep Research Agent"),
             timeout_seconds=timeout_seconds,
+            max_tokens=max_output_tokens if max_output_tokens > 0 else None,
         )
     if provider == "ollama":
         from langchain_ollama import ChatOllama
@@ -465,6 +483,7 @@ def _fallback_routes(
                 "referer": settings.openrouter_http_referer,
                 "app_title": settings.openrouter_app_title,
                 "request_timeout_seconds": settings.model_request_timeout_seconds,
+                "max_output_tokens": settings.model_max_output_tokens,
             }
         )
 
@@ -482,6 +501,7 @@ def _fallback_routes(
                     "key_label": _key_label(alternate_provider, alternate_slot),
                     "fallback_type": "cross_provider",
                     "request_timeout_seconds": settings.model_request_timeout_seconds,
+                    "max_output_tokens": settings.model_max_output_tokens,
                 }
             )
     if settings.openrouter_key_pool and provider != "openrouter":
@@ -497,6 +517,7 @@ def _fallback_routes(
                 "referer": settings.openrouter_http_referer,
                 "app_title": settings.openrouter_app_title,
                 "request_timeout_seconds": settings.model_request_timeout_seconds,
+                "max_output_tokens": settings.model_max_output_tokens,
             }
         )
     return routes

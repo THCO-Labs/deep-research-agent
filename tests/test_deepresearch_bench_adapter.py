@@ -96,6 +96,22 @@ def test_benchmark_settings_accept_model_timeout_flag(tmp_path: Path, monkeypatc
     assert settings.model_request_timeout_seconds == 45
 
 
+def test_benchmark_settings_accept_model_output_token_flag(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--benchmark-dir", str(_bench_dir(tmp_path)), "--provider", "groq", "--model-max-output-tokens", "12000"]
+    )
+
+    settings = _settings_from_args(args)
+
+    assert settings.model_max_output_tokens == 12000
+
+
 def test_generate_raw_submission_resumes_without_duplicate_rows(tmp_path: Path) -> None:
     bench = _bench_dir(tmp_path)
     settings = Settings(project_root=tmp_path, out_dir=tmp_path / "runs")
