@@ -189,6 +189,21 @@ def test_settings_supports_disabling_llm_planning(tmp_path: Path, monkeypatch: p
     assert settings.llm_planning is False
 
 
+def test_settings_supports_semantic_evidence_card_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_SEMANTIC_EVIDENCE_MAX_LLM_CARDS=0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_SEMANTIC_EVIDENCE_MAX_LLM_CARDS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.semantic_evidence_max_llm_cards == 0
+
+
 def test_settings_supports_ollama_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "DEEP_RESEARCH_PROVIDER=ollama\nTAVILY_API_KEY=tavily-test\n",

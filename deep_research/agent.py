@@ -136,13 +136,14 @@ def _write_verification_failure(
     message = "Final report failed verification."
     if failures:
         message += " " + "; ".join(str(failure) for failure in failures[:5])
+    _archive_unaccepted_report(artifacts, verification)
     artifacts.write_json(
         "failure.json",
         {
             "category": "verification_failed",
             "retryable": True,
             "retry_after_seconds": None,
-            "suggested_action": "Inspect verification.json, evidence_rejections.jsonl, coverage.json, and report.md; rerun with more sources or fix synthesis/verification failures.",
+            "suggested_action": "Inspect verification.json, evidence_rejections.jsonl, coverage.json, and failed_report.md; rerun or resume after fixing synthesis/verification failures.",
             "error_type": "VerificationFailed",
             "message": message,
         },
@@ -154,6 +155,43 @@ def _write_verification_failure(
     artifacts.write_text("error.txt", message + "\n")
 
 
+def _archive_unaccepted_report(artifacts: ResearchArtifactsV2, verification: dict[str, Any]) -> None:
+    report_path = artifacts.resolve_path("report.md")
+    draft_path = artifacts.resolve_path("draft_report.md")
+    failed_path = artifacts.resolve_path("failed_report.md")
+    draft = ""
+    if draft_path.exists():
+        draft = draft_path.read_text(encoding="utf-8", errors="replace")
+    elif report_path.exists():
+        existing = report_path.read_text(encoding="utf-8", errors="replace")
+        if "Research Run Failed Verification" not in existing[:200]:
+            draft = existing
+    if draft.strip():
+        artifacts.write_text("failed_report.md", draft.rstrip() + "\n")
+        if not draft_path.exists():
+            artifacts.write_text("draft_report.md", draft.rstrip() + "\n")
+    elif failed_path.exists():
+        draft = failed_path.read_text(encoding="utf-8", errors="replace")
+    artifacts.write_text("report.md", _failed_report_notice(verification))
+
+
+def _failed_report_notice(verification: dict[str, Any]) -> str:
+    failures = [str(failure) for failure in verification.get("failures", [])][:12]
+    lines = [
+        "# Research Run Failed Verification",
+        "",
+        "This run did not produce an accepted final report. The rejected draft is stored in `failed_report.md` and `draft_report.md` for debugging.",
+        "",
+        "## Verification Failures",
+        "",
+    ]
+    if failures:
+        lines.extend(f"- {failure}" for failure in failures)
+    else:
+        lines.append("- Verification did not mark the draft as valid.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def resume_research(
     run_id: str,
     settings: Settings,
@@ -161,6 +199,7 @@ def resume_research(
     on_update: ProgressCallback | None = None,
     progress_mode: ProgressMode = "live",
 ) -> ResearchRunResult:
+    started = time.perf_counter()
     run_dir = (settings.out_dir / run_id).resolve()
     if not run_dir.exists():
         raise FileNotFoundError(f"Run does not exist: {run_dir}")
@@ -168,21 +207,50 @@ def resume_research(
     activity = ActivityLog(artifacts, on_update=on_update, progress_mode=progress_mode)
     state = load_latest_checkpoint(run_dir)
     question = str(state.get("request", {}).get("question") or "")
-    _emit(activity, "research_status", "resuming from latest graph checkpoint")
-    final_state = run_local_research_graph(
-        question=question,
-        settings=settings,
-        artifacts=artifacts,
-        activity=activity,
-        initial_state=state,
-    )
-    verification = dict(final_state.get("verification", {}))
-    if not settings.allow_failed_verification and not verification.get("valid", False):
-        _write_verification_failure(artifacts, dict(final_state.get("metrics", {})), verification)
-        _emit(activity, "error", "verification_failed: resumed report did not pass quality gates")
-        raise ResearchRunError("Research verification failed after resume; inspect verification.json and failure.json.", _result_for_artifacts(artifacts))
-    _emit(activity, "run", "resume complete")
-    return _result_for_artifacts(artifacts)
+    result = _result_for_artifacts(artifacts)
+    try:
+        _emit(activity, "research_status", "resuming from latest graph checkpoint")
+        final_state = run_local_research_graph(
+            question=question,
+            settings=settings,
+            artifacts=artifacts,
+            activity=activity,
+            initial_state=state,
+        )
+        verification = dict(final_state.get("verification", {}))
+        if not settings.allow_failed_verification and not verification.get("valid", False):
+            _write_verification_failure(artifacts, dict(final_state.get("metrics", {})), verification)
+            _emit(activity, "error", "verification_failed: resumed report did not pass quality gates")
+            raise ResearchRunError("Research verification failed after resume; inspect verification.json and failure.json.", result)
+        _emit(activity, "run", "resume complete")
+        return result
+    except ResearchRunError:
+        raise
+    except Exception as exc:
+        failure = classify_exception(exc)
+        artifacts.write_json("failure.json", failure.to_dict())
+        artifacts.write_text("error.txt", f"{type(exc).__name__}: {exc}\n")
+        metrics = artifacts.read_json("metrics.json") if artifacts.resolve_path("metrics.json").exists() else {}
+        metrics.update(
+            {
+                "engine": settings.research_engine,
+                "error_category": failure.category,
+                "verification_valid": False,
+                "elapsed_seconds_total": round(time.perf_counter() - started, 3),
+            }
+        )
+        artifacts.write_json("metrics.json", _public_metrics(metrics))
+        if not artifacts.resolve_path("verification.json").exists():
+            artifacts.write_json(
+                "verification.json",
+                {
+                    "schema_version": 2,
+                    "valid": False,
+                    "failures": [failure.message],
+                },
+            )
+        _emit(activity, "error", f"{failure.category}: {failure.message}")
+        raise ResearchRunError(f"Research resume failed: {exc}", result) from exc
 
 
 def verify_research_run(run_id: str, settings: Settings) -> ResearchRunResult:

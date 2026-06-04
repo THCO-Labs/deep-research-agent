@@ -67,6 +67,7 @@ def redacted_settings(settings: Settings) -> dict[str, Any]:
         "search_depth": settings.search_depth,
         "allow_raw_content": settings.allow_raw_content,
         "semantic_verification": settings.semantic_verification,
+        "semantic_evidence_max_llm_cards": settings.semantic_evidence_max_llm_cards,
         "llm_planning": settings.llm_planning,
         "report_quality_gate": settings.report_quality_gate,
         "llm_synthesis": settings.llm_synthesis,

@@ -43,7 +43,7 @@ def build_coverage_matrix(
     missing_branches = [row.branch_id for row in coverage_rows if not row.complete]
     return CoverageMatrix(
         branches=coverage_rows,
-        complete=not missing_branches or coverage_score >= 0.80,
+        complete=not missing_branches,
         coverage_score=coverage_score,
         missing_branches=missing_branches,
     )

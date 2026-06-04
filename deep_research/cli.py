@@ -68,6 +68,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--no-llm-planning", action="store_true")
     parser.add_argument("--no-llm-synthesis", action="store_true")
     parser.add_argument("--no-semantic-verification", action="store_true")
+    parser.add_argument("--semantic-evidence-max-llm-cards", type=int, default=None)
     parser.add_argument("--allow-failed-verification", action="store_true")
     parser.add_argument("--allow-weak-tool-models", action="store_true")
     parser.add_argument("--live", action="store_true")
@@ -154,6 +155,7 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         judge_model=args.judge_model,
         scrape_char_limit=args.scrape_char_limit,
         semantic_verification=not args.no_semantic_verification,
+        semantic_evidence_max_llm_cards=args.semantic_evidence_max_llm_cards,
         llm_planning=not args.no_llm_planning,
         llm_synthesis=not args.no_llm_synthesis,
         allow_failed_verification=args.allow_failed_verification,

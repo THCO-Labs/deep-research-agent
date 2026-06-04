@@ -3,7 +3,12 @@ from pathlib import Path
 
 from deep_research.agent import ResearchRunError, ResearchRunResult
 from deep_research.artifacts_v2 import ResearchArtifactsV2
-from deep_research.deepresearch_bench import generate_raw_submission, load_benchmark_tasks
+from deep_research.deepresearch_bench import (
+    evaluate_raw_submission_fact_proxy,
+    evaluate_raw_submission_proxy,
+    generate_raw_submission,
+    load_benchmark_tasks,
+)
 from deep_research.settings import Settings
 
 
@@ -129,6 +134,142 @@ def test_generate_raw_submission_can_enrich_agent_prompt_with_criteria(tmp_path:
     assert "Cover the core mechanism" in seen_guidance[0]
 
 
+def test_proxy_evaluation_scores_existing_raw_submission_against_reference(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    _write_proxy_inputs(bench)
+
+    paths = evaluate_raw_submission_proxy(
+        benchmark_dir=bench,
+        model_name="local-proxy",
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path / "runs"),
+        ids=[2],
+        use_llm=False,
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    summary = json.loads(paths.summary_path.read_text(encoding="utf-8"))
+    assert row["id"] == 2
+    assert row["method"] == "deterministic"
+    assert 0.0 < row["overall_score"] <= 1.0
+    assert row["race_relative_score"] == row["overall_score"]
+    assert 0.0 < row["candidate_absolute_score"] <= 1.0
+    assert 0.0 < row["reference_absolute_score"] <= 1.0
+    assert row["benchmark_scoring_note"]
+    assert "comprehensiveness" in row["dimension_scores"]
+    assert summary["successful_count"] == 1
+    assert "candidate_absolute_score" in summary
+    assert paths.result_path.read_text(encoding="utf-8").startswith("Count: 1")
+
+
+def test_proxy_evaluation_accepts_custom_judge_payload(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    _write_proxy_inputs(bench)
+
+    def judge(payload: dict) -> dict:
+        criteria = payload["criteria"]["criterions"]
+        return {
+            "dimensions": {
+                dimension: [
+                    {
+                        "criterion": row["criterion"],
+                        "candidate_score": 8,
+                        "reference_score": 10,
+                    }
+                    for row in rows
+                ]
+                for dimension, rows in criteria.items()
+            }
+        }
+
+    paths = evaluate_raw_submission_proxy(
+        benchmark_dir=bench,
+        model_name="local-proxy",
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path / "runs"),
+        ids=[2],
+        judge=judge,
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["method"] == "custom_proxy_judge"
+    assert row["overall_score"] == 0.4444
+    assert row["candidate_absolute_score"] == 0.8
+    assert row["reference_absolute_score"] == 1.0
+
+
+def test_proxy_evaluation_scores_failed_run_notice_as_zero(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    _write_proxy_inputs(bench)
+    raw_dir = bench / "data" / "test_data" / "raw_data"
+    raw = {
+        "id": 2,
+        "prompt": "English task",
+        "article": (
+            "# Research Run Failed Verification\n\n"
+            "This run did not produce an accepted final report.\n\n"
+            "## Benchmark Run Failure\n\n"
+            "Failure category: verification_failed.\n"
+        ),
+    }
+    (raw_dir / "local-failed-proxy.jsonl").write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+    paths = evaluate_raw_submission_proxy(
+        benchmark_dir=bench,
+        model_name="local-failed-proxy",
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path / "runs"),
+        ids=[2],
+        use_llm=False,
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    summary = json.loads(paths.summary_path.read_text(encoding="utf-8"))
+    assert row["overall_score"] == 0.0
+    assert row["candidate_absolute_score"] == 0.0
+    assert summary["low_score_ids"] == [2]
+
+
+def test_fact_proxy_scores_citations_against_run_source_text(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    _write_fact_proxy_inputs(bench, supported=True)
+    run_dir = _write_fact_run_dir(tmp_path, source_text="Need for closure increases misinformation acceptance through quick certainty seeking.")
+
+    paths = evaluate_raw_submission_fact_proxy(
+        benchmark_dir=bench,
+        model_name="local-fact",
+        ids=[2],
+        run_dir=run_dir,
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    summary = json.loads(paths.summary_path.read_text(encoding="utf-8"))
+    assert row["method"] == "deterministic_fact_proxy"
+    assert row["supported_citation_count"] == 1
+    assert row["valid_rate"] == 1.0
+    assert row["source_breadth_score"] < 1.0
+    assert row["overall_score"] > 0.55
+    assert summary["supported_citation_count"] == 1
+
+
+def test_fact_proxy_penalizes_unsupported_wrong_topic_report(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    _write_fact_proxy_inputs(bench, supported=False)
+    run_dir = _write_fact_run_dir(tmp_path, source_text="Need for closure increases misinformation acceptance through quick certainty seeking.")
+
+    paths = evaluate_raw_submission_fact_proxy(
+        benchmark_dir=bench,
+        model_name="local-fact",
+        ids=[2],
+        run_dir=run_dir,
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["unsupported_citation_count"] == 1
+    assert row["topic_drift_examples"]
+    assert row["topic_consistency_score"] < 1.0
+    assert row["valid_rate"] == 0.0
+    assert row["overall_score"] < 0.50
+    assert row["unsupported_examples"]
+
+
 def _bench_dir(tmp_path: Path) -> Path:
     bench = tmp_path / "deep_research_bench"
     query_dir = bench / "data" / "prompt_data"
@@ -144,6 +285,114 @@ def _bench_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return bench
+
+
+def _write_proxy_inputs(bench: Path) -> None:
+    criteria_dir = bench / "data" / "criteria_data"
+    criteria_dir.mkdir(parents=True, exist_ok=True)
+    cleaned_dir = bench / "data" / "test_data" / "cleaned_data"
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = bench / "data" / "test_data" / "raw_data"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    criteria = {
+        "id": 2,
+        "prompt": "English task",
+        "dimension_weight": {
+            "comprehensiveness": 0.3,
+            "insight": 0.3,
+            "instruction_following": 0.25,
+            "readability": 0.15,
+        },
+        "criterions": {
+            "comprehensiveness": [
+                {
+                    "criterion": "Core mechanism coverage",
+                    "explanation": "Covers the mechanism, evidence, and scope.",
+                    "weight": 1.0,
+                }
+            ],
+            "insight": [
+                {
+                    "criterion": "Analytical synthesis",
+                    "explanation": "Connects sources and explains implications.",
+                    "weight": 1.0,
+                }
+            ],
+            "instruction_following": [
+                {
+                    "criterion": "Direct answer to the prompt",
+                    "explanation": "Answers the original task without drift.",
+                    "weight": 1.0,
+                }
+            ],
+            "readability": [
+                {
+                    "criterion": "Clear structure and prose",
+                    "explanation": "Uses organized, readable report prose.",
+                    "weight": 1.0,
+                }
+            ],
+        },
+    }
+    (criteria_dir / "criteria.jsonl").write_text(json.dumps(criteria) + "\n", encoding="utf-8")
+    reference = {
+        "id": 2,
+        "prompt": "English task",
+        "article": "# Reference\n\nThis reference covers the core mechanism, evidence, scope, analytical synthesis, implications, direct answer, and clear structure. [1]\n",
+    }
+    (cleaned_dir / "reference.jsonl").write_text(json.dumps(reference) + "\n", encoding="utf-8")
+    raw = {
+        "id": 2,
+        "prompt": "English task",
+        "article": "# Candidate\n\nThis candidate gives a direct answer with core mechanism coverage and clear structure. [1]\n",
+    }
+    (raw_dir / "local-proxy.jsonl").write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+
+def _write_fact_proxy_inputs(bench: Path, *, supported: bool) -> None:
+    raw_dir = bench / "data" / "test_data" / "raw_data"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    if supported:
+        article = (
+            "# Candidate\n\n"
+            "Need for closure increases misinformation acceptance through quick certainty seeking. [1]\n\n"
+            "## Sources\n\n"
+            "[1] Need for Closure Source: https://example.com/nfc\n"
+        )
+    else:
+        article = (
+            "# Candidate\n\n"
+            "COVID-19 vaccination policy determines hospital staffing and public health logistics. [1]\n\n"
+            "## Sources\n\n"
+            "[1] Need for Closure Source: https://example.com/nfc\n"
+        )
+    raw = {"id": 2, "prompt": "What is the role of need for closure on misinformation acceptance?", "article": article}
+    (raw_dir / "local-fact.jsonl").write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+
+def _write_fact_run_dir(tmp_path: Path, *, source_text: str) -> Path:
+    run_dir = tmp_path / "run"
+    source_dir = run_dir / "source_docs"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source_1.md").write_text(source_text, encoding="utf-8")
+    source = {
+        "id": 1,
+        "branch_id": "branch_1",
+        "title": "Need for Closure Source",
+        "url": "https://example.com/nfc",
+        "canonical_url": "https://example.com/nfc",
+        "provenance": "web",
+        "content_path": "source_docs/source_1.md",
+        "content_hash": "hash",
+        "extraction_method": "test",
+        "word_count": len(source_text.split()),
+        "quality_score": 0.9,
+        "quality_label": "high",
+        "quality_type": "academic",
+        "relevance_score": 0.9,
+    }
+    (run_dir / "sources.jsonl").write_text(json.dumps(source) + "\n", encoding="utf-8")
+    return run_dir
 
 
 def _fake_runner(question: str, settings: Settings) -> ResearchRunResult:

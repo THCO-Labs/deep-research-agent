@@ -9,12 +9,13 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from deep_research.model_router import model_for_role
-from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchPlan, SourceRecordV2
+from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2
 from deep_research.settings import Settings
 from deep_research.source_validation import content_terms
 
-MAX_SYNTHESIS_CARDS_PER_BRANCH = 12
-MAX_SYNTHESIS_EXCERPT_CHARS = 900
+MAX_SYNTHESIS_CARDS_PER_BRANCH = 6
+MAX_SYNTHESIS_CARDS_TOTAL = 64
+MAX_SYNTHESIS_EXCERPT_CHARS = 500
 REPORT_STYLE_EXAMPLES = (
     {
         "name": "Analytical explainer",
@@ -97,6 +98,7 @@ def build_report_blueprint(
             "coverage_score": coverage.coverage_score,
             "missing_branches": coverage.missing_branches,
         },
+        "acceptance_criteria": plan.acceptance_criteria,
         "branch_writing_briefs": branch_sections,
         "style_examples": REPORT_STYLE_EXAMPLES,
         "structure_guidance": [
@@ -141,10 +143,10 @@ def synthesize_report(
             continue
         lines.extend([f"## {branch.title}", ""])
         if branch.id in {"comparison", "comparisons"} and branch_cards:
-            lines.extend(_comparison_table(branch_cards))
+            lines.extend(_comparison_table(branch_cards, plan=plan))
             cited_source_ids.update(card.source_id for card in branch_cards[:4])
             lines.append("")
-        for card in branch_cards[:4]:
+        for card in _source_diverse_cards(_rank_cards(branch_cards, question=plan.question), limit=max(4, min(8, len(branch_cards)))):
             lines.extend([_sentence_with_citation(card), ""])
             cited_source_ids.add(card.source_id)
 
@@ -159,11 +161,18 @@ def synthesize_report(
     lines.extend(["## Comparison Table", ""])
     if evidence_cards:
         table_cards = _cards_for_synthesis(plan, evidence_cards)[:6]
-        lines.extend(_comparison_table(table_cards))
+        lines.extend(_comparison_table(table_cards, plan=plan))
         cited_source_ids.update(card.source_id for card in table_cards)
         lines.append("")
     else:
         lines.extend(["No comparison table could be generated because no evidence cards passed hygiene gates.", ""])
+
+    breadth_cards = _cards_needed_for_source_breadth(plan, evidence_cards, cited_source_ids)
+    if breadth_cards:
+        lines.extend([f"## Additional Evidence on {_report_title(plan.question).replace('Research Report: ', '')}", ""])
+        for card in breadth_cards:
+            lines.extend([_sentence_with_citation(card), ""])
+            cited_source_ids.add(card.source_id)
 
     lines.extend(["## Implications", ""])
     if summary_cards:
@@ -207,16 +216,17 @@ def synthesize_report_with_model(
     model = model_for_role(settings, "orchestrator", settings.model)
     if not isinstance(model, BaseChatModel):
         raise RuntimeError(f"Synthesis role did not resolve to a chat model: {model!r}")
-    evidence_sources = _evidence_backed_sources(sources, evidence_cards)
+    synthesis_cards = _cards_for_synthesis(plan, evidence_cards)
+    evidence_sources = _evidence_backed_sources(sources, synthesis_cards)
     report_blueprint = blueprint or build_report_blueprint(
         plan=plan,
-        evidence_cards=evidence_cards,
+        evidence_cards=synthesis_cards,
         coverage=coverage,
         sources=evidence_sources,
     )
     prompt = _synthesis_prompt(
         plan=plan,
-        evidence_cards=evidence_cards,
+        evidence_cards=synthesis_cards,
         coverage=coverage,
         sources=evidence_sources,
         previous_report=previous_report,
@@ -229,8 +239,9 @@ def synthesize_report_with_model(
     if not text:
         raise RuntimeError("Synthesis model returned an empty report.")
     normalized = _normalize_report_markdown(text, evidence_sources)
-    citation_repaired = _repair_weak_citation_support(normalized, evidence_cards, evidence_sources)
-    return _normalize_report_markdown(citation_repaired, evidence_sources)
+    citation_repaired = _repair_weak_citation_support(normalized, synthesis_cards, evidence_sources)
+    coverage_repaired = _append_evidence_coverage_if_needed(citation_repaired, plan, synthesis_cards)
+    return _normalize_report_markdown(coverage_repaired, evidence_sources)
 
 
 def _synthesis_prompt(
@@ -271,14 +282,17 @@ def _synthesis_prompt(
         f"- {branch.id}: {branch.title}; objective: {branch.objective}; required terms: {', '.join(branch.required_terms)}"
         for branch in plan.branches
     )
+    acceptance_criteria_lines = "\n".join(f"- {criterion}" for criterion in plan.acceptance_criteria[:32]) or "None"
     repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:20]) or "None"
-    previous_text = previous_report[:6000] if previous_report else "None"
+    previous_text = previous_report[:3000] if previous_report else "None"
     report_blueprint = blueprint or build_report_blueprint(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
     visual_assets = report_blueprint.get("visual_assets", [])
     visual_text = "\n".join(
         f"- {asset['alt']}: {asset['url']} (source_id {asset['source_id']})"
         for asset in visual_assets[:12]
     ) or "None"
+    required_source_breadth = min(17, len({card.source_id for card in evidence_cards}))
+    target_depth_hint = _target_depth_hint(plan=plan, evidence_cards=evidence_cards, writing_guidance=writing_guidance)
     return f"""You are writing a professional deep research report from verified evidence cards.
 
 Current date: {date.today().isoformat()}
@@ -289,8 +303,11 @@ User question:
 Research branches:
 {branch_lines}
 
+Acceptance criteria to satisfy in the report:
+{acceptance_criteria_lines}
+
 Report-writing blueprint:
-{json_dumps(report_blueprint)}
+{json_dumps(_compact_blueprint_for_prompt(report_blueprint))}
 
 Coverage status:
 - complete: {coverage.complete}
@@ -322,12 +339,17 @@ Report style examples to learn from, not copy:
 
 Hard requirements:
 - Answer the user's question directly in the first substantive paragraph.
+- Keep the title, opening answer, and body centered on the user's exact question. If the previous draft drifts to a different topic, ignore the drift and rebuild from the evidence cards.
 - Use only the evidence cards above. Do not add uncited facts from memory.
 - Every factual paragraph must include at least one inline citation like [3].
 - Citation IDs must be source_id values from the allowed sources list.
 - Do not cite evidence card IDs. Cite source IDs only.
+- Cite at least {required_source_breadth} distinct evidence-backed source IDs when that many are available.
+- Depth target: {target_depth_hint}
+- Satisfy the acceptance criteria as report coverage requirements. Do not quote them as a checklist, but make the relevant concepts and analysis visible in the prose.
 - Treat the research branches and any additional report-writing guidance as a coverage checklist.
 - Every branch with evidence cards must be substantively answered in the report, either in its own section or in a clearly relevant grouped section.
+- For each evidence-rich branch, write analytical paragraphs that define the issue, summarize the strongest evidence, explain mechanisms or trade-offs, and state limitations. Do not compress a branch into a single sentence when multiple cards support it.
 - When prior failures mention answer coverage, missing context, or semantic completeness, expand the under-covered branch objectives and required points instead of writing a short overview.
 - For criteria-rich benchmark-style prompts, write a comprehensive report rather than a brief answer; depth and coverage matter more than brevity.
 - Do not include structural extraction artifacts in the body: raw URLs, markdown link/media syntax, page-control text, key-value scrape metadata, or extraction notes.
@@ -335,8 +357,10 @@ Hard requirements:
 - Treat prior verification failures as private repair instructions only; never quote them or mention branch IDs, evidence card IDs, missing-citation diagnostics, or internal coverage scores in the report body.
 - Choose natural section headings for this question. Do not force a fixed template or reuse the same headings for every topic.
 - Write in polished report prose with synthesis across sources, not a bullet dump of evidence cards.
-- Each major section must make a claim, interpret the claim, and explain why it matters for the user's question.
-- Include an explicit synthesis section or synthesis paragraphs that compare agreement, tension, evidence strength, and trade-offs across sources.
+- Each major section must make a claim, interpret the claim, explain why it matters for the user's question, and connect back to the report's central thesis.
+- Use precise domain terminology, define specialized terms when needed, and keep paragraph transitions explicit so the argument reads as one coherent report.
+- Include synthesis paragraphs that compare agreement, tension, evidence strength, mechanisms, boundary conditions, and trade-offs across sources.
+- Add forward-looking or decision-relevant implications only when the evidence supports them; frame uncertainty and open questions clearly.
 - The table must use question-specific dimensions, not generic labels.
 - Include images only when listed under evidence-backed visual assets and only when the visual helps inspect the topic; otherwise omit images.
 - End with exactly one ## Sources section. Each entry must be exactly: [N] Title: https://url
@@ -495,6 +519,75 @@ def _repair_weak_citation_support(
     return "".join(repaired) + (separator + source_tail if separator else "")
 
 
+def _append_evidence_coverage_if_needed(
+    report: str,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    *,
+    max_added_cards: int = 24,
+) -> str:
+    if not evidence_cards:
+        return report
+    body, separator, source_tail = _split_sources(report)
+    cited_source_ids = {int(value) for value in re.findall(r"\[([0-9]+)]", body)}
+    report_terms = content_terms(body)
+    cards_by_branch = _cards_by_branch(evidence_cards)
+    additions: list[tuple[ResearchBranch | None, EvidenceCard]] = []
+    selected_card_ids: set[int] = set()
+
+    for branch in plan.branches:
+        branch_cards = cards_by_branch.get(branch.id, [])
+        if not branch_cards:
+            continue
+        branch_terms = content_terms(branch.title + " " + branch.objective + " " + " ".join(branch.required_terms))
+        branch_coverage = len(branch_terms & report_terms) / max(len(branch_terms), 1) if branch_terms else 1.0
+        branch_source_ids = {card.source_id for card in branch_cards}
+        branch_is_cited = bool(branch_source_ids & cited_source_ids)
+        if branch_coverage >= 0.35 and branch_is_cited:
+            continue
+        for card in _source_diverse_cards(_rank_cards(branch_cards, question=plan.question), limit=2):
+            if card.id in selected_card_ids:
+                continue
+            additions.append((branch, card))
+            selected_card_ids.add(card.id)
+            cited_source_ids.add(card.source_id)
+            if len(additions) >= max_added_cards:
+                break
+        if len(additions) >= max_added_cards:
+            break
+
+    target_sources = min(17, len({card.source_id for card in evidence_cards}))
+    if len(cited_source_ids) < target_sources and len(additions) < max_added_cards:
+        needed = target_sources - len(cited_source_ids)
+        breadth_cards = [
+            card
+            for card in _cards_for_synthesis(plan, evidence_cards)
+            if card.source_id not in cited_source_ids and card.id not in selected_card_ids
+        ]
+        for card in _source_diverse_cards(breadth_cards, limit=min(needed, max_added_cards - len(additions))):
+            additions.append((None, card))
+            selected_card_ids.add(card.id)
+            cited_source_ids.add(card.source_id)
+
+    if not additions:
+        return report
+
+    lines = [
+        "",
+        f"## Evidence Coverage for {_report_title(plan.question).replace('Research Report: ', '')}",
+        "",
+    ]
+    for branch, card in additions:
+        if branch is not None:
+            prefix = f"For {branch.title}, the evidence adds that"
+        else:
+            prefix = "Additional evidence broadens the source base by showing that"
+        lines.append(f"{prefix} {card.claim.rstrip('. ')}. [{card.source_id}]")
+        lines.append("")
+    repaired_body = body.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n"
+    return repaired_body + (separator + source_tail if separator else "")
+
+
 def _paragraph_can_receive_support_repair(text: str) -> bool:
     if len(text) < 80:
         return False
@@ -581,7 +674,13 @@ def _paragraph_needs_repair(text: str) -> bool:
 
 
 def _sources_section(sources: list[SourceRecordV2], report: str) -> str:
-    cited_ids = sorted({int(match) for match in re.findall(r"\[([0-9]+)]", report)})
+    cited_ids = sorted(
+        {
+            int(value)
+            for block in re.findall(r"\[([0-9][0-9,\s]*)\]", report)
+            for value in re.findall(r"\d+", block)
+        }
+    )
     source_by_id = {source.id: source for source in sources}
     listed = [source_by_id[source_id] for source_id in cited_ids if source_id in source_by_id]
     if not listed:
@@ -610,19 +709,86 @@ def _evidence_backed_sources(
 def _cards_for_synthesis(plan: ResearchPlan, evidence_cards: list[EvidenceCard]) -> list[EvidenceCard]:
     cards_by_branch = _cards_by_branch(evidence_cards)
     selected: list[EvidenceCard] = []
+    branch_count = max(len(plan.branches), 1)
+    per_branch_limit = max(2, min(MAX_SYNTHESIS_CARDS_PER_BRANCH, MAX_SYNTHESIS_CARDS_TOTAL // branch_count))
     for branch in plan.branches:
         branch_cards = sorted(
             cards_by_branch.get(branch.id, []),
-            key=lambda item: (-item.confidence, -(item.semantic_score or 0.0), -item.quality_score, item.id),
+            key=lambda item: _card_rank_key(item, question=plan.question),
         )
-        selected.extend(branch_cards[:MAX_SYNTHESIS_CARDS_PER_BRANCH])
+        selected.extend(_source_diverse_cards(branch_cards, limit=per_branch_limit))
     selected_ids = {card.id for card in selected}
     selected.extend(
         card
         for card in sorted(evidence_cards, key=lambda item: (-item.confidence, item.id))
         if card.id not in selected_ids
     )
+    return selected[:MAX_SYNTHESIS_CARDS_TOTAL]
+
+
+def _source_diverse_cards(cards: list[EvidenceCard], *, limit: int) -> list[EvidenceCard]:
+    selected: list[EvidenceCard] = []
+    seen_sources: set[int] = set()
+    for card in cards:
+        if len(selected) >= limit:
+            break
+        if card.source_id in seen_sources:
+            continue
+        selected.append(card)
+        seen_sources.add(card.source_id)
+    if len(selected) < limit:
+        selected_ids = {card.id for card in selected}
+        for card in cards:
+            if len(selected) >= limit:
+                break
+            if card.id in selected_ids:
+                continue
+            selected.append(card)
     return selected
+
+
+def _rank_cards(cards: list[EvidenceCard], *, question: str = "") -> list[EvidenceCard]:
+    return sorted(
+        cards,
+        key=lambda item: _card_rank_key(item, question=question),
+    )
+
+
+def _card_rank_key(card: EvidenceCard, *, question: str = "") -> tuple[float, float, float, float, float, int]:
+    card_text = f"{card.claim} {card.supporting_excerpt} {card.source_title}"
+    return (
+        -_question_phrase_score(question, card_text),
+        -_question_term_score(question, card_text),
+        -card.confidence,
+        -(card.semantic_score or 0.0),
+        -card.quality_score,
+        card.id,
+    )
+
+
+def _question_phrase_score(question: str, text: str) -> float:
+    question_terms = content_terms(question)
+    if len(question_terms) < 2:
+        return _question_term_score(question, text)
+    ordered_question_terms = [term for term in question.lower().replace("-", " ").split() if term in question_terms]
+    if len(ordered_question_terms) < 2:
+        ordered_question_terms = sorted(question_terms)
+    text_terms = content_terms(text)
+    phrase_terms: set[str] = set()
+    for size in (3, 2):
+        for index in range(0, max(0, len(ordered_question_terms) - size + 1)):
+            window = ordered_question_terms[index : index + size]
+            if all(term in text_terms for term in window):
+                phrase_terms.update(window)
+    return round(len(phrase_terms) / max(len(question_terms), 1), 4)
+
+
+def _question_term_score(question: str, text: str) -> float:
+    question_terms = content_terms(question)
+    if not question_terms:
+        return 1.0
+    text_terms = content_terms(text)
+    return round(len(question_terms & text_terms) / max(len(question_terms), 1), 4)
 
 
 def _report_title(question: str) -> str:
@@ -635,12 +801,23 @@ def _report_title(question: str) -> str:
     return f"Research Report: {cleaned}"
 
 
+def _question_label(question: str) -> str:
+    cleaned = re.sub(r"\s+", " ", question.strip()).strip()
+    if not cleaned:
+        return "the user's question"
+    return cleaned.rstrip("?!.")
+
+
 def _executive_summary_sentence(question: str, cards: list[EvidenceCard]) -> str:
-    answer = cards[0].claim.rstrip(". ")
-    supporting = "; ".join(card.claim.rstrip(". ") for card in cards[1:3])
-    if supporting:
-        return f"In answer to the question, {answer}. The strongest supporting evidence adds that {supporting}. {_citation_group(cards[:3])}"
-    return f"In answer to the question, {answer}. {_citation_group(cards[:1])}"
+    central_cards = sorted(cards, key=lambda card: _card_rank_key(card, question=question))[:3]
+    claims = "; ".join(card.claim.rstrip(". ") for card in central_cards)
+    if not claims:
+        return f"The gathered evidence did not contain a clean opening answer for: {_question_label(question)}."
+    return (
+        f"In answer to the question, the evidence should be read around the central request: "
+        f"{_question_label(question)}. The strongest source-backed points are that {claims}. "
+        f"{_citation_group(central_cards)}"
+    )
 
 
 def _sentence_with_citation(card: EvidenceCard) -> str:
@@ -664,13 +841,32 @@ def _limitations_sentence(coverage: CoverageMatrix) -> str:
     return "Confidence depends on source quality, scope, recency, and branch coverage."
 
 
-def _comparison_table(cards: list[EvidenceCard]) -> list[str]:
+def _cards_needed_for_source_breadth(
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    cited_source_ids: set[int],
+) -> list[EvidenceCard]:
+    target = min(17, len({card.source_id for card in evidence_cards}))
+    if len(cited_source_ids) >= target:
+        return []
+    needed = target - len(cited_source_ids)
+    cards = [
+        card
+        for card in _cards_for_synthesis(plan, evidence_cards)
+        if card.source_id not in cited_source_ids
+    ]
+    return _source_diverse_cards(cards, limit=needed)
+
+
+def _comparison_table(cards: list[EvidenceCard], *, plan: ResearchPlan | None = None) -> list[str]:
+    branch_title_by_id = {branch.id: branch.title for branch in (plan.branches if plan else [])}
     rows = [
         "| Dimension | Evidence | Source |",
         "| --- | --- | --- |",
     ]
     for card in cards[:6]:
-        rows.append(f"| {card.branch_id} | {_escape_table(card.claim[:180])} | [{card.source_id}] |")
+        dimension = branch_title_by_id.get(card.branch_id) or "Evidence area"
+        rows.append(f"| {_escape_table(dimension[:90])} | {_escape_table(card.claim[:180])} | [{card.source_id}] |")
     return rows
 
 
@@ -708,6 +904,48 @@ def _metadata_images(metadata: dict[str, Any]) -> list[dict[str, Any]]:
                 result.append(item)
         return result
     return []
+
+
+def _compact_blueprint_for_prompt(blueprint: dict[str, Any]) -> dict[str, Any]:
+    branch_briefs = []
+    for row in blueprint.get("branch_writing_briefs", []):
+        if not isinstance(row, dict):
+            continue
+        branch_briefs.append(
+            {
+                "branch_id": row.get("branch_id"),
+                "heading": row.get("heading"),
+                "objective": row.get("objective"),
+                "evidence_card_count": row.get("evidence_card_count"),
+                "source_count": row.get("source_count"),
+                "required_points": list(row.get("required_points", []))[:8],
+            }
+        )
+    return {
+        "report_title": blueprint.get("report_title"),
+        "question": blueprint.get("question"),
+        "audience": blueprint.get("audience"),
+        "source_summary": blueprint.get("source_summary"),
+        "acceptance_criteria": list(blueprint.get("acceptance_criteria", []))[:24],
+        "branch_writing_briefs": branch_briefs,
+        "structure_guidance": blueprint.get("structure_guidance"),
+    }
+
+
+def _target_depth_hint(*, plan: ResearchPlan, evidence_cards: list[EvidenceCard], writing_guidance: str) -> str:
+    evidence_sources = len({card.source_id for card in evidence_cards})
+    branch_count = len(plan.branches)
+    criteria_rich = bool(re.search(r"\bDeepResearch Bench evaluation guidance\b|\bcriterion\b|\bdimension weight\b", writing_guidance, flags=re.I))
+    if criteria_rich:
+        return (
+            "write a reference-grade long-form report, typically 4,500-8,000 words when the evidence supports it; "
+            "cover each task-specific criterion with substantive analysis, cross-source synthesis, and clear implications, not a checklist."
+        )
+    if evidence_sources >= 30 or branch_count >= 8:
+        return "write a thorough report, typically 3,000-6,000 words when the evidence supports it."
+    if evidence_sources >= 17 or branch_count >= 5:
+        return "write a substantial report, typically 2,500-4,500 words when the evidence supports it."
+    return "write enough detail to answer the question fully without padding; prefer depth over brevity when evidence supports it."
 
 
 def json_dumps(payload: dict[str, Any]) -> str:

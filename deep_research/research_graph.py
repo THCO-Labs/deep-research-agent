@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -87,25 +87,41 @@ def run_local_research_graph(
         mcp_documents=list(mcp_documents or []),
     )
     graph = build_research_graph(runtime)
-    state: ResearchState = initial_state or {
-        "request": {
-            "question": question.strip(),
-            "engine": "local_langgraph",
-            "mode": settings.mode,
-            "writing_guidance": writing_guidance.strip(),
-        },
-        "source_candidates": [],
-        "source_records": [],
-        "evidence_cards": [],
-        "metrics": {
-            "engine": "local_langgraph",
-            "coverage_rounds": 0,
-            "max_search_queries": settings.max_search_queries,
-            "max_rounds": settings.max_rounds,
-            "started_at_monotonic": time.perf_counter(),
-        },
-        "failures": [],
-    }
+    if initial_state:
+        state = dict(initial_state)
+        request = dict(state.get("request", {}))
+        request["question"] = str(request.get("question") or question).strip()
+        request["engine"] = "local_langgraph"
+        request["mode"] = settings.mode
+        if writing_guidance.strip():
+            request["writing_guidance"] = writing_guidance.strip()
+        state["request"] = request
+        metrics = dict(state.get("metrics", {}))
+        metrics["engine"] = "local_langgraph"
+        metrics["max_search_queries"] = settings.max_search_queries
+        metrics["max_rounds"] = settings.max_rounds
+        metrics["started_at_monotonic"] = time.perf_counter()
+        state["metrics"] = metrics
+    else:
+        state = {
+            "request": {
+                "question": question.strip(),
+                "engine": "local_langgraph",
+                "mode": settings.mode,
+                "writing_guidance": writing_guidance.strip(),
+            },
+            "source_candidates": [],
+            "source_records": [],
+            "evidence_cards": [],
+            "metrics": {
+                "engine": "local_langgraph",
+                "coverage_rounds": 0,
+                "max_search_queries": settings.max_search_queries,
+                "max_rounds": settings.max_rounds,
+                "started_at_monotonic": time.perf_counter(),
+            },
+            "failures": [],
+        }
     final_state = graph.invoke(state, config={"configurable": {"thread_id": artifacts.run_dir.name}})
     return final_state
 
@@ -327,8 +343,14 @@ def build_research_graph(runtime: ResearchGraphRuntime):
             )
         else:
             report = synthesize_report(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
-        runtime.artifacts.write_text("report.md", report)
-        runtime.emit_status("synthesize", "wrote report.md")
+        runtime.artifacts.write_text("draft_report.md", report)
+        runtime.artifacts.write_text(
+            "report.md",
+            "# Research Draft Pending Verification\n\n"
+            "This run has produced a draft, but it has not passed verification yet. "
+            "Inspect draft_report.md for the current unaccepted draft.\n",
+        )
+        runtime.emit_status("synthesize", "wrote draft_report.md")
         return _with_checkpoint(runtime, "synthesize", state, {"draft_report": report})
 
     def verify(state: ResearchState) -> ResearchState:
@@ -361,9 +383,6 @@ def build_research_graph(runtime: ResearchGraphRuntime):
                 },
             )
             result = apply_semantic_report_result(result, semantic)
-        prior_failures = [failure for failure in state.get("failures", []) if failure not in result.failures]
-        if prior_failures:
-            result = replace(result, valid=False, failures=prior_failures + result.failures)
         runtime.artifacts.write_json("verification.json", result.to_dict())
         metrics = dict(state.get("metrics", {}))
         metrics["verification_rounds"] = int(metrics.get("verification_rounds", 0)) + 1
@@ -386,6 +405,13 @@ def build_research_graph(runtime: ResearchGraphRuntime):
         metrics = dict(state.get("metrics", {}))
         metrics["finished_at_monotonic"] = time.perf_counter()
         metrics["elapsed_seconds"] = round(metrics["finished_at_monotonic"] - metrics.get("started_at_monotonic", metrics["finished_at_monotonic"]), 3)
+        verification = dict(state.get("verification", {}))
+        draft = str(state.get("draft_report") or "")
+        if verification.get("valid") or runtime.settings.allow_failed_verification:
+            runtime.artifacts.write_text("report.md", draft)
+        elif draft:
+            runtime.artifacts.write_text("failed_report.md", draft)
+            runtime.artifacts.write_text("report.md", _failed_report_notice(verification))
         runtime.artifacts.write_json("metrics.json", _public_metrics(metrics))
         runtime.emit_status("finish", "local LangGraph run complete", valid=state.get("verification", {}).get("valid"))
         return _with_checkpoint(runtime, "finish", state, {"metrics": metrics})
@@ -459,13 +485,19 @@ def _verification_route(state: ResearchState) -> str:
     if rounds >= max_rounds:
         return "finish"
     failures = [str(failure).lower() for failure in verification.get("failures", [])]
+    rewrite_only = (
+        any("semantic judge found unsupported claim" in failure for failure in failures)
+        or any("some claims are not directly supported" in failure for failure in failures)
+        or any("cited evidence-backed source count" in failure for failure in failures)
+    )
+    if rewrite_only:
+        return "rewrite"
     needs_more_sources = (
         any("coverage below threshold" in failure for failure in failures)
-        or any("answer coverage" in failure for failure in failures)
+        or any("coverage incomplete" in failure for failure in failures)
         or any("source quality" in failure for failure in failures)
         or any("weakly supported" in failure for failure in failures)
         or any("semantic report verification below threshold" in failure for failure in failures)
-        or any("semantic judge found unsupported claim" in failure for failure in failures)
         or any("missing context" in failure for failure in failures)
     )
     return "more_sources" if needs_more_sources else "rewrite"
@@ -668,6 +700,23 @@ def _public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         for key, value in metrics.items()
         if key not in {"started_at_monotonic", "finished_at_monotonic"}
     }
+
+
+def _failed_report_notice(verification: dict[str, Any]) -> str:
+    failures = [str(failure) for failure in verification.get("failures", [])][:12]
+    lines = [
+        "# Research Run Failed Verification",
+        "",
+        "This run did not produce an accepted final report. The unaccepted draft is stored in `failed_report.md` and `draft_report.md` for debugging.",
+        "",
+        "## Verification Failures",
+        "",
+    ]
+    if failures:
+        lines.extend(f"- {failure}" for failure in failures)
+    else:
+        lines.append("- Verification did not mark the draft as valid.")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def load_latest_checkpoint(run_dir: Path) -> ResearchState:

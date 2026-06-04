@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from deep_research.schemas import EvidenceCard, ResearchBranch, SourceRecordV2
-from deep_research.source_validation import branch_terms, content_terms
+from deep_research.source_validation import anchor_groups_for_branch, branch_terms, content_terms
 
 
 def build_evidence_cards(
@@ -23,7 +23,7 @@ def build_evidence_cards(
         if branch is None:
             continue
         terms = branch_terms(branch)
-        candidates = _rank_sentences(source_texts.get(source.id, ""), terms, question_terms)
+        candidates = _rank_sentences(source_texts.get(source.id, ""), terms, question_terms, anchor_groups_for_branch(branch))
         for sentence in candidates[:max_cards_per_source]:
             claim = _clean_claim(sentence)
             if len(claim) < 50:
@@ -60,7 +60,12 @@ def coverage_for_branch(branch: ResearchBranch, cards: list[EvidenceCard]) -> tu
     return covered, missing
 
 
-def _rank_sentences(text: str, terms: set[str], question_terms: set[str]) -> list[str]:
+def _rank_sentences(
+    text: str,
+    terms: set[str],
+    question_terms: set[str],
+    anchor_groups: list[frozenset[str]],
+) -> list[str]:
     sentences = [
         sentence.strip()
         for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", text)
@@ -81,6 +86,7 @@ def _rank_sentences(text: str, terms: set[str], question_terms: set[str]) -> lis
         for _, sentence in ranked
         if len(content_terms(sentence) & terms) > 0
         and len(content_terms(sentence) & question_terms) >= minimum_question_hits
+        and (not anchor_groups or _matches_anchor_group(content_terms(sentence), anchor_groups))
     ]
 
 
@@ -88,6 +94,13 @@ def _minimum_question_hits(question_terms: set[str]) -> int:
     if not question_terms:
         return 0
     return min(2, len(question_terms))
+
+
+def _matches_anchor_group(sentence_terms: set[str], anchor_groups: list[frozenset[str]]) -> bool:
+    for group in anchor_groups:
+        if group <= sentence_terms:
+            return True
+    return False
 
 
 def _clean_claim(sentence: str) -> str:

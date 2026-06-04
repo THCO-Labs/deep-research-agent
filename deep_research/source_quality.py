@@ -76,6 +76,10 @@ def score_source(
         score += 0.28
         source_type = "standards_or_government"
         reasons.append("standards or specification signal")
+    elif _is_scholarly_source(domain, path, combined_lower):
+        score += 0.22
+        source_type = "academic"
+        reasons.append("academic or scholarly publication signal")
     elif _is_government_or_multilateral_source(domain):
         score += 0.25
         source_type = "government"
@@ -84,10 +88,6 @@ def score_source(
         score += 0.17
         source_type = "official_docs"
         reasons.append("documentation or developer-reference signal")
-    elif _is_scholarly_source(domain, path, combined_lower):
-        score += 0.22
-        source_type = "academic"
-        reasons.append("academic or scholarly publication signal")
     elif _looks_like_software_repository(domain, path):
         score += 0.04
         source_type = "software_repository"
@@ -225,7 +225,7 @@ def _is_scholarly_source(domain: DomainSignals, path: str, text: str) -> bool:
         or ".ac." in f".{suffix}."
         or _path_has_scholarly_marker(path)
         or SCHOLARLY_LANGUAGE_RE.search(text) is not None
-        or any(token in tokens for token in {"journal", "journals", "research", "publication", "publications", "proceedings"})
+        or any(token in tokens for token in {"journal", "journals", "research", "proceedings", "pubmed", "pmc"})
         or _looks_like_preprint(domain, path, text)
     )
 

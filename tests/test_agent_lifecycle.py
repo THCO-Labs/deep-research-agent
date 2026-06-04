@@ -69,12 +69,36 @@ def test_resume_reuses_checkpointed_sources_without_duplicate_fetches(tmp_path: 
     settings = _settings(tmp_path)
     result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
 
-    resumed = resume_research(result.run_dir.name, settings, progress_mode="quiet")
+    resume_settings = _settings(tmp_path, max_rounds=12, max_search_queries=22)
+    resumed = resume_research(result.run_dir.name, resume_settings, progress_mode="quiet")
 
     sources = (resumed.run_dir / "sources.jsonl").read_text(encoding="utf-8").splitlines()
+    metrics = json.loads(resumed.metrics_path.read_text(encoding="utf-8"))
     assert calls["fresh"] == 1
     assert calls["resume"] == 1
     assert len(sources) == 17
+    assert metrics["max_rounds"] == 12
+    assert metrics["max_search_queries"] == 22
+
+
+def test_resume_research_writes_structured_failure_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", fake_acquire_sources)
+    settings = _settings(tmp_path)
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
+
+    def fail_graph(**_kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 31.25s.")
+
+    monkeypatch.setattr(agent_module, "run_local_research_graph", fail_graph)
+
+    with pytest.raises(ResearchRunError) as raised:
+        resume_research(result.run_dir.name, settings, progress_mode="quiet")
+
+    failure = json.loads((raised.value.result.run_dir / "failure.json").read_text(encoding="utf-8"))
+    metrics = json.loads(raised.value.result.metrics_path.read_text(encoding="utf-8"))
+    assert failure["category"] == "quota_or_rate_limit"
+    assert failure["retry_after_seconds"] == 31
+    assert metrics["error_category"] == "quota_or_rate_limit"
 
 
 def test_run_research_writes_structured_failure_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -111,7 +135,11 @@ def test_run_research_treats_failed_verification_as_failed_run(tmp_path: Path, m
         run_research("invalid verification", settings, progress_mode="quiet")
 
     failure = json.loads((raised.value.result.run_dir / "failure.json").read_text(encoding="utf-8"))
+    report = (raised.value.result.run_dir / "report.md").read_text(encoding="utf-8")
+    failed_report = (raised.value.result.run_dir / "failed_report.md").read_text(encoding="utf-8")
     assert failure["category"] == "verification_failed"
+    assert "Research Run Failed Verification" in report
+    assert "No cited evidence" in failed_report
 
 
 def test_gemini_managed_mode_writes_v2_artifacts(tmp_path: Path, monkeypatch) -> None:

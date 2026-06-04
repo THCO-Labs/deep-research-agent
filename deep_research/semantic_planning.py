@@ -201,8 +201,6 @@ def _plan_from_payload(base_plan: ResearchPlan, payload: dict[str, Any], *, plan
             seen_titles.add(fallback.title.lower())
             break
 
-    if planning_guidance.strip():
-        branches = _augment_branches_from_guidance(base_plan, branches, planning_guidance)
     branches = _raise_branch_source_floor(branches, MINIMUM_SOURCE_TARGET)
     return ResearchPlan(
         question=base_plan.question,
@@ -211,7 +209,7 @@ def _plan_from_payload(base_plan: ResearchPlan, payload: dict[str, Any], *, plan
         report_outline=_string_list_field(payload, "report_outline") or base_plan.report_outline,
         branches=branches,
         source_requirements=_source_requirements(payload) or base_plan.source_requirements,
-        acceptance_criteria=_string_list_field(payload, "acceptance_criteria") or base_plan.acceptance_criteria,
+        acceptance_criteria=_acceptance_criteria(base_plan, payload, planning_guidance),
     )
 
 
@@ -241,21 +239,6 @@ def _branch_from_payload(base_plan: ResearchPlan, index: int, row: dict[str, Any
     )
 
 
-def _augment_branches_from_guidance(
-    base_plan: ResearchPlan,
-    branches: list[ResearchBranch],
-    planning_guidance: str,
-) -> list[ResearchBranch]:
-    augmented = list(branches)
-    for criterion in _criteria_from_guidance(planning_guidance):
-        if len(augmented) >= MAX_LLM_BRANCHES:
-            break
-        if _criterion_is_covered(criterion, augmented):
-            continue
-        augmented.append(_branch_from_criterion(base_plan, len(augmented) + 1, criterion))
-    return augmented
-
-
 def _criteria_from_guidance(planning_guidance: str) -> list[str]:
     criteria: list[str] = []
     for line in planning_guidance.splitlines():
@@ -269,36 +252,16 @@ def _criteria_from_guidance(planning_guidance: str) -> list[str]:
     return _dedupe(criteria)
 
 
-def _criterion_is_covered(criterion: str, branches: list[ResearchBranch]) -> bool:
-    criterion_terms = set(ordered_terms(criterion))
-    if not criterion_terms:
-        return True
-    for branch in branches:
-        branch_terms = set(ordered_terms(branch.title + " " + branch.objective + " " + " ".join(branch.required_terms)))
-        if len(criterion_terms & branch_terms) / max(len(criterion_terms), 1) >= 0.55:
-            return True
-    return False
-
-
-def _branch_from_criterion(base_plan: ResearchPlan, index: int, criterion: str) -> ResearchBranch:
-    title = criterion[:90].strip()
-    required_terms = _dedupe([criterion] + ordered_terms(criterion + " " + base_plan.question)[:MAX_REQUIRED_TERMS])
-    topic_terms = " ".join(ordered_terms(base_plan.question)[:10])
-    return ResearchBranch(
-        id=f"branch_{index}",
-        title=title,
-        objective=f"Research this task-specific evaluation criterion: {criterion}.",
-        queries=_dedupe(
-            [
-                f"{base_plan.question} {criterion}",
-                f"{topic_terms} {criterion}",
-            ]
-        )[:MAX_QUERIES_PER_BRANCH],
-        source_types=["academic", "official_docs", "government", "general_web"],
-        min_sources=2,
-        required_terms=required_terms[:MAX_REQUIRED_TERMS],
-        completion_criteria=[f"Evidence covers this criterion: {criterion}"],
-    )
+def _acceptance_criteria(
+    base_plan: ResearchPlan,
+    payload: dict[str, Any],
+    planning_guidance: str,
+) -> list[str]:
+    criteria = _string_list_field(payload, "acceptance_criteria") or list(base_plan.acceptance_criteria)
+    guidance_criteria = _criteria_from_guidance(planning_guidance)
+    if guidance_criteria:
+        criteria.extend(f"Cover this task-specific criterion in synthesis: {criterion}" for criterion in guidance_criteria)
+    return _dedupe(criteria)
 
 
 def _queries(row: dict[str, Any], question: str, title: str, objective: str) -> list[str]:

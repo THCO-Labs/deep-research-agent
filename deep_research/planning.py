@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from deep_research.schemas import ResearchBranch, ResearchIntent, ResearchPlan, SourceRequirement
 from deep_research.source_limits import MINIMUM_SOURCE_TARGET
-from deep_research.text_terms import ordered_terms
+from deep_research.text_terms import cjk_content_chunks, contains_cjk, ordered_terms
 
 MAX_DYNAMIC_BRANCHES = 14
 MAX_BRANCH_QUERIES = 4
@@ -18,7 +18,6 @@ def build_research_plan(question: str, *, audience: str = "technical generalist"
     intent: ResearchIntent = "general"
     branches = _branches_for_question(question)
     outline = [branch.title for branch in branches]
-    outline.extend(["Synthesis", "Limitations", "Sources"])
     return ResearchPlan(
         question=question.strip(),
         intent=intent,
@@ -115,6 +114,13 @@ def _core_terms(question: str) -> list[str]:
 
 def _branch_seeds(question: str, topic: str) -> list[str | dict[str, object]]:
     explicit_segments = _explicit_request_segments(question)
+    if contains_cjk(question):
+        candidates = _dedupe(explicit_segments + [topic, _trim_query(question, limit=220)])
+        candidates = [candidate for candidate in candidates if candidate.strip()]
+        target = _target_branch_count(question, explicit_segments)
+        selected = _select_distinct_seeds(candidates, target)
+        return selected or [topic]
+
     terms = ordered_terms(question)
     keyphrases = _keyphrases(question)
     term_windows = _term_windows(terms, size=3) + _term_windows(terms, size=2)
@@ -128,6 +134,16 @@ def _branch_seeds(question: str, topic: str) -> list[str | dict[str, object]]:
 
 
 def _target_branch_count(question: str, explicit_segments: list[str]) -> int:
+    if contains_cjk(question):
+        if explicit_segments:
+            return min(MAX_DYNAMIC_BRANCHES, max(1, len(explicit_segments)))
+        length = len(re.sub(r"\s+", "", question))
+        if length <= 80:
+            return 1
+        if length <= 180:
+            return 2
+        return min(MAX_DYNAMIC_BRANCHES, 4)
+
     term_count = len(ordered_terms(question))
     if explicit_segments:
         return min(MAX_DYNAMIC_BRANCHES, max(2, len(explicit_segments) + min(4, term_count // 12)))
@@ -142,11 +158,14 @@ def _target_branch_count(question: str, explicit_segments: list[str]) -> int:
 
 def _explicit_request_segments(question: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", question.strip())
-    sentence_parts = re.split(r"(?<=[.!?])\s+|[;\n]+", normalized)
+    sentence_parts = re.split(r"(?<=[.!?。！？])\s*|[;；\n]+", normalized)
     segments: list[str] = []
     for sentence in sentence_parts:
-        sentence = sentence.strip(" ,.:")
+        sentence = sentence.strip(" ,.:，。：")
         if not sentence:
+            continue
+        if contains_cjk(sentence):
+            segments.extend(_cjk_request_segments(sentence))
             continue
         candidate = sentence
         trigger = SEGMENT_TRIGGER_RE.search(sentence)
@@ -161,6 +180,33 @@ def _explicit_request_segments(question: str) -> list[str]:
         if len(ordered_terms(candidate)) >= 3:
             segments.append(candidate)
     return _dedupe(segments)
+
+
+def _cjk_request_segments(sentence: str) -> list[str]:
+    parts = [part.strip(" ,.:，。：、“”\"'()（）") for part in re.split(r"[，,、:：]+", sentence)]
+    result: list[str] = []
+    for part in parts:
+        if not part or _looks_like_cjk_meta_fragment(part):
+            continue
+        if not cjk_content_chunks(part):
+            continue
+        compact = re.sub(r"\s+", "", part)
+        if len(compact) < 4:
+            continue
+        if len(ordered_terms(part)) < 1:
+            continue
+        result.append(part)
+    if result:
+        return _dedupe(result)
+    compact_sentence = re.sub(r"\s+", "", sentence)
+    if len(compact_sentence) >= 4 and not _looks_like_cjk_meta_fragment(compact_sentence):
+        return [sentence]
+    return []
+
+
+def _looks_like_cjk_meta_fragment(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text)
+    return bool(re.search(r"(为什么)?这个问题有价值|问题有价值|未来发展预测", normalized))
 
 
 def _keyphrases(question: str) -> list[str]:
@@ -251,6 +297,8 @@ def _required_terms_for_seed(seed: str, topic: str) -> list[str]:
 
 def _topic_label(question: str) -> str:
     normalized = re.sub(r"\s+", " ", question.strip(" ?.!")).strip()
+    if contains_cjk(normalized):
+        return _trim_query(normalized, limit=180)
     terms = _core_terms(normalized)
     if terms:
         return " ".join(terms[:12])

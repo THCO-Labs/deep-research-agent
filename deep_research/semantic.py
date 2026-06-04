@@ -57,6 +57,29 @@ def enrich_evidence_cards_with_semantics(
         )
 
     judge = model if model is not None else _judge_model(settings)
+    max_llm_cards = int(getattr(settings, "semantic_evidence_max_llm_cards", 120))
+    if max_llm_cards > 0 and len(evidence_cards) > max_llm_cards:
+        judgments = _fallback_card_judgments(
+            evidence_cards,
+            reason=f"evidence deck has {len(evidence_cards)} cards; configured semantic LLM card limit is {max_llm_cards}",
+        )
+        cards, rejected, application_failures = _apply_card_judgments(evidence_cards, judgments)
+        return SemanticEvidenceResult(
+            cards=cards,
+            judgments=judgments,
+            rejected=rejected,
+            failures=application_failures,
+            metrics={
+                "semantic_evidence_enabled": True,
+                "semantic_evidence_batches": 0,
+                "semantic_evidence_judgment_count": len(judgments),
+                "semantic_evidence_rejected_count": len(rejected),
+                "semantic_evidence_large_deck_fallback": True,
+                "semantic_evidence_max_llm_cards": max_llm_cards,
+                "semantic_evidence_parse_failure_count": 0,
+                "semantic_evidence_failure_count": len(application_failures),
+            },
+        )
     judgments: list[dict[str, Any]] = []
     failures: list[str] = []
     parse_failures = 0
@@ -476,9 +499,14 @@ def _string_list_field(payload: dict[str, Any], key: str) -> list[str]:
         raise ValueError(f"{key} must be a list")
     result = []
     for item in value:
-        if not isinstance(item, str):
-            raise ValueError(f"{key} entries must be strings")
-        cleaned = item.strip()
+        if isinstance(item, str):
+            cleaned = item.strip()
+        elif isinstance(item, int | float | bool):
+            cleaned = str(item)
+        elif isinstance(item, dict | list):
+            cleaned = json.dumps(item, ensure_ascii=True, sort_keys=True)[:500]
+        else:
+            raise ValueError(f"{key} entries must be strings or JSON-compatible values")
         if cleaned:
             result.append(cleaned)
     return result

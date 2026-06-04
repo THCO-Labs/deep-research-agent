@@ -11,7 +11,7 @@ def test_render_verification_repair_markdown_lists_failed_invariants() -> None:
         unsupported_claims=["This paragraph has no citation."],
         weakly_supported_claims=[
             {
-                "paragraph": "Fine-tuning always solves every deployment problem [1].",
+                "paragraph": "Cooling centers always solve every emergency planning problem [1].",
                 "cited_source_ids": [1],
                 "missing_terms": ["always", "deployment", "problem"],
             }

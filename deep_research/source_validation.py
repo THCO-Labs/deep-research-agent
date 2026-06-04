@@ -9,6 +9,8 @@ from deep_research.text_terms import TOKEN_RE, normalize_term_text, ordered_term
 URL_RE = re.compile(r"https?://\S+", flags=re.I)
 KEY_VALUE_LINE_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _./-]{1,48}:\s+\S+")
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]?$")
+ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,5}\b")
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
 
 @dataclass(frozen=True)
@@ -44,17 +46,34 @@ def validate_source_content(
         terms = _tokens(branch.title + " " + branch.objective)
     content_terms = _tokens(title + " " + normalized)
     question_terms = _tokens(question)
+    branch_anchor_groups = anchor_groups_for_branch(branch)
+    question_anchor_groups = anchor_groups_for_question(question)
+    branch_anchor_matches = _matched_anchor_groups(branch_anchor_groups, content_terms)
+    question_anchor_matches = _matched_anchor_groups(question_anchor_groups, content_terms)
+    partial_question_anchor_collisions = _partial_anchor_collisions(question_anchor_groups, content_terms, question_anchor_matches)
     if question_terms:
         question_matches = _matched_terms(question_terms, content_terms)
         if len(question_matches) < min(2, len(question_terms)):
             reasons.append("source relevance to the original question below threshold")
+        elif question_anchor_groups and not question_anchor_matches and len(question_matches) / max(len(question_terms), 1) < 0.45:
+            reasons.append("source lacks a question-specific anchor phrase")
+        elif partial_question_anchor_collisions and len(question_anchor_matches) < 2:
+            reasons.append("source partially matches a question anchor without the complete phrase")
+    if branch_anchor_groups and not branch_anchor_matches:
+        reasons.append("source lacks a branch-specific anchor phrase")
+    reasons.extend(_concept_dominance_rejections(title=title, content=normalized, branch=branch, question=question))
     matched_terms = _matched_terms(terms, content_terms)
-    relevance_score = round(len(matched_terms) / max(len(terms), 1), 4)
+    term_score = len(matched_terms) / max(len(terms), 1)
+    anchor_score = len(branch_anchor_matches) / max(len(branch_anchor_groups), 1) if branch_anchor_groups else term_score
+    relevance_score = round((term_score * 0.70) + (anchor_score * 0.30), 4)
     if relevance_score < 0.30:
         reasons.append("branch relevance below threshold")
 
     relevant_chunks = [
-        chunk for chunk in _chunks(normalized) if len(_matched_terms(terms, _tokens(chunk))) >= max(1, min(3, len(terms)))
+        chunk
+        for chunk in _chunks(normalized)
+        if len(_matched_terms(terms, _tokens(chunk))) >= max(1, min(3, len(terms)))
+        and (not branch_anchor_groups or _matched_anchor_groups(branch_anchor_groups, _tokens(chunk)))
     ]
     if len(relevant_chunks) < min_relevant_chunks:
         reasons.append(
@@ -76,6 +95,19 @@ def branch_terms(branch: ResearchBranch) -> set[str]:
 
 def content_terms(text: str) -> set[str]:
     return _tokens(text)
+
+
+def anchor_groups_for_branch(branch: ResearchBranch) -> list[frozenset[str]]:
+    groups: list[frozenset[str]] = []
+    for text in [branch.title, *branch.required_terms]:
+        groups.extend(_anchor_groups_from_text(text))
+    if not groups:
+        groups.extend(_anchor_groups_from_text(branch.objective))
+    return _dedupe_anchor_groups(groups)
+
+
+def anchor_groups_for_question(question: str) -> list[frozenset[str]]:
+    return _dedupe_anchor_groups(_anchor_groups_from_text(question))
 
 
 def _branch_terms(branch: ResearchBranch) -> set[str]:
@@ -108,6 +140,223 @@ def _matched_terms(expected_terms: set[str], observed_terms: set[str]) -> set[st
         for term in expected_terms
         if term in observed_terms or any(variant in observed_terms for variant in _term_variants(term))
     }
+
+
+def _matched_anchor_groups(
+    anchor_groups: list[frozenset[str]],
+    observed_terms: set[str],
+) -> list[frozenset[str]]:
+    return [
+        group
+        for group in anchor_groups
+        if group and len(_matched_terms(set(group), observed_terms)) == len(group)
+    ]
+
+
+def _partial_anchor_collisions(
+    anchor_groups: list[frozenset[str]],
+    observed_terms: set[str],
+    matched_groups: list[frozenset[str]],
+) -> list[frozenset[str]]:
+    collisions: list[frozenset[str]] = []
+    fully_covered_terms = set().union(*(set(group) for group in matched_groups)) if matched_groups else set()
+    for group in anchor_groups:
+        if len(group) < 2:
+            continue
+        matched = _matched_terms(set(group), observed_terms)
+        if matched and len(matched) < len(group):
+            if matched <= fully_covered_terms:
+                continue
+            collisions.append(group)
+    return collisions
+
+
+def _anchor_groups_from_text(text: str) -> list[frozenset[str]]:
+    terms = ordered_terms(text)
+    groups: list[frozenset[str]] = []
+    for size in (3, 2):
+        if len(terms) < size:
+            continue
+        for index in range(0, len(terms) - size + 1):
+            group = frozenset(terms[index : index + size])
+            if len(group) == size:
+                groups.append(group)
+    return groups
+
+
+def _dedupe_anchor_groups(groups: list[frozenset[str]]) -> list[frozenset[str]]:
+    seen: set[frozenset[str]] = set()
+    result: list[frozenset[str]] = []
+    for group in groups:
+        if not group or group in seen:
+            continue
+        seen.add(group)
+        result.append(group)
+    return result[:24]
+
+
+def _concept_dominance_rejections(
+    *,
+    title: str,
+    content: str,
+    branch: ResearchBranch,
+    question: str,
+) -> list[str]:
+    protected_phrases = _protected_concept_phrases(branch, question)
+    if not protected_phrases:
+        return []
+    source_text = f"{title}\n{content}"
+    title_core_terms = _title_core_terms(title)
+    reasons: list[str] = []
+    for phrase_terms in protected_phrases:
+        target_count = _phrase_count(phrase_terms, source_text)
+        competing_count = _competing_title_phrase_count(title_core_terms, phrase_terms, source_text)
+        if _title_competes_with_phrase(title_core_terms, phrase_terms) and (
+            target_count <= 1 or competing_count >= max(2, target_count * 1.5)
+        ):
+            reasons.append(
+                "source main topic appears to be a neighboring concept rather than the requested concept"
+            )
+            break
+    acronym_conflict = _acronym_expansion_conflict(source_text=source_text, branch=branch, question=question)
+    if acronym_conflict:
+        reasons.append("source appears to expand an acronym differently from the requested concept")
+    return reasons
+
+
+def _protected_concept_phrases(branch: ResearchBranch, question: str) -> list[tuple[str, ...]]:
+    del question
+    phrases: list[tuple[str, ...]] = []
+    for text in branch.required_terms:
+        terms = ordered_terms(text)
+        if 2 <= len(terms) <= 5 and len(set(terms)) == len(terms):
+            phrases.append(tuple(terms))
+    return _dedupe_phrases(phrases)[:24]
+
+
+def _dedupe_phrases(phrases: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    seen: set[tuple[str, ...]] = set()
+    result: list[tuple[str, ...]] = []
+    for phrase in phrases:
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        result.append(phrase)
+    return result
+
+
+def _title_competes_with_phrase(title_terms: list[str], phrase_terms: tuple[str, ...]) -> bool:
+    if len(phrase_terms) < 2 or len(title_terms) < len(phrase_terms):
+        return False
+    title_set = set(title_terms)
+    phrase_set = set(phrase_terms)
+    if phrase_set <= title_set:
+        return False
+    overlap = len(title_set & phrase_set)
+    if overlap <= 0:
+        return False
+    title_extra = title_set - phrase_set
+    phrase_missing = phrase_set - title_set
+    if not title_extra or not phrase_missing:
+        return False
+    if len(phrase_terms) == 2:
+        return overlap == 1
+    return overlap >= len(phrase_terms) - 1
+
+
+def _competing_title_phrase_count(title_terms: list[str], phrase_terms: tuple[str, ...], source_text: str) -> int:
+    if len(phrase_terms) < 2:
+        return 0
+    phrase_set = set(phrase_terms)
+    best = 0
+    for index in range(0, max(0, len(title_terms) - len(phrase_terms) + 1)):
+        window = tuple(title_terms[index : index + len(phrase_terms)])
+        if set(window) == phrase_set:
+            continue
+        if len(set(window) & phrase_set) <= 0:
+            continue
+        if not (set(window) - phrase_set):
+            continue
+        best = max(best, _phrase_count(window, source_text))
+    return best
+
+
+def _title_core_terms(title: str) -> list[str]:
+    core = re.split(r"\s[-|:]\s| - |\|", title, maxsplit=1)[0]
+    return ordered_terms(core)
+
+
+def _acronym_expansion_conflict(*, source_text: str, branch: ResearchBranch, question: str) -> bool:
+    planning_text = " ".join(
+        [
+            question,
+            branch.title,
+            branch.objective,
+            " ".join(branch.queries),
+            " ".join(branch.required_terms),
+        ]
+    )
+    acronyms = sorted(set(ACRONYM_RE.findall(planning_text)))
+    if not acronyms:
+        return False
+    source_intro = source_text[:5000]
+    for acronym in acronyms:
+        target_expansions = _expansions_for_acronym(acronym, planning_text)
+        if not target_expansions:
+            continue
+        source_expansions = _expansions_for_acronym(acronym, source_intro)
+        if not source_expansions:
+            continue
+        target_sets = {tuple(ordered_terms(expansion)) for expansion in target_expansions}
+        for expansion in source_expansions:
+            expansion_terms = tuple(ordered_terms(expansion))
+            if not expansion_terms or expansion_terms in target_sets:
+                continue
+            if any(set(target_terms) <= set(expansion_terms) for target_terms in target_sets):
+                continue
+            target_count = max(_phrase_count(target_terms, source_text) for target_terms in target_sets)
+            source_count = _phrase_count(expansion_terms, source_text)
+            if target_count <= 1 and source_count >= 2:
+                return True
+    return False
+
+
+def _expansions_for_acronym(acronym: str, text: str) -> list[str]:
+    words = [word for word in WORD_RE.findall(text) if word]
+    expansions: list[str] = []
+    target = acronym.lower()
+    max_len = min(6, len(target) + 2)
+    for start in range(0, len(words)):
+        for size in range(2, max_len + 1):
+            window = words[start : start + size]
+            if len(window) != size:
+                continue
+            initials = "".join(word[0].lower() for word in window)
+            if initials == target:
+                expansions.append(" ".join(window))
+    return _dedupe_text(expansions)[:12]
+
+
+def _phrase_count(phrase_terms: tuple[str, ...], text: str) -> int:
+    if not phrase_terms:
+        return 0
+    if len(phrase_terms) == 1:
+        return len(re.findall(rf"\b{re.escape(phrase_terms[0])}\b", normalize_term_text(text)))
+    gap = r"(?:\W+[a-z0-9-]+){0,3}\W+"
+    pattern = r"\b" + gap.join(re.escape(term) for term in phrase_terms) + r"\b"
+    return len(re.findall(pattern, normalize_term_text(text), flags=re.I))
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = re.sub(r"\s+", " ", value.lower()).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 
 def _term_variants(term: str) -> set[str]:

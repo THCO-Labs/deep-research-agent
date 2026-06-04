@@ -52,6 +52,7 @@ class Settings:
     search_depth: str = "advanced"
     allow_raw_content: bool = True
     semantic_verification: bool = True
+    semantic_evidence_max_llm_cards: int = 120
     llm_planning: bool = True
     report_quality_gate: bool = True
     llm_synthesis: bool = True
@@ -98,6 +99,7 @@ class Settings:
         search_depth: str | None = None,
         allow_raw_content: bool | None = None,
         semantic_verification: bool | None = None,
+        semantic_evidence_max_llm_cards: int | None = None,
         llm_planning: bool | None = None,
         report_quality_gate: bool | None = None,
         llm_synthesis: bool | None = None,
@@ -189,6 +191,9 @@ class Settings:
                 os.environ.get("DEEP_RESEARCH_SEMANTIC_VERIFICATION"),
                 default=True,
             ),
+            semantic_evidence_max_llm_cards=semantic_evidence_max_llm_cards
+            if semantic_evidence_max_llm_cards is not None
+            else int(os.environ.get("DEEP_RESEARCH_SEMANTIC_EVIDENCE_MAX_LLM_CARDS") or "120"),
             llm_planning=_resolve_bool(
                 llm_planning,
                 os.environ.get("DEEP_RESEARCH_LLM_PLANNING"),
@@ -340,6 +345,8 @@ class Settings:
             raise ConfigError("min_source_words must be at least 40.")
         if self.min_relevant_chunks < 1:
             raise ConfigError("min_relevant_chunks must be at least 1.")
+        if self.semantic_evidence_max_llm_cards < 0:
+            raise ConfigError("semantic_evidence_max_llm_cards must be zero or greater.")
 
     def _uses_model_provider(self, provider_prefix: str) -> bool:
         if self.provider == "google" and provider_prefix == "google_genai":

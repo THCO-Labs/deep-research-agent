@@ -149,13 +149,17 @@ class VerificationResultV2:
     evidence_linkage_score: float
     source_quality_score: float
     report_structure_score: float
+    request_alignment_score: float = 1.0
+    source_breadth_score: float = 1.0
     report_cleanliness_score: float = 1.0
+    criteria_coverage_score: float = 1.0
     semantic_verification_score: float = 1.0
     semantic_verification: dict[str, Any] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
     cited_source_ids: list[int] = field(default_factory=list)
     unsupported_claims: list[str] = field(default_factory=list)
     weakly_supported_claims: list[dict[str, Any]] = field(default_factory=list)
+    undercovered_criteria: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

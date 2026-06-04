@@ -87,7 +87,7 @@ def test_verify_report_accepts_multi_citation_and_sparse_scraped_ids() -> None:
     ]
     report = (
         "## Finding\n\n"
-        "Fine-tuning adapts pretrained models with task-specific data [2, 3].\n\n"
+        "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces [2, 3].\n\n"
         "## Sources\n"
         "[2] Example A: https://example.com/a\n"
         "[3] Example B: https://example.com/b"
@@ -96,7 +96,7 @@ def test_verify_report_accepts_multi_citation_and_sparse_scraped_ids() -> None:
     result = verify_report(
         report,
         records,
-        source_loader=lambda _record: "Fine-tuning adapts pretrained models with task-specific data.",
+        source_loader=lambda _record: "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces.",
     )
 
     assert result.valid is True
@@ -118,7 +118,7 @@ def test_verify_report_scores_cited_claim_against_source_text() -> None:
     )
     report = (
         "## Finding\n\n"
-        "Fine-tuning adapts a pretrained model to a specific task by training on task-specific data [1].\n\n"
+        "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces during heat waves [1].\n\n"
         "## Sources\n[1] Example: https://example.com"
     )
 
@@ -126,7 +126,7 @@ def test_verify_report_scores_cited_claim_against_source_text() -> None:
         report,
         [record],
         source_loader=lambda _record: (
-            "Fine-tuning adapts a pretrained model to a specific task by training on task-specific data."
+            "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces during heat waves."
         ),
     )
 
@@ -148,7 +148,7 @@ def test_verify_report_flags_weakly_supported_cited_claim() -> None:
     )
     report = (
         "## Finding\n\n"
-        "Fine-tuning always makes spacecraft engines cheaper in ocean climates [1].\n\n"
+        "Cooling centers always make spacecraft engines cheaper in ocean climates [1].\n\n"
         "## Sources\n[1] Example: https://example.com"
     )
 
@@ -156,7 +156,7 @@ def test_verify_report_flags_weakly_supported_cited_claim() -> None:
         report,
         [record],
         source_loader=lambda _record: (
-            "Fine-tuning adapts a pretrained machine learning model to a downstream task."
+            "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces."
         ),
     )
 

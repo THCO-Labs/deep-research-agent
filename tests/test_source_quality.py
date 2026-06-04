@@ -47,6 +47,20 @@ def test_source_quality_recognizes_expanded_scholarly_publishers_and_repositorie
     assert academic_suffix.source_type == "academic"
 
 
+def test_source_quality_treats_pubmed_and_pmc_records_as_scholarly_not_government() -> None:
+    pubmed = score_source(
+        url="https://pubmed.ncbi.nlm.nih.gov/24094278",
+        title="Need for closure and heuristic information processing",
+    )
+    pmc = score_source(
+        url="https://pmc.ncbi.nlm.nih.gov/articles/PMC11411052",
+        title="Cogn Res Princ Implic. doi: 10.1186/s41235-024-00595-1",
+    )
+
+    assert pubmed.source_type == "academic"
+    assert pmc.source_type == "academic"
+
+
 def test_source_quality_recognizes_more_standards_and_docs_hosts() -> None:
     standard = score_source(url="https://tc39.es/ecma262/", title="ECMAScript specification")
     docs = score_source(

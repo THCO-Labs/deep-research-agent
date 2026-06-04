@@ -3,12 +3,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from deep_research.artifacts_v2 import ResearchArtifactsV2
-from deep_research.evidence_hygiene import apply_evidence_hygiene
+from deep_research.evidence import build_evidence_cards
+from deep_research.evidence_hygiene import apply_evidence_hygiene, report_quality_issues
 from deep_research.acquisition import _trim_search_query
 from deep_research.ingestion import ingest_local_paths, ingest_mcp_manifest
 from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
-from deep_research.schemas import CoverageMatrix, EvidenceCard, SourceRecordV2, VerificationResultV2
+from deep_research.coverage import build_coverage_matrix
+from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2, VerificationResultV2
 from deep_research.semantic import (
     apply_semantic_report_result,
     enrich_evidence_cards_with_semantics,
@@ -18,6 +20,8 @@ from deep_research.semantic_planning import build_or_enrich_research_plan
 from deep_research.settings import Settings
 from deep_research.source_validation import validate_source_content
 from deep_research.synthesis import (
+    _append_evidence_coverage_if_needed,
+    _cards_for_synthesis,
     _evidence_backed_sources,
     _normalize_report_markdown,
     _repair_weak_citation_support,
@@ -25,7 +29,7 @@ from deep_research.synthesis import (
     synthesize_report,
 )
 from deep_research.verifier_v2 import verify_report_v2
-from deep_research.research_graph import _focus_terms_from_state
+from deep_research.research_graph import _focus_terms_from_state, _verification_route
 
 
 def test_generic_plan_handles_paragraph_length_medical_question() -> None:
@@ -70,6 +74,16 @@ def test_generic_plan_handles_food_question_without_topic_specific_branches() ->
     assert "sourdough" in " ".join(plan.branches[0].queries).lower()
     assert "bread" in branch_text.lower()
     assert "hypertension" not in branch_text.lower()
+
+
+def test_generic_plan_handles_chinese_question_without_empty_research_branch() -> None:
+    question = "请为我整合近几年有关中性粒细胞在脑缺血急性期和慢性期的功能和发展变化的研究成果。"
+    plan = build_research_plan(question)
+
+    assert plan.branches
+    assert sum(branch.min_sources for branch in plan.branches) >= 17
+    assert plan.branches[0].title != "Research"
+    assert "中性粒细胞" in " ".join(plan.branches[0].queries)
 
 
 def test_llm_semantic_planning_accepts_valid_domain_specific_plan(tmp_path: Path) -> None:
@@ -214,7 +228,7 @@ def test_llm_semantic_planning_accepts_focused_single_branch_with_guidance(tmp_p
     assert "Benchmark criterion" in planner.prompts[0]
 
 
-def test_llm_semantic_planning_augments_uncovered_guidance_criteria(tmp_path: Path) -> None:
+def test_llm_semantic_planning_keeps_guidance_out_of_search_branches(tmp_path: Path) -> None:
     planner = FakeSemanticJudge(
         {
             "audience": "social psychology researcher",
@@ -243,11 +257,16 @@ def test_llm_semantic_planning_augments_uncovered_guidance_criteria(tmp_path: Pa
         ),
     )
 
-    titles = " ".join(branch.title for branch in result.plan.branches).lower()
     assert result.accepted is True
-    assert "diverse contexts" in titles
-    assert "limitations" in titles
+    assert len(result.plan.branches) == 1
+    titles = " ".join(branch.title for branch in result.plan.branches).lower()
+    queries = " ".join(query for branch in result.plan.branches for query in branch.queries).lower()
+    assert "diverse contexts" not in titles
+    assert "limitations" not in titles
+    assert "weight:" not in queries
     assert sum(branch.min_sources for branch in result.plan.branches) >= 17
+    assert any("diverse contexts" in criterion.lower() for criterion in result.plan.acceptance_criteria)
+    assert any("limitations" in criterion.lower() for criterion in result.plan.acceptance_criteria)
 
 
 def test_llm_semantic_planning_does_not_use_lexical_scope_blacklists(tmp_path: Path) -> None:
@@ -355,6 +374,180 @@ def test_source_validation_rejects_generic_content_that_misses_original_question
     assert any("original question" in reason for reason in result.reasons)
 
 
+def test_source_validation_rejects_near_neighbor_question_anchor() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain the relationship between need for closure and misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    content = (
+        "Need for cognition is a motivation to engage in effortful thinking. "
+        "Researchers sometimes examine need for cognition and misinformation acceptance, "
+        "but this passage discusses effortful cognition rather than certainty seeking. "
+    ) * 4
+
+    result = validate_source_content(
+        title="Need for cognition and misinformation acceptance",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert result.usable is False
+    assert any("complete phrase" in reason for reason in result.reasons)
+
+
+def test_source_validation_rejects_neighboring_concept_dominance_with_incidental_target_mentions() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain the relationship between need for closure and misinformation acceptance.",
+        queries=["NFC and misinformation acceptance studies"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    content = (
+        "Need for cognition is a motivation to engage in effortful thinking. "
+        "Need for cognition appears in studies about false memories, cognitive effort, and misinformation. "
+        "Some authors briefly mention need for closure as a related but different construct. "
+    ) * 6
+
+    result = validate_source_content(
+        title="Need for cognition and misinformation acceptance",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert result.usable is False
+    assert any("neighboring concept" in reason for reason in result.reasons)
+
+
+def test_source_validation_rejects_acronym_expansion_collision() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how Need for Closure (NFC) affects misinformation acceptance.",
+        queries=["NFC and systematic analysis"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    content = (
+        "Near Field Communication (NFC) enables short range wireless communication. "
+        "Near field communication payment systems analyze cyber threats, transactions, tags, and devices. "
+        "The source discusses systematic analysis, security mitigation, and communication protocols. "
+    ) * 8
+
+    result = validate_source_content(
+        title="Near-Field Communication (NFC) Cyber Threats and Mitigation Solutions",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert result.usable is False
+    assert any("acronym" in reason for reason in result.reasons)
+
+
+def test_source_validation_accepts_source_that_substantively_compares_neighboring_constructs() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain the relationship between need for closure and misinformation acceptance.",
+        queries=["need for closure need for cognition misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    content = (
+        "Need for closure is a desire for definite answers and reduced ambiguity. "
+        "Need for closure can increase misinformation acceptance when quick certainty displaces careful checking. "
+        "The article contrasts need for closure with need for cognition, explaining that need for cognition concerns effortful thinking. "
+        "This comparison clarifies why need for closure and misinformation acceptance form a distinct pathway. "
+    ) * 4
+
+    result = validate_source_content(
+        title="Need for closure, need for cognition, and misinformation acceptance",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert result.usable is True
+
+
+def test_source_validation_accepts_direct_single_concept_context_source() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Misinformation acceptance definitions",
+        objective="Define misinformation acceptance and belief formation.",
+        queries=["misinformation acceptance definition psychology"],
+        required_terms=["misinformation acceptance", "belief formation"],
+    )
+    content = (
+        "Misinformation acceptance describes the process by which people endorse inaccurate claims. "
+        "The psychology of belief formation includes source credibility, repetition, prior attitudes, "
+        "and cognitive shortcuts that shape whether people accept false information. "
+    ) * 4
+
+    result = validate_source_content(
+        title="Misinformation acceptance and belief formation",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert result.usable is True
+
+
+def test_evidence_extraction_prefers_branch_anchor_sentences() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain the relationship between need for closure and misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Mixed psychological constructs",
+        url="https://example.com/mixed",
+        canonical_url="https://example.com/mixed",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    text = (
+        "Need for cognition is associated with effortful thinking and may affect how people evaluate misinformation acceptance. "
+        "Need for closure is linked to misinformation acceptance when people seek quick certainty and stop evaluating alternatives."
+    )
+
+    cards = build_evidence_cards(
+        branches=[branch],
+        sources=[source],
+        source_texts={1: text},
+        question="What is the role of need for closure on misinformation acceptance?",
+    )
+
+    assert cards
+    assert "need for closure" in cards[0].claim.lower()
+
+
 def test_stanford_hai_bad_scrape_is_rejected() -> None:
     branch = build_research_plan("What are urban heat islands and how do they affect public health?").branches[0]
     bad_content = (
@@ -372,6 +565,19 @@ def test_stanford_hai_bad_scrape_is_rejected() -> None:
 
     assert result.usable is False
     assert any("boilerplate" in reason or "relevance" in reason for reason in result.reasons)
+
+
+def test_report_quality_rejects_internal_research_artifact_language() -> None:
+    report = (
+        "# Report\n\n"
+        "No verified evidence cards were available for branch_1, so the report cannot answer this section. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Example: https://example.com\n"
+    )
+
+    issues = report_quality_issues(report)
+
+    assert any("internal research artifact" in issue for issue in issues)
 
 
 def test_irrelevant_recovery_fails_answer_coverage() -> None:
@@ -428,13 +634,620 @@ def test_irrelevant_recovery_fails_answer_coverage() -> None:
     assert any("Answer coverage" in failure for failure in result.failures)
 
 
+def test_verifier_rejects_report_that_drifts_from_original_question() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="COVID Misinformation Source",
+        url="https://example.com/covid-misinformation",
+        canonical_url="https://example.com/covid-misinformation",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="COVID-19 misinformation can spread through social media during public health crises.",
+        supporting_excerpt="COVID-19 misinformation can spread through social media during public health crises.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    report = (
+        "# COVID-19 Misinformation Report\n\n"
+        "## Public Health Effects\n\n"
+        "COVID-19 misinformation can spread through social media during public health crises and affect public behavior. [1]\n\n"
+        "## Evidence Pattern\n\n"
+        "The evidence indicates that public health communication can be challenged by viral false claims online. [1]\n\n"
+        "## Limits and Confidence\n\n"
+        "Confidence is limited because this evidence does not resolve every public health context. [1]\n\n"
+        "## Sources\n\n"
+        "[1] COVID Misinformation Source: https://example.com/covid-misinformation\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[source],
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: card.supporting_excerpt},
+    )
+
+    assert result.valid is False
+    assert result.request_alignment_score < 0.45
+    assert any("topic alignment" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_rejects_correct_title_with_contextual_case_as_opening_answer() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    contextual_source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Contextual Conspiracy Belief Study",
+        url="https://example.com/context",
+        canonical_url="https://example.com/context",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash-1",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.8,
+    )
+    direct_source = SourceRecordV2(
+        id=2,
+        branch_id=branch.id,
+        title="Need for Closure and Misinformation Acceptance",
+        url="https://example.com/direct",
+        canonical_url="https://example.com/direct",
+        provenance="web",
+        content_path="source_docs/source_2.md",
+        content_hash="hash-2",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    contextual_card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="A study examined the role of need for cognitive closure for COVID-19 conspiracy beliefs.",
+        supporting_excerpt="A study examined the role of need for cognitive closure for COVID-19 conspiracy beliefs.",
+        source_url=contextual_source.url,
+        source_title=contextual_source.title,
+        quality_score=0.9,
+        relevance_score=0.8,
+        confidence=0.9,
+    )
+    direct_card = EvidenceCard(
+        id=2,
+        source_id=2,
+        branch_id=branch.id,
+        claim="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        supporting_excerpt="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        source_url=direct_source.url,
+        source_title=direct_source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    report = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "A study examined the role of need for cognitive closure for COVID-19 conspiracy beliefs. [1]\n\n"
+        "## The Broader Relationship\n\n"
+        "Need for closure can increase misinformation acceptance when people seek quick certainty and stop evaluating alternatives. [2]\n\n"
+        "## Cross-Source Pattern\n\n"
+        "Taken together, the evidence indicates that contextual conspiracy-belief evidence must be interpreted as one case within the broader relationship. [1, 2]\n\n"
+        "## Limits and Confidence\n\n"
+        "Confidence is limited because contextual examples do not substitute for direct evidence about misinformation acceptance. [1, 2]\n\n"
+        "## Sources\n\n"
+        "[1] Contextual Conspiracy Belief Study: https://example.com/context\n"
+        "[2] Need for Closure and Misinformation Acceptance: https://example.com/direct\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[contextual_source, direct_source],
+        evidence_cards=[contextual_card, direct_card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={
+            1: contextual_card.supporting_excerpt,
+            2: direct_card.supporting_excerpt,
+        },
+    )
+
+    assert result.valid is False
+    assert any("opening answer topic alignment" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_rejects_cited_paragraphs_that_drift_inside_otherwise_aligned_report() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Mixed Source",
+        url="https://example.com/mixed",
+        canonical_url="https://example.com/mixed",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        supporting_excerpt="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    off_topic = (
+        "An invoice approval workflow routes purchase orders, vendor onboarding, budget validation, "
+        "exception handling, payment scheduling, and audit records through finance operations."
+    )
+    report = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "Need for closure can increase misinformation acceptance when people seek quick certainty and stop evaluating alternatives. [1]\n\n"
+        f"{off_topic} [1]\n\n"
+        "## Evidence Strength and Limits\n\n"
+        "Confidence is limited because the cited evidence must be interpreted within the specific question about closure and misinformation. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Mixed Source: https://example.com/mixed\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[source],
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: card.supporting_excerpt + "\n\n" + off_topic},
+    )
+
+    assert result.valid is False
+    assert any("topic-drift" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_rejects_undercovered_acceptance_criteria() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+        acceptance_criteria=[
+            "Explain mediating variables such as heuristic processing and source credibility assessment.",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Need for Closure Source",
+        url="https://example.com/nfc",
+        canonical_url="https://example.com/nfc",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        supporting_excerpt="Need for closure can increase misinformation acceptance when people seek quick certainty.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    report = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "Need for closure can increase misinformation acceptance when people seek quick certainty and stop evaluating alternatives. [1]\n\n"
+        "## Evidence Strength and Limits\n\n"
+        "The evidence is limited because it supports the broad relationship, not every pathway or boundary condition. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Need for Closure Source: https://example.com/nfc\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[source],
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: card.supporting_excerpt},
+    )
+
+    assert result.valid is False
+    assert result.criteria_coverage_score < 0.65
+    assert result.undercovered_criteria
+    assert any("acceptance criteria coverage" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_accepts_covered_acceptance_criteria_gate() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance", "heuristic processing", "source credibility"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+        acceptance_criteria=[
+            "Explain mediating variables such as heuristic processing and source credibility assessment.",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Need for Closure Source",
+        url="https://example.com/nfc",
+        canonical_url="https://example.com/nfc",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for closure can increase misinformation acceptance through heuristic processing and source credibility assessment.",
+        supporting_excerpt="Need for closure can increase misinformation acceptance through heuristic processing and source credibility assessment.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    report = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "Need for closure can increase misinformation acceptance when people seek quick certainty, rely on heuristic processing, and use source credibility assessment as a shortcut. [1]\n\n"
+        "## Evidence Strength and Limits\n\n"
+        "The strongest supported mediating variables in this narrow evidence set are heuristic processing and source credibility assessment. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Need for Closure Source: https://example.com/nfc\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[source],
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: card.supporting_excerpt},
+    )
+
+    assert result.criteria_coverage_score >= 0.65
+    assert not result.undercovered_criteria
+    assert not any("acceptance criteria coverage" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_requires_broad_citation_use_when_evidence_deck_is_broad() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Cooling centers and heat illness risk",
+        objective="Explain how cooling centers reduce heat illness risk during heat waves.",
+        queries=["cooling centers heat illness risk"],
+        min_sources=17,
+        required_terms=["cooling centers", "heat illness risk", "heat waves", "cooler indoor spaces"],
+    )
+    plan = ResearchPlan(
+        question="How do cooling centers reduce heat illness risk during heat waves?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    sources: list[SourceRecordV2] = []
+    cards: list[EvidenceCard] = []
+    for source_id in range(1, 18):
+        source = SourceRecordV2(
+            id=source_id,
+            branch_id=branch.id,
+            title=f"Cooling Center Evidence {source_id}",
+            url=f"https://example.com/cooling/{source_id}",
+            canonical_url=f"https://example.com/cooling/{source_id}",
+            provenance="web",
+            content_path=f"source_docs/source_{source_id}.md",
+            content_hash=f"hash-{source_id}",
+            extraction_method="test",
+            word_count=120,
+            quality_score=0.9,
+            quality_label="excellent",
+            quality_type="academic",
+            relevance_score=0.9,
+        )
+        sources.append(source)
+        cards.append(
+            EvidenceCard(
+                id=source_id,
+                source_id=source_id,
+                branch_id=branch.id,
+                claim="Cooling centers reduce heat illness risk during heat waves by providing cooler indoor spaces.",
+                supporting_excerpt="Cooling centers reduce heat illness risk during heat waves by providing cooler indoor spaces.",
+                source_url=source.url,
+                source_title=source.title,
+                quality_score=0.9,
+                relevance_score=0.9,
+                confidence=0.9,
+            )
+        )
+    body = (
+        "Cooling centers reduce heat illness risk during heat waves by providing cooler indoor spaces. "
+        "The evidence indicates that access to cooler indoor spaces matters for heat exposure and public health confidence."
+    )
+    report = (
+        "# Cooling Centers and Heat Illness Risk\n\n"
+        f"## Direct Answer\n\n{body} [1]\n\n"
+        f"## Evidence Pattern\n\n{body} [1]\n\n"
+        f"## Limits and Confidence\n\n{body} [1]\n\n"
+        "## Sources\n\n"
+        "[1] Cooling Center Evidence 1: https://example.com/cooling/1\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=sources,
+        evidence_cards=cards,
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: cards[0].supporting_excerpt},
+    )
+
+    assert result.valid is False
+    assert result.source_breadth_score < 1.0
+    assert any("cited evidence-backed source count" in failure.lower() for failure in result.failures)
+
+
+def test_verifier_rejects_incomplete_branch_coverage_even_when_average_score_is_high() -> None:
+    branches = [
+        ResearchBranch(
+            id=f"branch_{index}",
+            title=f"Coverage branch {index}",
+            objective=f"Explain coverage branch {index}.",
+            queries=[f"coverage branch {index}"],
+            min_sources=1,
+            required_terms=[f"coverage branch {index}"],
+        )
+        for index in range(1, 6)
+    ]
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=f"branch_{index}",
+            title=f"Coverage Source {index}",
+            url=f"https://example.com/coverage/{index}",
+            canonical_url=f"https://example.com/coverage/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash="hash",
+            extraction_method="test",
+            word_count=120,
+            quality_score=0.9,
+            quality_label="excellent",
+            quality_type="academic",
+            relevance_score=0.9,
+        )
+        for index in range(1, 5)
+    ]
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=index,
+            branch_id=f"branch_{index}",
+            claim=f"Coverage branch {index} is supported by evidence.",
+            supporting_excerpt=f"Coverage branch {index} is supported by evidence.",
+            source_url=f"https://example.com/coverage/{index}",
+            source_title=f"Coverage Source {index}",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        )
+        for index in range(1, 5)
+    ]
+    coverage = build_coverage_matrix(branches=branches, evidence_cards=cards, sources=sources)
+    plan = ResearchPlan(
+        question="How should all coverage branches be handled?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title for branch in branches],
+        branches=branches,
+    )
+    report = (
+        "# Coverage Branches\n\n"
+        "Coverage branch 1, coverage branch 2, coverage branch 3, and coverage branch 4 are supported by evidence. [1, 2, 3, 4]\n\n"
+        "## Evidence Pattern\n\n"
+        "The evidence indicates that the covered branches have source support, but one planned branch is not represented. [1, 2, 3, 4]\n\n"
+        "## Limits and Confidence\n\n"
+        "Confidence is limited because one planned branch lacks evidence coverage. [1, 2, 3, 4]\n\n"
+        "## Sources\n\n"
+        + "\n".join(
+            f"[{index}] Coverage Source {index}: https://example.com/coverage/{index}"
+            for index in range(1, 5)
+        )
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=sources,
+        evidence_cards=cards,
+        coverage=coverage,
+        source_texts={card.source_id: card.supporting_excerpt for card in cards},
+    )
+
+    assert coverage.coverage_score >= 0.80
+    assert coverage.complete is False
+    assert result.valid is False
+    assert any("coverage incomplete" in failure.lower() for failure in result.failures)
+
+
+def test_synthesis_appends_evidence_coverage_for_missing_branches_and_sources() -> None:
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="Cooling center access",
+            objective="Explain access to cooling centers during heat waves.",
+            queries=["cooling center access heat waves"],
+            required_terms=["cooling centers", "access"],
+        ),
+        ResearchBranch(
+            id="branch_2",
+            title="Transportation barriers",
+            objective="Explain transportation barriers that limit cooling center use.",
+            queries=["cooling center transportation barriers"],
+            required_terms=["transportation barriers", "cooling center use"],
+        ),
+    ]
+    plan = ResearchPlan(
+        question="How do cooling centers reduce heat illness risk, and what limits their use?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title for branch in branches],
+        branches=branches,
+    )
+    cards = [
+        EvidenceCard(
+            id=1,
+            source_id=1,
+            branch_id="branch_1",
+            claim="Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces.",
+            supporting_excerpt="Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces.",
+            source_url="https://example.com/1",
+            source_title="Source 1",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        ),
+        EvidenceCard(
+            id=2,
+            source_id=2,
+            branch_id="branch_2",
+            claim="Transportation barriers can limit whether residents can use cooling centers during heat waves.",
+            supporting_excerpt="Transportation barriers can limit whether residents can use cooling centers during heat waves.",
+            source_url="https://example.com/2",
+            source_title="Source 2",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        ),
+    ]
+    report = (
+        "# Cooling Centers\n\n"
+        "Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Source 1: https://example.com/1\n"
+    )
+
+    repaired = _append_evidence_coverage_if_needed(report, plan, cards)
+
+    assert "Transportation barriers" in repaired
+    assert "[2]" in repaired.split("## Sources")[0]
+
+
 def test_evidence_hygiene_rejects_boilerplate_and_metadata_cards() -> None:
     clean = EvidenceCard(
         id=1,
         source_id=1,
         branch_id="branch_1",
-        claim="Fine-tuning adapts a pretrained model by training it further on task-specific examples.",
-        supporting_excerpt="Fine-tuning adapts a pretrained model by training it further on task-specific examples.",
+        claim="Clean evidence states one supported claim in natural prose without copied page chrome.",
+        supporting_excerpt="Clean evidence states one supported claim in natural prose without copied page chrome.",
         source_url="https://example.com/clean",
         source_title="Clean",
         quality_score=0.9,
@@ -695,6 +1508,43 @@ def test_semantic_evidence_enrichment_falls_back_on_invalid_json(tmp_path: Path)
     assert result.judgments[0]["fallback"] == "deterministic_after_invalid_judge_output"
 
 
+def test_semantic_evidence_enrichment_uses_large_deck_fallback(tmp_path: Path) -> None:
+    plan = build_research_plan("How does need for closure affect misinformation acceptance?")
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=index,
+            branch_id=plan.branches[0].id,
+            claim=f"Need for closure evidence card {index} explains misinformation acceptance through quick judgments.",
+            supporting_excerpt=f"Need for closure evidence card {index} explains misinformation acceptance through quick judgments.",
+            source_url=f"https://example.com/{index}",
+            source_title=f"Source {index}",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        )
+        for index in range(1, 4)
+    ]
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        semantic_verification=True,
+        semantic_evidence_max_llm_cards=2,
+    )
+
+    result = enrich_evidence_cards_with_semantics(
+        plan=plan,
+        evidence_cards=cards,
+        settings=settings,
+        model=RaisingSemanticJudge(),
+    )
+
+    assert [card.id for card in result.cards] == [1, 2, 3]
+    assert result.failures == []
+    assert result.metrics["semantic_evidence_large_deck_fallback"] is True
+    assert result.metrics["semantic_evidence_batches"] == 0
+
+
 def test_semantic_report_verification_can_fail_valid_deterministic_result(tmp_path: Path) -> None:
     plan = build_research_plan("How do cooling centers reduce heat illness risk during heat waves?")
     card = EvidenceCard(
@@ -748,6 +1598,75 @@ def test_semantic_report_verification_can_fail_valid_deterministic_result(tmp_pa
     assert merged.semantic_verification_score == 0.5
     assert any("unsupported claim" in failure.lower() for failure in merged.failures)
     assert merged.semantic_verification["search_focus"] == ["cooling center access barriers"]
+
+
+def test_semantic_report_verification_accepts_json_like_failure_entries(tmp_path: Path) -> None:
+    plan = build_research_plan("How do cooling centers reduce heat illness risk during heat waves?")
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=plan.branches[0].id,
+        claim="Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces.",
+        supporting_excerpt="Cooling centers reduce heat illness risk by giving residents access to cooler indoor spaces.",
+        source_url="https://example.com/cooling",
+        source_title="Cooling Centers",
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    judge = FakeSemanticJudge(
+        {
+            "answer_completeness_score": 0.8,
+            "citation_entailment_score": 0.8,
+            "evidence_use_score": 0.8,
+            "contradiction_safety_score": 1.0,
+            "overall_score": 0.8,
+            "failures": [{"issue": "minor scope note"}],
+            "missing_context": [],
+            "unsupported_claims": [],
+            "contradictions": [],
+            "search_focus": [],
+        }
+    )
+
+    semantic = verify_report_with_semantics(
+        report_markdown="Cooling centers reduce heat illness risk. [1]",
+        plan=plan,
+        evidence_cards=[card],
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path, semantic_verification=True),
+        model=judge,
+    )
+
+    assert semantic.score == 0.8
+    assert '{"issue": "minor scope note"}' in semantic.failures
+
+
+def test_normalize_report_sources_section_includes_multi_citation_ids() -> None:
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id="branch_1",
+            title=f"Source {index}",
+            url=f"https://example.com/{index}",
+            canonical_url=f"https://example.com/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash="hash",
+            extraction_method="test",
+            word_count=120,
+            quality_score=0.9,
+            quality_label="high",
+            quality_type="academic",
+            relevance_score=0.9,
+        )
+        for index in (1, 10)
+    ]
+    report = "# Report\n\nThe evidence combines two source records. [1, 10]\n"
+
+    normalized = _normalize_report_markdown(report, sources)
+
+    assert "[1] Source 1: https://example.com/1" in normalized
+    assert "[10] Source 10: https://example.com/10" in normalized
 
 
 def test_report_blueprint_and_writer_use_professional_report_sections() -> None:
@@ -922,6 +1841,80 @@ def test_synthesis_repairs_weak_paragraph_citation_support() -> None:
     assert "[2]" in repaired.split("## Sources")[0]
 
 
+def test_synthesis_card_selection_is_bounded_and_branch_balanced() -> None:
+    plan = build_research_plan("Compare several approaches to reducing misinformation acceptance.")
+    cards: list[EvidenceCard] = []
+    card_id = 1
+    for branch in plan.branches:
+        for index in range(20):
+            cards.append(
+                EvidenceCard(
+                    id=card_id,
+                    source_id=card_id,
+                    branch_id=branch.id,
+                    claim=f"{branch.title} evidence item {index} explains misinformation acceptance.",
+                    supporting_excerpt=f"{branch.title} evidence item {index} explains misinformation acceptance.",
+                    source_url=f"https://example.com/{card_id}",
+                    source_title=f"Source {card_id}",
+                    quality_score=0.9,
+                    relevance_score=0.9,
+                    confidence=0.9,
+                )
+            )
+            card_id += 1
+
+    selected = _cards_for_synthesis(plan, cards)
+    selected_branches = {card.branch_id for card in selected}
+
+    assert len(selected) <= 80
+    assert selected_branches == {branch.id for branch in plan.branches}
+
+
+def test_synthesis_card_selection_prefers_question_phrase_overlap() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain the relationship between need for closure and misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    broad_overlap = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for cognition can influence how people respond to misinformation.",
+        supporting_excerpt="Need for cognition can influence how people respond to misinformation.",
+        source_url="https://example.com/broad",
+        source_title="Broad Overlap",
+        quality_score=1.0,
+        relevance_score=1.0,
+        confidence=1.0,
+    )
+    phrase_overlap = EvidenceCard(
+        id=2,
+        source_id=2,
+        branch_id=branch.id,
+        claim="Need for closure is linked to misinformation acceptance when people seek certainty.",
+        supporting_excerpt="Need for closure is linked to misinformation acceptance when people seek certainty.",
+        source_url="https://example.com/phrase",
+        source_title="Phrase Overlap",
+        quality_score=0.8,
+        relevance_score=0.8,
+        confidence=0.8,
+    )
+
+    selected = _cards_for_synthesis(plan, [broad_overlap, phrase_overlap])
+
+    assert selected[0].id == 2
+
+
 def test_report_normalizer_repairs_heading_sources_and_uncited_paragraphs() -> None:
     source = SourceRecordV2(
         id=1,
@@ -985,6 +1978,21 @@ def test_semantic_repair_focus_targets_missing_branches_only() -> None:
     assert "branch_1" not in focus
     assert "branch_2" in focus
     assert "targeted follow-up" in focus["branch_2"]
+
+
+def test_verification_route_rewrites_unsupported_claims_before_more_search() -> None:
+    state = {
+        "verification": {
+            "valid": False,
+            "failures": [
+                "Semantic judge found unsupported claim: the report overstates a mixed finding.",
+                "Cited evidence-backed source count below threshold: 10 < 17",
+            ],
+        },
+        "metrics": {"verification_rounds": 1, "max_rounds": 4},
+    }
+
+    assert _verification_route(state) == "rewrite"
 
 
 def test_ingest_mcp_manifest_reads_content(tmp_path: Path) -> None:
@@ -1090,3 +2098,8 @@ class FakeSemanticJudge:
 class InvalidSemanticJudge:
     def invoke(self, _messages):
         return SimpleNamespace(content='{"cards": [{"id": 1, "keep": true}')
+
+
+class RaisingSemanticJudge:
+    def invoke(self, _messages):
+        raise AssertionError("large evidence decks should not invoke the semantic judge")

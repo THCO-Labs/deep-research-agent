@@ -15,6 +15,12 @@ MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*]\([^)]+\)", flags=re.I)
 KEY_VALUE_LINE_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _./-]{1,48}:\s+\S+")
 FENCE_RE = re.compile(r"```")
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]?$")
+INTERNAL_ARTIFACT_RE = re.compile(
+    r"\b(?:evidence\s+cards?|verified\s+evidence\s+cards?|provided\s+evidence|"
+    r"available\s+evidence\s+cards?|internal\s+coverage\s+score|verification\s+failures?)\b"
+    r"|\bbranch_[0-9]+\b",
+    flags=re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,9 @@ def report_quality_issues(markdown: str) -> list[str]:
             continue
         if FENCE_RE.search(stripped) and metrics.sentence_like_lines == 0:
             issues.append(f"Report line {line_number} contains a code-fence artifact.")
+            continue
+        if INTERNAL_ARTIFACT_RE.search(stripped):
+            issues.append(f"Report line {line_number} leaks internal research artifact language.")
     return issues
 
 
