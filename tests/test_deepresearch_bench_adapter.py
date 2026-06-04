@@ -4,11 +4,13 @@ from pathlib import Path
 from deep_research.agent import ResearchRunError, ResearchRunResult
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.deepresearch_bench import (
+    audit_benchmark_planning,
     evaluate_raw_submission_fact_proxy,
     evaluate_raw_submission_proxy,
     generate_raw_submission,
     load_benchmark_tasks,
 )
+from deep_research.guidance import CRITERIA_BLOCK_END, CRITERIA_BLOCK_START, criteria_acceptance_lines, extract_structured_criteria
 from deep_research.settings import Settings
 
 
@@ -132,6 +134,67 @@ def test_generate_raw_submission_can_enrich_agent_prompt_with_criteria(tmp_path:
     assert seen_questions[0] == "English task"
     assert "DeepResearch Bench evaluation guidance" in seen_guidance[0]
     assert "Cover the core mechanism" in seen_guidance[0]
+    assert "Convert each criterion into visible analysis" in seen_guidance[0]
+    assert "do not paste the criteria as headings or a checklist" in seen_guidance[0]
+    assert CRITERIA_BLOCK_START in seen_guidance[0]
+    assert CRITERIA_BLOCK_END in seen_guidance[0]
+    structured = extract_structured_criteria(seen_guidance[0])
+    assert structured[0]["dimension"] == "comprehensiveness"
+    assert structured[0]["criterion"] == "Cover the core mechanism"
+    acceptance = criteria_acceptance_lines(seen_guidance[0])
+    assert acceptance == [
+        "Task-specific comprehensiveness criterion: Cover the core mechanism - Explain causes, evidence, and implications."
+    ]
+
+
+def test_planning_audit_checks_criteria_and_source_floor(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    criteria_dir = bench / "data" / "criteria_data"
+    criteria_dir.mkdir(parents=True)
+    (criteria_dir / "criteria.jsonl").write_text(
+        json.dumps(
+            {
+                "id": 2,
+                "prompt": "English task",
+                "dimension_weight": {"comprehensiveness": 1.0},
+                "criterions": {
+                    "comprehensiveness": [
+                        {
+                            "criterion": "English task evidence coverage",
+                            "explanation": "Cover direct evidence, limitations, and implications for the English task.",
+                            "weight": 1.0,
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    paths = audit_benchmark_planning(
+        benchmark_dir=bench,
+        model_name="planning-audit",
+        settings=Settings(
+            project_root=tmp_path,
+            out_dir=tmp_path / "runs",
+            llm_planning=False,
+            llm_synthesis=False,
+            semantic_verification=False,
+        ),
+        ids=[2],
+    )
+
+    row = json.loads(paths.raw_results_path.read_text(encoding="utf-8").splitlines()[0])
+    summary = json.loads(paths.summary_path.read_text(encoding="utf-8"))
+    assert row["id"] == 2
+    assert row["min_source_total"] >= 17
+    assert row["criteria_acceptance_coverage"] == 1.0
+    assert row["criteria_branch_coverage"] >= 0.55
+    assert row["passed"]
+    assert summary["count"] == 1
+    assert summary["passed_count"] == 1
+    assert paths.result_path.read_text(encoding="utf-8").startswith("Planning Audit")
 
 
 def test_proxy_evaluation_scores_existing_raw_submission_against_reference(tmp_path: Path) -> None:

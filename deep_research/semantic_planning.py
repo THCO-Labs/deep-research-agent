@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from deep_research.guidance import criteria_acceptance_lines
 from deep_research.model_router import model_for_role
 from deep_research.planning import build_research_plan
 from deep_research.schemas import ResearchBranch, ResearchPlan, SourceRequirement
@@ -45,7 +46,7 @@ def build_or_enrich_research_plan(
     model: Any | None = None,
     planning_guidance: str = "",
 ) -> PlanEnrichmentResult:
-    base_plan = build_research_plan(question)
+    base_plan = _plan_with_guidance_criteria(build_research_plan(question), planning_guidance)
     if not settings.llm_planning:
         return PlanEnrichmentResult(
             plan=base_plan,
@@ -240,6 +241,9 @@ def _branch_from_payload(base_plan: ResearchPlan, index: int, row: dict[str, Any
 
 
 def _criteria_from_guidance(planning_guidance: str) -> list[str]:
+    structured = criteria_acceptance_lines(planning_guidance)
+    if structured:
+        return structured
     criteria: list[str] = []
     for line in planning_guidance.splitlines():
         match = re.match(r"\s*-\s+(.+?)(?:\s+\(weight:\s*[^)]*\))?\s*$", line)
@@ -250,6 +254,238 @@ def _criteria_from_guidance(planning_guidance: str) -> list[str]:
             continue
         criteria.append(criterion)
     return _dedupe(criteria)
+
+
+def _plan_with_guidance_criteria(plan: ResearchPlan, planning_guidance: str) -> ResearchPlan:
+    guidance_criteria = _criteria_from_guidance(planning_guidance)
+    if not guidance_criteria:
+        return plan
+    branches = _branches_with_guidance_criteria(plan, list(plan.branches), guidance_criteria)
+    merged = _dedupe(
+        list(plan.acceptance_criteria)
+        + [f"Cover this task-specific criterion in synthesis: {criterion}" for criterion in guidance_criteria]
+    )
+    return replace(plan, branches=branches, report_outline=[branch.title for branch in branches], acceptance_criteria=merged)
+
+
+def _branches_with_guidance_criteria(
+    plan: ResearchPlan,
+    branches: list[ResearchBranch],
+    guidance_criteria: list[str],
+) -> list[ResearchBranch]:
+    if not branches:
+        return branches
+
+    source_criteria = [
+        (criterion, _criterion_seed_text(criterion))
+        for criterion in guidance_criteria
+        if _criterion_should_affect_source_plan(criterion)
+    ]
+    source_criteria = [(criterion, seed) for criterion, seed in source_criteria if seed]
+    expanded = _reserve_branch_slots_for_guidance(list(branches), len(source_criteria))
+    for criterion, seed in source_criteria:
+        if _criterion_is_covered_by_branches(expanded, seed):
+            continue
+        target_index, target_score = _best_branch_for_criterion(expanded, seed)
+        if target_index is not None and (target_score >= 0.2 or len(expanded) >= MAX_LLM_BRANCHES):
+            expanded[target_index] = _branch_enriched_by_criterion(expanded[target_index], plan, criterion, seed)
+            continue
+        if len(expanded) < MAX_LLM_BRANCHES and _criterion_should_drive_research_branch(plan, expanded, seed):
+            expanded.append(_branch_for_guidance_criterion(plan, len(expanded) + 1, criterion, seed=seed))
+    return _raise_branch_source_floor(_renumber_branches(expanded), MINIMUM_SOURCE_TARGET)
+
+
+def _reserve_branch_slots_for_guidance(branches: list[ResearchBranch], source_criteria_count: int) -> list[ResearchBranch]:
+    if len(branches) < MAX_LLM_BRANCHES or source_criteria_count < 4:
+        return branches
+    reserve = min(8, max(4, source_criteria_count // 3))
+    base_budget = max(4, MAX_LLM_BRANCHES - reserve)
+    return branches[:base_budget]
+
+
+def _criterion_should_drive_research_branch(
+    plan: ResearchPlan,
+    branches: list[ResearchBranch],
+    seed: str,
+) -> bool:
+    criterion_terms = set(ordered_terms(seed))
+    if len(criterion_terms) < 3:
+        return False
+    branch_text_terms = set(
+        ordered_terms(
+            " ".join(
+                branch.title
+                + " "
+                + branch.objective
+                + " "
+                + " ".join(branch.queries)
+                + " "
+                + " ".join(branch.required_terms)
+                for branch in branches
+            )
+        )
+    )
+    if _term_coverage(criterion_terms, branch_text_terms) >= 0.65:
+        return False
+    question_terms = set(ordered_terms(plan.question))
+    if question_terms and len(criterion_terms & question_terms) >= min(2, len(question_terms)):
+        return True
+    new_terms = criterion_terms - branch_text_terms
+    return len(new_terms) >= 4 and len(criterion_terms) >= 5
+
+
+def _criterion_is_covered_by_branches(branches: list[ResearchBranch], seed: str) -> bool:
+    terms = set(ordered_terms(seed))
+    if not terms:
+        return True
+    for branch in branches:
+        branch_terms = set(
+            ordered_terms(
+                branch.title
+                + " "
+                + branch.objective
+                + " "
+                + " ".join(branch.queries)
+                + " "
+                + " ".join(branch.required_terms)
+                + " "
+                + " ".join(branch.completion_criteria)
+            )
+        )
+        if _term_coverage(terms, branch_terms) >= 0.65:
+            return True
+    return False
+
+
+def _best_branch_for_criterion(branches: list[ResearchBranch], seed: str) -> tuple[int | None, float]:
+    terms = set(ordered_terms(seed))
+    if not terms:
+        return None, 0.0
+    best_index: int | None = None
+    best_score = 0.0
+    for index, branch in enumerate(branches):
+        branch_terms = set(ordered_terms(branch.title + " " + branch.objective + " " + " ".join(branch.required_terms)))
+        score = _term_coverage(terms, branch_terms)
+        if score > best_score:
+            best_score = score
+            best_index = index
+    return best_index, best_score
+
+
+def _branch_enriched_by_criterion(
+    branch: ResearchBranch,
+    plan: ResearchPlan,
+    criterion: str,
+    seed: str,
+) -> ResearchBranch:
+    seed_terms = ordered_terms(seed)
+    question_terms = ordered_terms(plan.question)
+    query = " ".join(_dedupe(question_terms[:8] + seed_terms[:8]))
+    queries = _dedupe(list(branch.queries) + [query])[:MAX_QUERIES_PER_BRANCH]
+    required_terms = _dedupe(list(branch.required_terms) + seed_terms[:MAX_REQUIRED_TERMS])[:MAX_REQUIRED_TERMS]
+    completion = _dedupe(
+        list(branch.completion_criteria)
+        + [f"Evidence addresses task-specific requirement: {_trim_criterion(criterion)}"]
+    )[:10]
+    return ResearchBranch(
+        id=branch.id,
+        title=branch.title,
+        objective=branch.objective,
+        queries=queries,
+        source_types=branch.source_types,
+        min_sources=branch.min_sources,
+        required_terms=required_terms,
+        completion_criteria=completion,
+    )
+
+
+def _branch_for_guidance_criterion(plan: ResearchPlan, index: int, criterion: str, *, seed: str) -> ResearchBranch:
+    terms = ordered_terms(seed)
+    question_terms = ordered_terms(plan.question)
+    title_terms = _dedupe((terms[:8] or question_terms[:8]) + question_terms[:4])
+    title = _sentence_case(" ".join(title_terms[:10]) or f"Task-specific coverage {index}")
+    criterion_summary = _trim_criterion(criterion, limit=280)
+    question_summary = _trim_criterion(plan.question, limit=220)
+    query_seed = " ".join(_dedupe(question_terms[:8] + terms[:8]))
+    queries = _dedupe(
+        [
+            query_seed,
+            f"{question_summary} {criterion_summary}",
+            f"{query_seed} evidence",
+        ]
+    )
+    required_terms = _dedupe(terms[:MAX_REQUIRED_TERMS] + question_terms[:4])
+    return ResearchBranch(
+        id=f"branch_{index}",
+        title=title,
+        objective=(
+            f"Research evidence needed to satisfy this task-specific requirement: {criterion_summary}. "
+            f"Keep the evidence anchored to the user request: {question_summary}"
+        ),
+        queries=[query for query in queries if len(ordered_terms(query)) >= 2][:MAX_QUERIES_PER_BRANCH],
+        source_types=["academic", "official_docs", "standards_or_government", "general_web"],
+        min_sources=1,
+        required_terms=required_terms[:MAX_REQUIRED_TERMS],
+        completion_criteria=[
+            f"Evidence addresses task-specific requirement: {criterion_summary}",
+            "Evidence remains anchored to the user's original request.",
+        ],
+    )
+
+
+def _renumber_branches(branches: list[ResearchBranch]) -> list[ResearchBranch]:
+    renumbered: list[ResearchBranch] = []
+    for index, branch in enumerate(branches, start=1):
+        renumbered.append(
+            ResearchBranch(
+                id=f"branch_{index}",
+                title=branch.title,
+                objective=branch.objective,
+                queries=branch.queries,
+                source_types=branch.source_types,
+                min_sources=branch.min_sources,
+                required_terms=branch.required_terms,
+                completion_criteria=branch.completion_criteria,
+            )
+        )
+    return renumbered
+
+
+def _term_coverage(required_terms: set[str], text_terms: set[str]) -> float:
+    if not required_terms:
+        return 1.0
+    return len(required_terms & text_terms) / max(len(required_terms), 1)
+
+
+def _trim_criterion(text: str, *, limit: int = 220) -> str:
+    cleaned = re.sub(r"\s+", " ", text.strip()).strip(" .:")
+    if len(cleaned) <= limit:
+        return cleaned
+    boundary = cleaned.rfind(" ", 0, limit)
+    return cleaned[: boundary if boundary > 80 else limit].strip()
+
+
+def _criterion_seed_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text.strip()).strip(" .:")
+    cleaned = re.sub(r"^task-specific\s+[^:]{1,80}\s+criterion:\s*", "", cleaned, flags=re.I)
+    if " - " in cleaned:
+        cleaned = cleaned.split(" - ", 1)[0].strip()
+    return cleaned
+
+
+def _criterion_should_affect_source_plan(text: str) -> bool:
+    match = re.match(r"^task-specific\s+([^:]{1,80})\s+criterion:", text.strip(), flags=re.I)
+    if not match:
+        return True
+    dimension = match.group(1).strip().lower()
+    return dimension != "readability"
+
+
+def _sentence_case(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text.strip()).strip(" .:")
+    if not cleaned:
+        return "Task-specific coverage"
+    return cleaned[0].upper() + cleaned[1:]
 
 
 def _acceptance_criteria(

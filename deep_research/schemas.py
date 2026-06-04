@@ -153,6 +153,9 @@ class VerificationResultV2:
     source_breadth_score: float = 1.0
     report_cleanliness_score: float = 1.0
     criteria_coverage_score: float = 1.0
+    language_alignment_score: float = 1.0
+    report_depth_score: float = 1.0
+    cited_source_alignment_score: float = 1.0
     semantic_verification_score: float = 1.0
     semantic_verification: dict[str, Any] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)

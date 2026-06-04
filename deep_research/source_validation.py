@@ -4,11 +4,12 @@ import re
 from dataclasses import dataclass
 
 from deep_research.schemas import ResearchBranch
-from deep_research.text_terms import TOKEN_RE, normalize_term_text, ordered_terms, term_set
+from deep_research.text_terms import TOKEN_RE, contains_cjk, normalize_term_text, ordered_terms, term_set
 
 URL_RE = re.compile(r"https?://\S+", flags=re.I)
 KEY_VALUE_LINE_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _./-]{1,48}:\s+\S+")
-SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]?$")
+SENTENCE_END_RE = re.compile(r"[.!?。！？][\"')\]）】」』”’]?$")
+SENTENCE_SPLIT_RE = re.compile(r"\n\s*\n|(?<=[.!?。！？])\s*|[;；]\s*")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,5}\b")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
@@ -202,15 +203,23 @@ def _concept_dominance_rejections(
     branch: ResearchBranch,
     question: str,
 ) -> list[str]:
+    if contains_cjk(f"{title} {content} {branch.title} {question}"):
+        return []
     protected_phrases = _protected_concept_phrases(branch, question)
     if not protected_phrases:
         return []
     source_text = f"{title}\n{content}"
     title_core_terms = _title_core_terms(title)
+    protected_phrase_sets = {frozenset(phrase) for phrase in protected_phrases}
     reasons: list[str] = []
     for phrase_terms in protected_phrases:
         target_count = _phrase_count(phrase_terms, source_text)
-        competing_count = _competing_title_phrase_count(title_core_terms, phrase_terms, source_text)
+        competing_count = _competing_title_phrase_count(
+            title_core_terms,
+            phrase_terms,
+            source_text,
+            protected_phrase_sets=protected_phrase_sets,
+        )
         if _title_competes_with_phrase(title_core_terms, phrase_terms) and (
             target_count <= 1 or competing_count >= max(2, target_count * 1.5)
         ):
@@ -225,13 +234,41 @@ def _concept_dominance_rejections(
 
 
 def _protected_concept_phrases(branch: ResearchBranch, question: str) -> list[tuple[str, ...]]:
-    del question
     phrases: list[tuple[str, ...]] = []
+    anchor_terms = set(ordered_terms(f"{question} {branch.title}"))
+    for text in [question]:
+        phrases.extend(_concept_phrases_from_text(text))
     for text in branch.required_terms:
         terms = ordered_terms(text)
-        if 2 <= len(terms) <= 5 and len(set(terms)) == len(terms):
+        if 2 <= len(terms) <= 5 and set(terms) <= anchor_terms and len(set(terms)) == len(terms):
             phrases.append(tuple(terms))
     return _dedupe_phrases(phrases)[:24]
+
+
+def _concept_phrases_from_text(text: str) -> list[tuple[str, ...]]:
+    phrases: list[tuple[str, ...]] = []
+    for segment in _concept_segments(text):
+        terms = ordered_terms(segment)
+        if len(terms) == 2 and len(set(terms)) == 2:
+            phrases.append(tuple(terms))
+            continue
+        for index in range(0, len(terms) - 1):
+            window = tuple(terms[index : index + 2])
+            if len(set(window)) == 2:
+                phrases.append(window)
+    return phrases
+
+
+def _concept_segments(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    parts = re.split(
+        r"\s*(?:[:;|/(){}\[\]]| - |\u2013|\u2014|,|\b(?:and|or|of|on|to|between|with)\b)\s*",
+        normalized,
+        flags=re.I,
+    )
+    return [part.strip(" .:-") for part in parts if len(ordered_terms(part)) >= 2]
 
 
 def _dedupe_phrases(phrases: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
@@ -264,18 +301,28 @@ def _title_competes_with_phrase(title_terms: list[str], phrase_terms: tuple[str,
     return overlap >= len(phrase_terms) - 1
 
 
-def _competing_title_phrase_count(title_terms: list[str], phrase_terms: tuple[str, ...], source_text: str) -> int:
+def _competing_title_phrase_count(
+    title_terms: list[str],
+    phrase_terms: tuple[str, ...],
+    source_text: str,
+    *,
+    protected_phrase_sets: set[frozenset[str]] | None = None,
+) -> int:
     if len(phrase_terms) < 2:
         return 0
     phrase_set = set(phrase_terms)
+    protected_phrase_sets = protected_phrase_sets or set()
     best = 0
     for index in range(0, max(0, len(title_terms) - len(phrase_terms) + 1)):
         window = tuple(title_terms[index : index + len(phrase_terms)])
-        if set(window) == phrase_set:
+        window_set = set(window)
+        if window_set == phrase_set:
             continue
-        if len(set(window) & phrase_set) <= 0:
+        if frozenset(window_set) in protected_phrase_sets:
             continue
-        if not (set(window) - phrase_set):
+        if len(window_set & phrase_set) <= 0:
+            continue
+        if not (window_set - phrase_set):
             continue
         best = max(best, _phrase_count(window, source_text))
     return best
@@ -378,9 +425,9 @@ def _ordered_tokens(text: str) -> list[str]:
 
 def _chunks(text: str) -> list[str]:
     chunks = []
-    for block in re.split(r"\n\s*\n|(?<=[.!?])\s+", text):
+    for block in SENTENCE_SPLIT_RE.split(text):
         chunk = block.strip()
-        if len(chunk) >= 80:
+        if len(chunk) >= 80 or len(TOKEN_RE.findall(normalize_term_text(chunk))) >= 30:
             chunks.append(chunk)
     return chunks
 

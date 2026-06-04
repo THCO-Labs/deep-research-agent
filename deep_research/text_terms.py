@@ -25,6 +25,7 @@ CJK_BOUNDARY_WORDS = (
     "给我",
     "收集",
     "整理",
+    "整合",
     "调研",
     "研究",
     "分析",
@@ -32,6 +33,7 @@ CJK_BOUNDARY_WORDS = (
     "提供",
     "一份",
     "详尽",
+    "详细",
     "报告",
     "请",
     "为我",
@@ -75,7 +77,6 @@ CJK_BOUNDARY_WORDS = (
     "对",
     "从",
     "在",
-    "中",
     "上",
     "下",
     "的",
@@ -106,13 +107,25 @@ def normalize_term_text(text: str) -> str:
 
 
 def ordered_terms(text: str, *, extra_stopwords: frozenset[str] | set[str] | None = None) -> list[str]:
+    normalized = normalize_term_text(text)
+    if not extra_stopwords:
+        return list(_ordered_terms_cached(normalized))
+
     stopwords = english_stopwords()
     if extra_stopwords:
         stopwords = stopwords | frozenset(extra_stopwords)
+    return _ordered_terms_from_normalized(normalized, stopwords)
 
+
+@lru_cache(maxsize=8192)
+def _ordered_terms_cached(normalized_text: str) -> tuple[str, ...]:
+    return tuple(_ordered_terms_from_normalized(normalized_text, english_stopwords()))
+
+
+def _ordered_terms_from_normalized(normalized_text: str, stopwords: frozenset[str]) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
-    for span in TERM_SPAN_RE.findall(normalize_term_text(text)):
+    for span in TERM_SPAN_RE.findall(normalized_text):
         for token in _tokens_for_span(span):
             if token in stopwords or token.isdigit() or token in seen:
                 continue
@@ -129,6 +142,22 @@ def contains_cjk(text: str) -> bool:
     return bool(TOKEN_RE.search(text) and any(HAN_RE.fullmatch(token) for token in TOKEN_RE.findall(text)))
 
 
+def cjk_char_count(text: str) -> int:
+    return len(re.findall(r"[\u3400-\u9fff]", text))
+
+
+def latin_letter_count(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]", text))
+
+
+def preferred_output_language(text: str) -> str:
+    cjk_count = cjk_char_count(text)
+    latin_count = latin_letter_count(text)
+    if cjk_count >= 4 and cjk_count >= max(4, int(latin_count * 0.25)):
+        return "zh"
+    return "en"
+
+
 def _tokens_for_span(span: str) -> list[str]:
     if HAN_RE.fullmatch(span):
         return _han_terms(span)
@@ -138,6 +167,8 @@ def _tokens_for_span(span: str) -> list[str]:
 
 
 def _han_terms(text: str) -> list[str]:
+    if len(text) > 24:
+        return _han_ngram_terms(text)
     segmented = _jieba_terms(text)
     if segmented:
         return segmented
@@ -145,9 +176,8 @@ def _han_terms(text: str) -> list[str]:
 
 
 def _jieba_terms(text: str) -> list[str]:
-    try:
-        jieba = _jieba_module()
-    except ImportError:
+    jieba = _jieba_module()
+    if jieba is None:
         return []
     return _dedupe(
         token.strip()
@@ -158,8 +188,10 @@ def _jieba_terms(text: str) -> list[str]:
 
 @lru_cache(maxsize=1)
 def _jieba_module():
-    import jieba
-
+    try:
+        import jieba
+    except ImportError:
+        return None
     return jieba
 
 

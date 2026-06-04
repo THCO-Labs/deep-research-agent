@@ -12,10 +12,12 @@ from deep_research.model_router import model_for_role
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2
 from deep_research.settings import Settings
 from deep_research.source_validation import content_terms
+from deep_research.text_terms import preferred_output_language
 
-MAX_SYNTHESIS_CARDS_PER_BRANCH = 6
-MAX_SYNTHESIS_CARDS_TOTAL = 64
+MAX_SYNTHESIS_CARDS_PER_BRANCH = 8
+MAX_SYNTHESIS_CARDS_TOTAL = 96
 MAX_SYNTHESIS_EXCERPT_CHARS = 500
+INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.22
 REPORT_STYLE_EXAMPLES = (
     {
         "name": "Analytical explainer",
@@ -88,6 +90,7 @@ def build_report_blueprint(
     return {
         "schema_version": 1,
         "report_title": _report_title(plan.question),
+        "output_language": _language_label(plan.question),
         "question": plan.question,
         "audience": plan.audience,
         "key_message_task": "State the direct answer early, then develop it through evidence-backed sections.",
@@ -101,6 +104,7 @@ def build_report_blueprint(
         "acceptance_criteria": plan.acceptance_criteria,
         "branch_writing_briefs": branch_sections,
         "style_examples": REPORT_STYLE_EXAMPLES,
+        "quality_contract": _report_quality_contract(plan, evidence_cards, coverage),
         "structure_guidance": [
             "Choose headings that fit this specific question and evidence set.",
             "Do not force a universal report template.",
@@ -121,21 +125,22 @@ def synthesize_report(
 ) -> str:
     cards_by_branch = _cards_by_branch(evidence_cards)
     blueprint = build_report_blueprint(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
+    labels = _report_labels(plan.question)
 
     cited_source_ids: set[int] = set()
     lines = [
         f"# {blueprint['report_title']}",
         "",
-        "## Bottom Line",
+        f"## {labels['bottom_line']}",
         "",
     ]
-    summary_cards = _cards_for_synthesis(plan, evidence_cards)[:5]
+    summary_cards = _opening_cards(plan, evidence_cards)[:5]
     if summary_cards:
         summary = _executive_summary_sentence(plan.question, summary_cards)
         cited_source_ids.update(card.source_id for card in summary_cards)
         lines.extend([summary, ""])
     else:
-        lines.extend([f"No sufficient evidence was gathered to answer: {plan.question}", ""])
+        lines.extend([_no_evidence_sentence(plan.question), ""])
 
     for branch in plan.branches:
         branch_cards = cards_by_branch.get(branch.id, [])
@@ -150,47 +155,47 @@ def synthesize_report(
             lines.extend([_sentence_with_citation(card), ""])
             cited_source_ids.add(card.source_id)
 
-    lines.extend(["## What the Sources Show Together", ""])
+    lines.extend([f"## {labels['synthesis']}", ""])
     if summary_cards:
         synthesis_cards = summary_cards[:3]
-        lines.extend([_synthesis_sentence(synthesis_cards), ""])
+        lines.extend([_synthesis_sentence(synthesis_cards, question=plan.question), ""])
         cited_source_ids.update(card.source_id for card in synthesis_cards)
     else:
-        lines.extend(["Cross-source synthesis could not be completed because no evidence cards passed the gates.", ""])
+        lines.extend([labels["no_synthesis"], ""])
 
-    lines.extend(["## Comparison Table", ""])
+    lines.extend([f"## {labels['comparison']}", ""])
     if evidence_cards:
         table_cards = _cards_for_synthesis(plan, evidence_cards)[:6]
         lines.extend(_comparison_table(table_cards, plan=plan))
         cited_source_ids.update(card.source_id for card in table_cards)
         lines.append("")
     else:
-        lines.extend(["No comparison table could be generated because no evidence cards passed hygiene gates.", ""])
+        lines.extend([labels["no_table"], ""])
 
     breadth_cards = _cards_needed_for_source_breadth(plan, evidence_cards, cited_source_ids)
     if breadth_cards:
-        lines.extend([f"## Additional Evidence on {_report_title(plan.question).replace('Research Report: ', '')}", ""])
+        lines.extend([f"## {labels['additional_evidence']} {_report_subject(plan.question)}", ""])
         for card in breadth_cards:
             lines.extend([_sentence_with_citation(card), ""])
             cited_source_ids.add(card.source_id)
 
-    lines.extend(["## Implications", ""])
+    lines.extend([f"## {labels['implications']}", ""])
     if summary_cards:
         takeaway_cards = summary_cards[:3]
-        lines.extend([_takeaway_sentence(takeaway_cards), ""])
+        lines.extend([_takeaway_sentence(takeaway_cards, question=plan.question), ""])
         cited_source_ids.update(card.source_id for card in takeaway_cards)
     else:
-        lines.extend(["The report cannot make evidence-backed recommendations without clean evidence cards.", ""])
+        lines.extend([labels["no_takeaways"], ""])
 
-    lines.extend(["## Limits and Confidence", ""])
+    lines.extend([f"## {labels['limits']}", ""])
     if evidence_cards:
-        lines.extend([_limitations_sentence(coverage), ""])
+        lines.extend([_limitations_sentence(coverage, question=plan.question), ""])
     else:
-        lines.extend(["The system did not gather enough clean evidence to support a confident answer.", ""])
+        lines.extend([labels["no_confidence"], ""])
 
     if coverage.missing_branches:
-        lines.extend(["## Evidence Gaps", ""])
-        lines.extend(["Some planned evidence areas remained under-supported.", ""])
+        lines.extend([f"## {labels['gaps']}", ""])
+        lines.extend([labels["gaps_sentence"], ""])
 
     cited_sources = [source for source in sources if source.id in cited_source_ids]
     lines.extend(["## Sources", ""])
@@ -286,13 +291,23 @@ def _synthesis_prompt(
     repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:20]) or "None"
     previous_text = previous_report[:3000] if previous_report else "None"
     report_blueprint = blueprint or build_report_blueprint(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
+    quality_contract = report_blueprint.get("quality_contract", {})
     visual_assets = report_blueprint.get("visual_assets", [])
     visual_text = "\n".join(
         f"- {asset['alt']}: {asset['url']} (source_id {asset['source_id']})"
         for asset in visual_assets[:12]
     ) or "None"
+    language_instruction = _language_instruction(plan.question)
+    opening_cards = _opening_cards(plan, evidence_cards)[:8]
+    opening_priority = ", ".join(f"card {card.id} from source [{card.source_id}]" for card in opening_cards) or "None"
     required_source_breadth = min(17, len({card.source_id for card in evidence_cards}))
-    target_depth_hint = _target_depth_hint(plan=plan, evidence_cards=evidence_cards, writing_guidance=writing_guidance)
+    target_profile = _target_report_profile(plan=plan, evidence_cards=evidence_cards, writing_guidance=writing_guidance)
+    target_depth_hint = _target_depth_hint(
+        plan=plan,
+        evidence_cards=evidence_cards,
+        writing_guidance=writing_guidance,
+        target_profile=target_profile,
+    )
     return f"""You are writing a professional deep research report from verified evidence cards.
 
 Current date: {date.today().isoformat()}
@@ -308,6 +323,12 @@ Acceptance criteria to satisfy in the report:
 
 Report-writing blueprint:
 {json_dumps(_compact_blueprint_for_prompt(report_blueprint))}
+
+Report quality contract:
+{json_dumps(_compact_quality_contract(quality_contract))}
+
+Report depth and structure target:
+{json_dumps(target_profile)}
 
 Coverage status:
 - complete: {coverage.complete}
@@ -332,6 +353,12 @@ Allowed sources:
 Evidence-backed visual assets, if any:
 {visual_text}
 
+Output language:
+{language_instruction}
+
+Opening-answer evidence priority:
+{opening_priority}
+
 Write the final report in Markdown.
 
 Report style examples to learn from, not copy:
@@ -340,26 +367,37 @@ Report style examples to learn from, not copy:
 Hard requirements:
 - Answer the user's question directly in the first substantive paragraph.
 - Keep the title, opening answer, and body centered on the user's exact question. If the previous draft drifts to a different topic, ignore the drift and rebuild from the evidence cards.
+- Write the title, section headings, opening answer, and body in the requested output language above. Source titles, URLs, citations, acronyms, and quoted terms may remain in their original language.
+- Do not let a narrower context, example case, disease, country, product, dataset, or source-specific framing replace the user's requested relationship or scope unless the user explicitly asked for that narrower context.
+- Use the opening-answer evidence priority to write the first substantive paragraph; it ranks cards by direct relevance to the user's exact question.
 - Use only the evidence cards above. Do not add uncited facts from memory.
 - Every factual paragraph must include at least one inline citation like [3].
 - Citation IDs must be source_id values from the allowed sources list.
 - Do not cite evidence card IDs. Cite source IDs only.
 - Cite at least {required_source_breadth} distinct evidence-backed source IDs when that many are available.
 - Depth target: {target_depth_hint}
+- Treat the report depth and structure target as a minimum acceptable plan, not an aspiration. If the target calls for a long-form report, do not stop after a short overview.
+- Optimize for report quality as well as factuality: broad coverage, non-obvious synthesis, strict task fit, and readable organization.
+- Use the report quality contract as a writing checklist, but do not print it as a checklist.
 - Satisfy the acceptance criteria as report coverage requirements. Do not quote them as a checklist, but make the relevant concepts and analysis visible in the prose.
 - Treat the research branches and any additional report-writing guidance as a coverage checklist.
 - Every branch with evidence cards must be substantively answered in the report, either in its own section or in a clearly relevant grouped section.
 - For each evidence-rich branch, write analytical paragraphs that define the issue, summarize the strongest evidence, explain mechanisms or trade-offs, and state limitations. Do not compress a branch into a single sentence when multiple cards support it.
 - When prior failures mention answer coverage, missing context, or semantic completeness, expand the under-covered branch objectives and required points instead of writing a short overview.
 - For criteria-rich benchmark-style prompts, write a comprehensive report rather than a brief answer; depth and coverage matter more than brevity.
+- For criteria-rich benchmark-style prompts, build an argument at reference-report depth: define constructs, explain mechanisms, review evidence, compare mediators/moderators or alternatives, discuss boundary conditions, and end with implications and future research when supported.
+- Use the dynamic section plan in the report depth target to decide what each section must accomplish. You may rename sections naturally, but every planned section purpose must be represented in the final report.
 - Do not include structural extraction artifacts in the body: raw URLs, markdown link/media syntax, page-control text, key-value scrape metadata, or extraction notes.
 - Do not copy low-information page chrome or boilerplate-like text.
 - Treat prior verification failures as private repair instructions only; never quote them or mention branch IDs, evidence card IDs, missing-citation diagnostics, or internal coverage scores in the report body.
 - Choose natural section headings for this question. Do not force a fixed template or reuse the same headings for every topic.
 - Write in polished report prose with synthesis across sources, not a bullet dump of evidence cards.
+- Make the first paragraph self-contained: answer, core mechanism or decision frame, confidence level, and why the answer matters.
 - Each major section must make a claim, interpret the claim, explain why it matters for the user's question, and connect back to the report's central thesis.
+- Prefer cohesive analytical paragraphs over isolated bullets. Use bullets only for compact enumerations where the items are parallel and evidence-backed.
 - Use precise domain terminology, define specialized terms when needed, and keep paragraph transitions explicit so the argument reads as one coherent report.
 - Include synthesis paragraphs that compare agreement, tension, evidence strength, mechanisms, boundary conditions, and trade-offs across sources.
+- Where the evidence supports it, include a final integrative section that states implications, unresolved questions, and what would change the conclusion.
 - Add forward-looking or decision-relevant implications only when the evidence supports them; frame uncertainty and open questions clearly.
 - The table must use question-specific dimensions, not generic labels.
 - Include images only when listed under evidence-backed visual assets and only when the visual helps inspect the topic; otherwise omit images.
@@ -499,20 +537,25 @@ def _repair_weak_citation_support(
         if len(claim_terms) < 6:
             repaired.append(paragraph)
             continue
-        cited_ids = {
-            int(value)
-            for value in re.findall(r"\[([0-9]+)]", text)
-            if int(value) in source_ids
-        }
+        cited_ids = {source_id for source_id in _numeric_citation_ids(text) if source_id in source_ids}
         if not cited_ids:
             repaired.append(paragraph)
             continue
+        individual_scores = _individual_source_support_scores(claim_terms, terms_by_source, cited_ids)
+        weak_ids = {
+            source_id
+            for source_id, score in individual_scores.items()
+            if score < INDIVIDUAL_CITATION_REPAIR_THRESHOLD
+        }
+        strong_ids = cited_ids - weak_ids
         support_terms = set().union(*(terms_by_source.get(source_id, set()) for source_id in cited_ids))
         support_score = len(claim_terms & support_terms) / max(len(claim_terms), 1)
-        if support_score >= threshold:
+        if support_score >= threshold and not weak_ids:
             repaired.append(paragraph)
             continue
         additions = _best_supporting_source_ids(claim_terms, terms_by_source, cited_ids, threshold)
+        if weak_ids and (strong_ids or additions):
+            paragraph = _remove_numeric_citation_ids(paragraph, weak_ids)
         if additions:
             paragraph = paragraph.rstrip() + " " + " ".join(f"[{source_id}]" for source_id in additions)
         repaired.append(paragraph)
@@ -529,7 +572,7 @@ def _append_evidence_coverage_if_needed(
     if not evidence_cards:
         return report
     body, separator, source_tail = _split_sources(report)
-    cited_source_ids = {int(value) for value in re.findall(r"\[([0-9]+)]", body)}
+    cited_source_ids = set(_numeric_citation_ids(body))
     report_terms = content_terms(body)
     cards_by_branch = _cards_by_branch(evidence_cards)
     additions: list[tuple[ResearchBranch | None, EvidenceCard]] = []
@@ -572,16 +615,17 @@ def _append_evidence_coverage_if_needed(
     if not additions:
         return report
 
+    labels = _coverage_repair_labels(plan.question)
     lines = [
         "",
-        f"## Evidence Coverage for {_report_title(plan.question).replace('Research Report: ', '')}",
+        f"## {labels['heading']} {_report_subject(plan.question)}",
         "",
     ]
     for branch, card in additions:
         if branch is not None:
-            prefix = f"For {branch.title}, the evidence adds that"
+            prefix = f"{labels['branch_prefix']} {branch.title}, {labels['evidence_adds']}"
         else:
-            prefix = "Additional evidence broadens the source base by showing that"
+            prefix = labels["breadth_prefix"]
         lines.append(f"{prefix} {card.claim.rstrip('. ')}. [{card.source_id}]")
         lines.append("")
     repaired_body = body.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n"
@@ -608,6 +652,36 @@ def _evidence_terms_by_source(
             continue
         terms.setdefault(card.source_id, set()).update(content_terms(card.claim + " " + card.supporting_excerpt))
     return terms
+
+
+def _individual_source_support_scores(
+    claim_terms: set[str],
+    terms_by_source: dict[int, set[str]],
+    cited_ids: set[int],
+) -> dict[int, float]:
+    return {
+        source_id: len(claim_terms & terms_by_source.get(source_id, set())) / max(len(claim_terms), 1)
+        for source_id in cited_ids
+    }
+
+
+def _remove_numeric_citation_ids(paragraph: str, remove_ids: set[int]) -> str:
+    if not remove_ids:
+        return paragraph
+
+    def replace(match: re.Match[str]) -> str:
+        kept = [
+            int(value)
+            for value in re.findall(r"\d+", match.group(1))
+            if int(value) not in remove_ids
+        ]
+        if not kept:
+            return ""
+        return "[" + ", ".join(str(value) for value in sorted(set(kept))) + "]"
+
+    cleaned = re.sub(r"\[([0-9][0-9,\s]*)\]", replace, paragraph)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    return cleaned
 
 
 def _best_supporting_source_ids(
@@ -652,11 +726,19 @@ def _strip_numeric_citations(text: str) -> str:
     return re.sub(r"\[([0-9][0-9,\s]*)\]", "", text)
 
 
+def _numeric_citation_ids(text: str) -> list[int]:
+    return [
+        int(value)
+        for block in re.findall(r"\[([0-9][0-9,\s]*)\]", text)
+        for value in re.findall(r"\d+", block)
+    ]
+
+
 def _fallback_citations(body: str, sources: list[SourceRecordV2]) -> str:
     cited = [
-        int(value)
-        for value in re.findall(r"\[([0-9]+)]", body)
-        if any(source.id == int(value) for source in sources)
+        source_id
+        for source_id in _numeric_citation_ids(body)
+        if any(source.id == source_id for source in sources)
     ]
     if not cited:
         cited = [source.id for source in sorted(sources, key=lambda item: (-item.quality_score, item.id))[:2]]
@@ -791,14 +873,165 @@ def _question_term_score(question: str, text: str) -> float:
     return round(len(question_terms & text_terms) / max(len(question_terms), 1), 4)
 
 
+def _opening_cards(plan: ResearchPlan, evidence_cards: list[EvidenceCard]) -> list[EvidenceCard]:
+    ranked = _cards_for_synthesis(plan, evidence_cards)
+    if not ranked:
+        return []
+    question_terms = content_terms(plan.question)
+    if not question_terms:
+        return ranked
+    if len(question_terms) <= 3:
+        threshold = 0.67
+    elif len(question_terms) <= 8:
+        threshold = 0.50
+    else:
+        threshold = 0.35
+    direct = [
+        card
+        for card in ranked
+        if _question_term_score(plan.question, f"{card.claim} {card.supporting_excerpt} {card.source_title}") >= threshold
+    ]
+    return direct + [card for card in ranked if card not in direct]
+
+
+def _language_label(question: str) -> str:
+    return "Simplified Chinese" if preferred_output_language(question) == "zh" else "English"
+
+
+def _language_instruction(question: str) -> str:
+    if preferred_output_language(question) == "zh":
+        return (
+            "Use Simplified Chinese prose because the user request is Chinese. "
+            "Keep source titles, URLs, citations, acronyms, product names, and quoted technical terms in their original language when useful."
+        )
+    return (
+        "Use English prose because the user request is English or predominantly Latin-script. "
+        "Keep source titles, URLs, citations, acronyms, product names, and quoted technical terms in their original language when useful."
+    )
+
+
+def _report_quality_contract(
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    coverage: CoverageMatrix,
+) -> dict[str, Any]:
+    evidence_source_count = len({card.source_id for card in evidence_cards})
+    evidence_card_count = len(evidence_cards)
+    branch_count = len(plan.branches)
+    criteria_count = len(plan.acceptance_criteria)
+    return {
+        "direct_answer": [
+            "Open with the answer, not background.",
+            "State the central mechanism, trade-off, or decision frame that organizes the report.",
+            "Keep the opening tied to the exact task scope and language.",
+        ],
+        "coverage": [
+            f"Cover {branch_count} planned research branch(es) and {criteria_count} report-level criterion/criteria when present.",
+            "Make every important sub-question visible in prose even when related branches are grouped.",
+            "Separate direct evidence from adjacent examples or narrower case studies.",
+        ],
+        "depth_and_insight": [
+            "Explain causes, mechanisms, boundary conditions, trade-offs, and consequences instead of only listing facts.",
+            "Compare where sources agree, disagree, or answer different parts of the question.",
+            "Add implications or future directions only when they follow from cited evidence.",
+        ],
+        "evidence_use": [
+            f"Use the strongest {min(evidence_card_count, MAX_SYNTHESIS_CARDS_TOTAL)} evidence cards from {evidence_source_count} source(s).",
+            "Attach citations to the exact claims they support; avoid broad citation stacks that include weakly related sources.",
+            "Name evidence strength and limitations when the source set is uneven, indirect, or incomplete.",
+        ],
+        "readability": [
+            "Use natural headings that match the argument and make scanning easy.",
+            "Use cohesive paragraphs with topic sentences, interpretation, and transitions.",
+            "Use tables only when they clarify question-specific comparisons; otherwise prefer prose synthesis.",
+        ],
+        "coverage_status": {
+            "complete": coverage.complete,
+            "score": coverage.coverage_score,
+            "missing_branches": coverage.missing_branches,
+        },
+    }
+
+
+def _compact_quality_contract(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, list):
+            compact[key] = [str(item)[:240] for item in value[:5]]
+        elif isinstance(value, dict):
+            compact[key] = value
+        else:
+            compact[key] = value
+    return compact
+
+
+def _report_labels(question: str) -> dict[str, str]:
+    if preferred_output_language(question) == "zh":
+        return {
+            "title": "\u7814\u7a76\u62a5\u544a",
+            "bottom_line": "\u6838\u5fc3\u7ed3\u8bba",
+            "synthesis": "\u7efc\u5408\u5206\u6790",
+            "comparison": "\u5bf9\u6bd4\u5206\u6790",
+            "additional_evidence": "\u8865\u5145\u8bc1\u636e\uff1a",
+            "implications": "\u542b\u4e49",
+            "limits": "\u5c40\u9650\u4e0e\u4fe1\u5fc3",
+            "gaps": "\u8bc1\u636e\u7f3a\u53e3",
+            "no_synthesis": "\u7531\u4e8e\u6ca1\u6709\u8db3\u591f\u901a\u8fc7\u9a8c\u8bc1\u7684\u8bc1\u636e\u5361\uff0c\u65e0\u6cd5\u5b8c\u6210\u8de8\u6765\u6e90\u7efc\u5408\u3002",
+            "no_table": "\u7531\u4e8e\u6ca1\u6709\u8db3\u591f\u901a\u8fc7\u9a8c\u8bc1\u7684\u8bc1\u636e\u5361\uff0c\u65e0\u6cd5\u751f\u6210\u5bf9\u6bd4\u8868\u3002",
+            "no_takeaways": "\u6ca1\u6709\u5e72\u51c0\u8bc1\u636e\u5361\u65f6\uff0c\u62a5\u544a\u4e0d\u80fd\u7ed9\u51fa\u6709\u8bc1\u636e\u652f\u6491\u7684\u5efa\u8bae\u3002",
+            "no_confidence": "\u7cfb\u7edf\u6ca1\u6709\u6536\u96c6\u5230\u8db3\u591f\u5e72\u51c0\u7684\u8bc1\u636e\u6765\u652f\u6301\u9ad8\u4fe1\u5fc3\u7ed3\u8bba\u3002",
+            "gaps_sentence": "\u90e8\u5206\u8ba1\u5212\u7814\u7a76\u8303\u56f4\u4ecd\u7136\u8bc1\u636e\u4e0d\u8db3\u3002",
+        }
+    return {
+        "title": "Research Report",
+        "bottom_line": "Bottom Line",
+        "synthesis": "What the Sources Show Together",
+        "comparison": "Comparison Table",
+        "additional_evidence": "Additional Evidence on",
+        "implications": "Implications",
+        "limits": "Limits and Confidence",
+        "gaps": "Evidence Gaps",
+        "no_synthesis": "Cross-source synthesis could not be completed because no evidence cards passed the gates.",
+        "no_table": "No comparison table could be generated because no evidence cards passed hygiene gates.",
+        "no_takeaways": "The report cannot make evidence-backed recommendations without clean evidence cards.",
+        "no_confidence": "The system did not gather enough clean evidence to support a confident answer.",
+        "gaps_sentence": "Some planned evidence areas remained under-supported.",
+    }
+
+
+def _coverage_repair_labels(question: str) -> dict[str, str]:
+    if preferred_output_language(question) == "zh":
+        return {
+            "heading": "\u8865\u5145\u5206\u6790\uff1a",
+            "branch_prefix": "\u5173\u4e8e",
+            "evidence_adds": "\u8bc1\u636e\u8fdb\u4e00\u6b65\u8868\u660e",
+            "breadth_prefix": "\u8865\u5145\u8bc1\u636e\u6269\u5c55\u4e86\u6765\u6e90\u57fa\u7840\uff0c\u663e\u793a",
+        }
+    return {
+        "heading": "Additional Source-Backed Analysis:",
+        "branch_prefix": "On",
+        "evidence_adds": "the evidence further indicates that",
+        "breadth_prefix": "Additional evidence broadens the source base by showing that",
+    }
+
+
 def _report_title(question: str) -> str:
+    labels = _report_labels(question)
     cleaned = re.sub(r"\s+", " ", question.strip(" ?.!")).strip()
     if not cleaned:
-        return "Research Report"
+        return labels["title"]
     if len(cleaned) > 90:
         boundary = cleaned.rfind(" ", 0, 90)
         cleaned = cleaned[: boundary if boundary > 40 else 90].strip()
-    return f"Research Report: {cleaned}"
+    return f"{labels['title']}: {cleaned}"
+
+
+def _report_subject(question: str) -> str:
+    title = _report_title(question)
+    prefix = f"{_report_labels(question)['title']}: "
+    return title.replace(prefix, "", 1)
 
 
 def _question_label(question: str) -> str:
@@ -812,7 +1045,14 @@ def _executive_summary_sentence(question: str, cards: list[EvidenceCard]) -> str
     central_cards = sorted(cards, key=lambda card: _card_rank_key(card, question=question))[:3]
     claims = "; ".join(card.claim.rstrip(". ") for card in central_cards)
     if not claims:
-        return f"The gathered evidence did not contain a clean opening answer for: {_question_label(question)}."
+        return _no_evidence_sentence(question)
+    if preferred_output_language(question) == "zh":
+        return (
+            f"\u56f4\u7ed5\u7528\u6237\u95ee\u9898\u201c{_question_label(question)}\u201d\uff0c"
+            f"\u8bc1\u636e\u5e94\u9996\u5148\u56de\u7b54\u539f\u59cb\u5173\u7cfb\u672c\u8eab\uff0c"
+            f"\u800c\u4e0d\u662f\u53ea\u56de\u7b54\u67d0\u4e2a\u6848\u4f8b\u6216\u76f8\u90bb\u4e3b\u9898\u3002"
+            f"\u6700\u6709\u652f\u6491\u7684\u8981\u70b9\u662f\uff1a{claims}\u3002{_citation_group(central_cards)}"
+        )
     return (
         f"In answer to the question, the evidence should be read around the central request: "
         f"{_question_label(question)}. The strongest source-backed points are that {claims}. "
@@ -825,20 +1065,34 @@ def _sentence_with_citation(card: EvidenceCard) -> str:
     return f"{claim}. [{card.source_id}]"
 
 
-def _synthesis_sentence(cards: list[EvidenceCard]) -> str:
+def _synthesis_sentence(cards: list[EvidenceCard], *, question: str = "") -> str:
     claims = "; ".join(card.claim.rstrip(". ") for card in cards)
+    if preferred_output_language(question) == "zh":
+        return f"\u7efc\u5408\u6765\u770b\uff0c\u8bc1\u636e\u663e\u793a\u8fd9\u4e9b\u53d1\u73b0\u4e0d\u662f\u5b64\u7acb\u7684\uff1a{claims}\u3002{_citation_group(cards)}"
     return f"Taken together, the evidence indicates a linked pattern rather than isolated findings: {claims}. {_citation_group(cards)}"
 
 
-def _takeaway_sentence(cards: list[EvidenceCard]) -> str:
+def _takeaway_sentence(cards: list[EvidenceCard], *, question: str = "") -> str:
     claims = "; ".join(card.claim.rstrip(". ") for card in cards[:3])
+    if preferred_output_language(question) == "zh":
+        return f"\u5b9e\u9645\u542b\u4e49\u5e94\u4ece\u6700\u5f3a\u652f\u6491\u70b9\u51fa\u53d1\uff1a{claims}\u3002{_citation_group(cards[:3])}"
     return f"Practical takeaways should follow the strongest supported points: {claims}. {_citation_group(cards[:3])}"
 
 
-def _limitations_sentence(coverage: CoverageMatrix) -> str:
+def _limitations_sentence(coverage: CoverageMatrix, *, question: str = "") -> str:
+    if preferred_output_language(question) == "zh":
+        if coverage.missing_branches:
+            return "\u7531\u4e8e\u90e8\u5206\u8ba1\u5212\u7814\u7a76\u8303\u56f4\u4ecd\u7f3a\u5c11\u8db3\u591f\u8bc1\u636e\uff0c\u7ed3\u8bba\u4fe1\u5fc3\u6709\u9650\u3002"
+        return "\u7ed3\u8bba\u4fe1\u5fc3\u53d6\u51b3\u4e8e\u6765\u6e90\u8d28\u91cf\u3001\u7814\u7a76\u8303\u56f4\u3001\u8d44\u6599\u65f6\u6548\u6027\u548c\u5206\u652f\u8986\u76d6\u5b8c\u6574\u5ea6\u3002"
     if coverage.missing_branches:
         return "Confidence is limited because some planned branches remained incomplete."
     return "Confidence depends on source quality, scope, recency, and branch coverage."
+
+
+def _no_evidence_sentence(question: str) -> str:
+    if preferred_output_language(question) == "zh":
+        return f"\u5f53\u524d\u6ca1\u6709\u8db3\u591f\u901a\u8fc7\u9a8c\u8bc1\u7684\u8bc1\u636e\u6765\u56de\u7b54\uff1a{_question_label(question)}\u3002"
+    return f"No sufficient evidence was gathered to answer: {_question_label(question)}."
 
 
 def _cards_needed_for_source_breadth(
@@ -860,10 +1114,16 @@ def _cards_needed_for_source_breadth(
 
 def _comparison_table(cards: list[EvidenceCard], *, plan: ResearchPlan | None = None) -> list[str]:
     branch_title_by_id = {branch.id: branch.title for branch in (plan.branches if plan else [])}
-    rows = [
-        "| Dimension | Evidence | Source |",
-        "| --- | --- | --- |",
-    ]
+    if plan and preferred_output_language(plan.question) == "zh":
+        rows = [
+            "| \u7ef4\u5ea6 | \u8bc1\u636e | \u6765\u6e90 |",
+            "| --- | --- | --- |",
+        ]
+    else:
+        rows = [
+            "| Dimension | Evidence | Source |",
+            "| --- | --- | --- |",
+        ]
     for card in cards[:6]:
         dimension = branch_title_by_id.get(card.branch_id) or "Evidence area"
         rows.append(f"| {_escape_table(dimension[:90])} | {_escape_table(card.claim[:180])} | [{card.source_id}] |")
@@ -932,20 +1192,174 @@ def _compact_blueprint_for_prompt(blueprint: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _target_depth_hint(*, plan: ResearchPlan, evidence_cards: list[EvidenceCard], writing_guidance: str) -> str:
+def _target_report_profile(
+    *,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    writing_guidance: str,
+) -> dict[str, Any]:
     evidence_sources = len({card.source_id for card in evidence_cards})
     branch_count = len(plan.branches)
-    criteria_rich = bool(re.search(r"\bDeepResearch Bench evaluation guidance\b|\bcriterion\b|\bdimension weight\b", writing_guidance, flags=re.I))
+    criteria_count = len(_report_level_criteria(plan))
+    criteria_rich = _criteria_rich_plan(plan, writing_guidance=writing_guidance)
+    if criteria_rich:
+        min_words = min(
+            7500,
+            max(
+                4800,
+                criteria_count * 180,
+                branch_count * 380,
+                evidence_sources * 120,
+            ),
+        )
+        target_words = min(9000, max(min_words + 1200, int(min_words * 1.25)))
+        min_cited_paragraphs = min(38, max(20, criteria_count, branch_count * 2))
+        min_major_sections = min(14, max(8, branch_count + 3))
+    elif evidence_sources >= 30 or branch_count >= 8:
+        min_words = 3200
+        target_words = 5600
+        min_cited_paragraphs = min(30, max(14, branch_count * 2))
+        min_major_sections = min(12, max(6, branch_count))
+    elif evidence_sources >= 17 or branch_count >= 5:
+        min_words = 2600
+        target_words = 4500
+        min_cited_paragraphs = min(24, max(10, branch_count * 2))
+        min_major_sections = min(10, max(5, branch_count))
+    else:
+        min_words = 1400
+        target_words = 2800
+        min_cited_paragraphs = max(5, min(14, branch_count * 2 + 2))
+        min_major_sections = max(3, min(7, branch_count + 2))
+
+    return {
+        "minimum_words": min_words,
+        "target_words": target_words,
+        "minimum_cited_paragraphs": min_cited_paragraphs,
+        "minimum_major_sections_before_sources": min_major_sections,
+        "criteria_rich": criteria_rich,
+        "criteria_count": criteria_count,
+        "branch_count": branch_count,
+        "evidence_source_count": evidence_sources,
+        "section_plan": _dynamic_section_plan(plan, criteria_rich=criteria_rich),
+        "style": (
+            "reference-grade analytical report"
+            if criteria_rich
+            else "substantial evidence-backed report"
+            if min_words >= 2600
+            else "focused evidence-backed report"
+        ),
+    }
+
+
+def _target_depth_hint(
+    *,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    writing_guidance: str,
+    target_profile: dict[str, Any] | None = None,
+) -> str:
+    profile = target_profile or _target_report_profile(
+        plan=plan,
+        evidence_cards=evidence_cards,
+        writing_guidance=writing_guidance,
+    )
+    evidence_sources = len({card.source_id for card in evidence_cards})
+    branch_count = len(plan.branches)
+    criteria_rich = bool(profile.get("criteria_rich"))
+    min_words = int(profile.get("minimum_words", 0) or 0)
+    target_words = int(profile.get("target_words", 0) or 0)
     if criteria_rich:
         return (
-            "write a reference-grade long-form report, typically 4,500-8,000 words when the evidence supports it; "
-            "cover each task-specific criterion with substantive analysis, cross-source synthesis, and clear implications, not a checklist."
+            f"write a reference-grade long-form report of at least {min_words} words, targeting about {target_words} words "
+            "when the evidence supports it; cover each task-specific criterion with substantive analysis, cross-source "
+            "synthesis, and clear implications, not a checklist."
         )
     if evidence_sources >= 30 or branch_count >= 8:
-        return "write a thorough report, typically 3,000-6,000 words when the evidence supports it."
+        return f"write a thorough report of at least {min_words} words, targeting about {target_words} words when the evidence supports it."
     if evidence_sources >= 17 or branch_count >= 5:
-        return "write a substantial report, typically 2,500-4,500 words when the evidence supports it."
+        return f"write a substantial report of at least {min_words} words, targeting about {target_words} words when the evidence supports it."
     return "write enough detail to answer the question fully without padding; prefer depth over brevity when evidence supports it."
+
+
+def _report_level_criteria(plan: ResearchPlan) -> list[str]:
+    criteria: list[str] = []
+    for criterion in plan.acceptance_criteria:
+        cleaned = re.sub(r"^Cover this task-specific criterion in synthesis:\s*", "", criterion.strip(), flags=re.I)
+        cleaned = re.sub(r"^Task-specific\s+[^:]{1,80}\s+criterion:\s*", "", cleaned, flags=re.I)
+        cleaned = cleaned.strip(" .:")
+        if cleaned and len(content_terms(cleaned)) >= 2:
+            criteria.append(cleaned)
+    return _dedupe_text(criteria)
+
+
+def _criteria_rich_plan(plan: ResearchPlan, *, writing_guidance: str = "") -> bool:
+    if re.search(r"\bDeepResearch Bench evaluation guidance\b|\bdimension weight\b", writing_guidance, flags=re.I):
+        return True
+    if len(_report_level_criteria(plan)) >= 8:
+        return True
+    return any("task-specific" in criterion.lower() and "criterion" in criterion.lower() for criterion in plan.acceptance_criteria)
+
+
+def _dynamic_section_plan(plan: ResearchPlan, *, criteria_rich: bool) -> list[dict[str, str]]:
+    sections: list[dict[str, str]] = [
+        {
+            "purpose": "Direct answer and thesis",
+            "must_do": "Answer the user's question in the first substantive paragraph, state confidence, and name the organizing mechanism or decision frame.",
+        }
+    ]
+    if criteria_rich:
+        sections.extend(
+            [
+                {
+                    "purpose": "Definitions and conceptual grounding",
+                    "must_do": "Define the central constructs and any essential theory or measurement concepts before making complex claims.",
+                },
+                {
+                    "purpose": "Mechanisms and causal logic",
+                    "must_do": "Explain how the relationship, system, process, or comparison works, including mediators, moderators, trade-offs, or boundary conditions where relevant.",
+                },
+                {
+                    "purpose": "Evidence review",
+                    "must_do": "Synthesize the strongest direct evidence and distinguish direct evidence from adjacent examples or indirect context.",
+                },
+            ]
+        )
+    for branch in plan.branches[:10]:
+        sections.append(
+            {
+                "purpose": branch.title,
+                "must_do": branch.objective[:260],
+            }
+        )
+    sections.extend(
+        [
+            {
+                "purpose": "Cross-source synthesis",
+                "must_do": "Compare agreement, disagreement, evidence strength, and what the sources imply together.",
+            },
+            {
+                "purpose": "Implications and future directions",
+                "must_do": "State practical, theoretical, or decision-relevant implications and forward-looking questions supported by evidence.",
+            },
+            {
+                "purpose": "Limitations and confidence",
+                "must_do": "Name limits, uncertainty, source constraints, and what evidence would change the conclusion.",
+            },
+        ]
+    )
+    return sections[:16]
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = re.sub(r"\s+", " ", value.strip().lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 
 def json_dumps(payload: dict[str, Any]) -> str:

@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 
 from deep_research.schemas import EvidenceCard, ResearchBranch, SourceRecordV2
-from deep_research.source_validation import anchor_groups_for_branch, branch_terms, content_terms
+from deep_research.source_validation import anchor_groups_for_branch, branch_terms, content_terms, validate_source_content
+
+SENTENCE_SPLIT_RE = re.compile(r"\n\s*\n|(?<=[.!?。！？])\s*|[;；]\s*")
 
 
 def build_evidence_cards(
@@ -22,8 +24,19 @@ def build_evidence_cards(
         branch = branch_by_id.get(source.branch_id)
         if branch is None:
             continue
+        source_text = source_texts.get(source.id, "")
+        alignment = validate_source_content(
+            title=source.title,
+            content=source_text,
+            branch=branch,
+            min_words=0,
+            min_relevant_chunks=0,
+            question=question,
+        )
+        if not alignment.usable:
+            continue
         terms = branch_terms(branch)
-        candidates = _rank_sentences(source_texts.get(source.id, ""), terms, question_terms, anchor_groups_for_branch(branch))
+        candidates = _rank_sentences(source_text, terms, question_terms, anchor_groups_for_branch(branch))
         for sentence in candidates[:max_cards_per_source]:
             claim = _clean_claim(sentence)
             if len(claim) < 50:
@@ -68,7 +81,7 @@ def _rank_sentences(
 ) -> list[str]:
     sentences = [
         sentence.strip()
-        for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", text)
+        for sentence in SENTENCE_SPLIT_RE.split(text)
         if 60 <= len(sentence.strip()) <= 600
     ]
     minimum_question_hits = _minimum_question_hits(question_terms)
