@@ -291,11 +291,9 @@ def model_for_role(
     provider, model_name = _split_model_spec(model_spec)
     primary = _chat_model_for_role(settings, role, provider, model_name)
     if primary is not None:
-        fallbacks = tuple(
-            _chat_model_for_route(route)
-            for route in _fallback_routes(settings, role, provider, model_name)
-        )
-        if settings.model_fallbacks and (fallbacks or settings.provider_retry_attempts > 0):
+        fallback_routes = _fallback_routes(settings, role, provider, model_name) if settings.model_fallbacks else []
+        fallbacks = tuple(_chat_model_for_route(route) for route in fallback_routes)
+        if fallbacks or settings.provider_retry_attempts > 0:
             return FallbackChatModel(
                 primary=primary,
                 fallbacks=fallbacks,

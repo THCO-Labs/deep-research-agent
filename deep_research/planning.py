@@ -276,6 +276,8 @@ def _title_from_seed(seed: str) -> str:
 
 
 def _objective_for_seed(seed: str, question: str) -> str:
+    if contains_cjk(seed + question):
+        return f"Research this aspect of the request: {seed}. Keep evidence anchored to the user's full request."
     return (
         f"Research this aspect of the request: {seed}. "
         f"Keep findings grounded in the full user question: {_trim_query(question, limit=260)}"
@@ -283,6 +285,15 @@ def _objective_for_seed(seed: str, question: str) -> str:
 
 
 def _queries_for_seed(seed: str, topic: str, question: str, *, is_primary: bool) -> list[str]:
+    if contains_cjk(seed + topic + question):
+        seed_chunks = cjk_content_chunks(seed)
+        topic_chunks = cjk_content_chunks(topic)
+        compact_query = " ".join(_dedupe(topic_chunks[:3] + seed_chunks[:4]))
+        queries = [seed]
+        if compact_query and compact_query != seed:
+            queries.append(compact_query)
+        return _queries(*queries[:MAX_BRANCH_QUERIES])
+
     queries = [seed]
     if topic.lower() not in seed.lower():
         queries.append(f"{topic} {seed}")
@@ -292,6 +303,9 @@ def _queries_for_seed(seed: str, topic: str, question: str, *, is_primary: bool)
 
 
 def _required_terms_for_seed(seed: str, topic: str) -> list[str]:
+    if contains_cjk(seed + topic):
+        terms = _dedupe(cjk_content_chunks(seed) + cjk_content_chunks(topic)[:3])
+        return terms[:8] or [seed]
     return _dedupe(ordered_terms(seed)[:6] + ordered_terms(topic)[:4])[:8]
 
 

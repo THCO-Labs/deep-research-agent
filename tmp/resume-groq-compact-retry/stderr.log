@@ -1,0 +1,6 @@
+Error: Research resume failed: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01k1yk3zshf45vcjsnq5xh5ta4` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7958, Requested 7800. Please try again in 58.185s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+Failure category: token_budget_exceeded
+Suggested action: Reduce --max-sources, lower DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT, or use a model/provider tier with a larger token-per-minute budget.
+Run directory: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc
+Verification: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\verification.json
+Metrics: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\metrics.json

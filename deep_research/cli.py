@@ -47,6 +47,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--min-usable-sources", type=int, default=None)
     parser.add_argument("--max-search-queries", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=None)
+    parser.add_argument("--max-followup-queries-per-branch", type=int, default=None)
     parser.add_argument("--min-source-words", type=int, default=None)
     parser.add_argument("--input", action="append", default=[], help="Local file or directory to ingest.")
     parser.add_argument("--mcp-manifest", default=None, help="JSON manifest for MCP connector source payloads.")
@@ -66,17 +67,18 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--scrape-char-limit", type=int, default=None)
     parser.add_argument("--scrape-timeout-ms", type=int, default=None)
     parser.add_argument("--scrape-retries", type=int, default=None)
-    parser.add_argument("--no-model-fallbacks", action="store_true")
+    parser.add_argument("--max-browser-scrapes-per-query", type=int, default=None)
+    parser.add_argument("--no-model-fallbacks", action="store_true", default=None)
     parser.add_argument("--provider-retry-attempts", type=int, default=None)
     parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
     parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
     parser.add_argument("--model-max-output-tokens", type=int, default=None)
-    parser.add_argument("--no-llm-planning", action="store_true")
-    parser.add_argument("--no-llm-synthesis", action="store_true")
-    parser.add_argument("--no-semantic-verification", action="store_true")
+    parser.add_argument("--no-llm-planning", action="store_true", default=None)
+    parser.add_argument("--no-llm-synthesis", action="store_true", default=None)
+    parser.add_argument("--no-semantic-verification", action="store_true", default=None)
     parser.add_argument("--semantic-evidence-max-llm-cards", type=int, default=None)
-    parser.add_argument("--allow-failed-verification", action="store_true")
-    parser.add_argument("--allow-weak-tool-models", action="store_true")
+    parser.add_argument("--allow-failed-verification", action="store_true", default=None)
+    parser.add_argument("--allow-weak-tool-models", action="store_true", default=None)
     parser.add_argument("--live", action="store_true")
     parser.add_argument(
         "--progress",
@@ -148,6 +150,7 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         min_usable_sources=args.min_usable_sources,
         max_search_queries=args.max_search_queries,
         max_candidates=args.max_candidates,
+        max_followup_queries_per_branch=args.max_followup_queries_per_branch,
         min_source_words=args.min_source_words,
         local_input_paths=tuple(args.input or ()),
         mcp_manifest=args.mcp_manifest,
@@ -162,19 +165,24 @@ def _settings_from_args(args: argparse.Namespace, *, engine: str | None = None) 
         scrape_char_limit=args.scrape_char_limit,
         scrape_timeout_ms=args.scrape_timeout_ms,
         scrape_retries=args.scrape_retries,
-        semantic_verification=not args.no_semantic_verification,
+        max_browser_scrapes_per_query=args.max_browser_scrapes_per_query,
+        semantic_verification=_enabled_unless_disabled(args.no_semantic_verification),
         semantic_evidence_max_llm_cards=args.semantic_evidence_max_llm_cards,
-        llm_planning=not args.no_llm_planning,
-        llm_synthesis=not args.no_llm_synthesis,
+        llm_planning=_enabled_unless_disabled(args.no_llm_planning),
+        llm_synthesis=_enabled_unless_disabled(args.no_llm_synthesis),
         allow_failed_verification=args.allow_failed_verification,
-        model_fallbacks=not args.no_model_fallbacks,
+        model_fallbacks=_enabled_unless_disabled(args.no_model_fallbacks),
         provider_retry_attempts=args.provider_retry_attempts,
         provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
         model_request_timeout_seconds=args.model_request_timeout_seconds,
         model_max_output_tokens=args.model_max_output_tokens,
-        strict_tool_models=not args.allow_weak_tool_models,
+        strict_tool_models=_enabled_unless_disabled(args.allow_weak_tool_models),
         live=args.live,
     )
+
+
+def _enabled_unless_disabled(flag_value: bool | None) -> bool | None:
+    return None if flag_value is None else not flag_value
 
 
 def _resolve_out(out_dir: str) -> Path:

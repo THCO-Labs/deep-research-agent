@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 from deep_research.schemas import ResearchBranch
-from deep_research.text_terms import TOKEN_RE, contains_cjk, normalize_term_text, ordered_terms, term_set
+from deep_research.text_terms import TOKEN_RE, cjk_char_count, contains_cjk, latin_letter_count, normalize_term_text, ordered_terms, term_set
 
 URL_RE = re.compile(r"https?://\S+", flags=re.I)
 KEY_VALUE_LINE_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _./-]{1,48}:\s+\S+")
@@ -49,6 +49,9 @@ def validate_source_content(
     question_terms = _tokens(question)
     branch_anchor_groups = anchor_groups_for_branch(branch)
     question_anchor_groups = anchor_groups_for_question(question)
+    if uses_translated_branch_context(question=question, branch=branch, title=title, content=normalized):
+        question_terms = set()
+        question_anchor_groups = []
     branch_anchor_matches = _matched_anchor_groups(branch_anchor_groups, content_terms)
     question_anchor_matches = _matched_anchor_groups(question_anchor_groups, content_terms)
     partial_question_anchor_collisions = _partial_anchor_collisions(question_anchor_groups, content_terms, question_anchor_matches)
@@ -130,6 +133,35 @@ def _branch_terms(branch: ResearchBranch) -> set[str]:
     )
     expanded = _expand_query_terms(seed)
     return _tokens(seed + " " + expanded)
+
+
+def uses_translated_branch_context(*, question: str, branch: ResearchBranch, title: str, content: str) -> bool:
+    if not question.strip():
+        return False
+    branch_text = " ".join(
+        [
+            branch.title,
+            branch.objective,
+            " ".join(branch.queries),
+            " ".join(branch.required_terms),
+        ]
+    )
+    question_language = _dominant_validation_language(question)
+    branch_language = _dominant_validation_language(branch_text)
+    source_language = _dominant_validation_language(f"{title} {content[:6000]}")
+    return question_language != source_language and branch_language == source_language
+
+
+def _uses_translated_branch_context(*, question: str, branch: ResearchBranch, title: str, content: str) -> bool:
+    return uses_translated_branch_context(question=question, branch=branch, title=title, content=content)
+
+
+def _dominant_validation_language(text: str) -> str:
+    cjk_count = cjk_char_count(text)
+    latin_count = latin_letter_count(text)
+    if cjk_count >= 4 and cjk_count > latin_count:
+        return "zh"
+    return "en"
 
 
 def _expand_query_terms(text: str) -> str:

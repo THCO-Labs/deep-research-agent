@@ -11,6 +11,8 @@ def clear_research_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith(("GOOGLE_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "TAVILY_API_KEY", "DEEP_RESEARCH_")):
             monkeypatch.delenv(name, raising=False)
+        elif "TAVILY" in name.upper() and "API" in name.upper() and "KEY" in name.upper():
+            monkeypatch.delenv(name, raising=False)
 
 
 def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,6 +184,23 @@ def test_settings_loads_delimited_and_underscore_key_pools(tmp_path: Path, monke
     assert settings.tavily_key_pool == ("tavily-one", "tavily-two", "tavily-three", "tavily-four")
 
 
+def test_settings_discovers_semantic_tavily_key_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GOOGLE_API_KEY=google-test\n"
+        "TAVILY_SEARCH_API_KEY=tavily-search\n"
+        "EXTRA_TAVILY_API_KEY=tavily-extra\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("EXTRA_TAVILY_API_KEY", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.tavily_api_key == "tavily-search"
+    assert settings.tavily_key_pool == ("tavily-search", "tavily-extra")
+
+
 def test_settings_supports_role_model_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
@@ -247,6 +266,52 @@ def test_settings_supports_scrape_timeout_and_retries(tmp_path: Path, monkeypatc
 
     assert settings.scrape_timeout_ms == 7000
     assert settings.scrape_retries == 2
+
+
+def test_settings_supports_blocked_source_patterns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        r"DEEP_RESEARCH_BLOCKED_SOURCE_PATTERNS=deep[_-]?research[_-]?bench;reference\.jsonl"
+        "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_BLOCKED_SOURCE_PATTERNS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.blocked_source_patterns == (r"deep[_-]?research[_-]?bench", r"reference\.jsonl")
+
+
+def test_settings_supports_browser_fallback_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY=0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.max_browser_scrapes_per_query == 0
+
+
+def test_settings_supports_followup_query_fairness_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_MAX_FOLLOWUP_QUERIES_PER_BRANCH=5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_MAX_FOLLOWUP_QUERIES_PER_BRANCH", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.max_followup_queries_per_branch == 5
 
 
 def test_settings_supports_model_max_output_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

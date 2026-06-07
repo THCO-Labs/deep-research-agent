@@ -49,7 +49,7 @@ def build_coverage_matrix(
         required.extend(term_coverage.required)
         covered.extend(term_coverage.covered)
         missing.extend(term_coverage.missing)
-        semantic_coverage = _semantic_branch_coverage(branch, branch_cards)
+        semantic_coverage = _semantic_branch_coverage(branch, branch_cards, source_count=source_count, term_score=term_coverage.score)
         required.extend(semantic_coverage.required)
         covered.extend(semantic_coverage.covered)
         missing.extend(semantic_coverage.missing)
@@ -131,7 +131,13 @@ def _required_term_coverage(
     )
 
 
-def _semantic_branch_coverage(branch: ResearchBranch, branch_cards: list[EvidenceCard]) -> _SemanticCoverage:
+def _semantic_branch_coverage(
+    branch: ResearchBranch,
+    branch_cards: list[EvidenceCard],
+    *,
+    source_count: int,
+    term_score: float,
+) -> _SemanticCoverage:
     if not branch_cards:
         return _SemanticCoverage(
             required=["semantic evidence sufficiency"],
@@ -176,14 +182,62 @@ def _semantic_branch_coverage(branch: ResearchBranch, branch_cards: list[Evidenc
     else:
         missing.append(f"{strong_label} (actual {len(strong_cards)})")
 
-    complete = score >= 0.70 and unique_source_count >= expected_evidence_items and len(strong_cards) >= expected_evidence_items
+    synthesis_label = "evidence-limited synthesis readiness"
+    synthesis_ready = _evidence_limited_synthesis_ready(
+        branch=branch,
+        branch_cards=branch_cards,
+        source_count=source_count,
+        unique_source_count=unique_source_count,
+        expected_evidence_items=expected_evidence_items,
+        strong_card_count=len(strong_cards),
+        average_strength=_average_card_strength(branch_cards),
+        term_score=term_score,
+    )
+    if synthesis_ready:
+        covered.append(synthesis_label)
+    else:
+        missing.append(synthesis_label)
+
+    complete = (
+        score >= 0.70
+        and unique_source_count >= expected_evidence_items
+        and len(strong_cards) >= expected_evidence_items
+    ) or synthesis_ready
     return _SemanticCoverage(
-        required=[label, diversity_label, strong_label],
+        required=[label, diversity_label, strong_label, synthesis_label],
         covered=covered,
         missing=[] if complete else missing,
         complete=complete,
         score=score,
     )
+
+
+def _evidence_limited_synthesis_ready(
+    *,
+    branch: ResearchBranch,
+    branch_cards: list[EvidenceCard],
+    source_count: int,
+    unique_source_count: int,
+    expected_evidence_items: int,
+    strong_card_count: int,
+    average_strength: float,
+    term_score: float,
+) -> bool:
+    if len(branch_cards) < expected_evidence_items:
+        return False
+    if unique_source_count < expected_evidence_items:
+        return False
+    if source_count < max(branch.min_sources, expected_evidence_items):
+        return False
+    evidence_rich = len(branch_cards) >= expected_evidence_items * 3 and unique_source_count >= expected_evidence_items
+    minimum_strength = 0.42 if evidence_rich else 0.52
+    if average_strength < minimum_strength:
+        return False
+    if term_score < 0.25 and average_strength < 0.58 and not evidence_rich:
+        return False
+    if strong_card_count == 0 and not evidence_rich and source_count < expected_evidence_items * 3:
+        return False
+    return True
 
 
 def _card_semantic_strength(card: EvidenceCard) -> float:

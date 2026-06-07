@@ -193,7 +193,7 @@ class PlaywrightScraper:
     def _httpx_get(self, url: str) -> httpx.Response:
         timeout = httpx.Timeout(self.timeout_ms / 1000, connect=min(10.0, self.timeout_ms / 1000))
         last_error: Exception | None = None
-        attempts = max(self.retries, 3)
+        attempts = self.retries
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             for attempt in range(attempts):
                 headers = _request_headers(attempt)

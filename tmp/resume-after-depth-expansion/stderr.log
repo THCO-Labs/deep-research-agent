@@ -1,0 +1,6 @@
+Error: Research resume failed: name '_substantive_paragraph_text' is not defined
+Failure category: unknown
+Suggested action: Inspect error.txt, transcript.log, activity.md, and provider dashboards.
+Run directory: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc
+Verification: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\verification.json
+Metrics: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260604T090042Z-what-is-the-role-of-need-for-closure-on-misinformation-acceptanc\metrics.json

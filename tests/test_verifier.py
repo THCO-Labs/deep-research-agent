@@ -4,8 +4,10 @@ from deep_research.verifier import parse_inline_citations, parse_source_list, ve
 
 def test_parse_citations_excludes_sources_section() -> None:
     report = "Claim [1]. Another claim [2, 3].\n\n## Sources\n[1] Example: https://example.com"
+    semicolon_report = "Claim [1; 2; 3].\n\n## Sources\n[1] Example: https://example.com"
 
     assert parse_inline_citations(report) == [1, 2, 3]
+    assert parse_inline_citations(semicolon_report) == [1, 2, 3]
     assert parse_source_list(report) == {1: "https://example.com"}
 
 

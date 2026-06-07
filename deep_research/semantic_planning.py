@@ -13,11 +13,21 @@ from deep_research.planning import build_research_plan
 from deep_research.schemas import ResearchBranch, ResearchPlan, SourceRequirement
 from deep_research.settings import Settings
 from deep_research.source_limits import MINIMUM_SOURCE_TARGET
-from deep_research.text_terms import ordered_terms
+from deep_research.text_terms import cjk_content_chunks, contains_cjk, ordered_terms
 
 MAX_LLM_BRANCHES = 14
 MAX_QUERIES_PER_BRANCH = 5
 MAX_REQUIRED_TERMS = 12
+PLACEHOLDER_RE = re.compile(
+    r"(?:"
+    r"\b(?:company|organization|entity|institution|brand|product|person|author|country|city|region|topic|subject|keyword|item|case)\s+[XYZ]\b"
+    r"|\b(?:placeholder|sample\s+query|example\s+query|replace\s+with|tbd|n/a)\b"
+    r"|\[[^\]]{1,80}\]"
+    r"|<[A-Za-z][^>]{1,80}>"
+    r"|\{[^{}]{1,80}\}"
+    r")",
+    flags=re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -137,6 +147,7 @@ Hard requirements:
 - The sum of min_sources across branches must be at least {MINIMUM_SOURCE_TARGET}.
 - Each branch needs 2-{MAX_QUERIES_PER_BRANCH} diverse search queries.
 - Queries should include concrete topic terms from the user request plus the branch's semantic angle.
+- Never use unresolved placeholders such as "Company X", "Topic Y", bracketed variables, sample queries, or TODO text.
 - Required terms should describe meaning to cover, not exact words to force.
 - Keep the plan proportional to the prompt. Include only branches that are directly necessary to answer the user's wording.
 - Do not add medical, legal, financial, or software assumptions unless the request implies them.
@@ -149,7 +160,30 @@ def _invoke_json(model: Any, prompt: str) -> dict[str, Any]:
     text = str(getattr(response, "content", response)).strip()
     if not text:
         raise ValueError("empty planner response")
-    return json.loads(_extract_json_object(text))
+    return _loads_json_object(_extract_json_object(text))
+
+
+def _loads_json_object(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import dirtyjson
+        except ImportError:
+            raise
+        payload = dirtyjson.loads(text)
+    plain = _plain_json(payload)
+    if not isinstance(plain, dict):
+        raise ValueError("planner response JSON root must be an object")
+    return plain
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 def _extract_json_object(text: str) -> str:
@@ -202,6 +236,10 @@ def _plan_from_payload(base_plan: ResearchPlan, payload: dict[str, Any], *, plan
             seen_titles.add(fallback.title.lower())
             break
 
+    failures = _plan_acceptance_failures(branches)
+    if failures:
+        raise ValueError("; ".join(failures[:5]))
+
     branches = _raise_branch_source_floor(branches, MINIMUM_SOURCE_TARGET)
     return ResearchPlan(
         question=base_plan.question,
@@ -238,6 +276,29 @@ def _branch_from_payload(base_plan: ResearchPlan, index: int, row: dict[str, Any
         required_terms=required_terms,
         completion_criteria=completion[:8],
     )
+
+
+def _plan_acceptance_failures(branches: list[ResearchBranch]) -> list[str]:
+    failures: list[str] = []
+    for branch in branches:
+        texts = [
+            ("title", branch.title),
+            ("objective", branch.objective),
+            *[(f"query {index}", query) for index, query in enumerate(branch.queries, start=1)],
+            *[(f"required term {index}", term) for index, term in enumerate(branch.required_terms, start=1)],
+            *[
+                (f"completion criterion {index}", criterion)
+                for index, criterion in enumerate(branch.completion_criteria, start=1)
+            ],
+        ]
+        for label, text in texts:
+            match = PLACEHOLDER_RE.search(text)
+            if match:
+                failures.append(
+                    f"LLM planning enrichment rejected: branch {branch.id} {label} contains unresolved placeholder {match.group(0)!r}"
+                )
+                break
+    return failures
 
 
 def _criteria_from_guidance(planning_guidance: str) -> list[str]:
@@ -502,6 +563,20 @@ def _acceptance_criteria(
 
 def _queries(row: dict[str, Any], question: str, title: str, objective: str) -> list[str]:
     raw = _string_list_field(row, "queries")
+    if contains_cjk(f"{question} {title} {objective}"):
+        topic_chunks = cjk_content_chunks(question)
+        title_chunks = cjk_content_chunks(title)
+        objective_chunks = cjk_content_chunks(objective)
+        candidates = raw + [
+            title,
+            " ".join(_dedupe(topic_chunks[:3] + title_chunks[:4])),
+            " ".join(_dedupe(topic_chunks[:3] + objective_chunks[:4])),
+        ]
+        queries = [query for query in _dedupe(candidates) if len(ordered_terms(query)) >= 1]
+        if len(queries) < 2:
+            queries.append(question)
+        return queries[:MAX_QUERIES_PER_BRANCH]
+
     topic_terms = " ".join(ordered_terms(question)[:10])
     candidates = raw + [
         f"{question} {title}",
@@ -516,9 +591,53 @@ def _queries(row: dict[str, Any], question: str, title: str, objective: str) -> 
 
 def _required_terms(row: dict[str, Any], title: str, objective: str, question: str) -> list[str]:
     raw = _string_list_field(row, "required_terms")
-    terms = raw + ordered_terms(title + " " + objective + " " + question)[:MAX_REQUIRED_TERMS]
-    cleaned = [term for term in _dedupe(terms) if len(term.strip()) >= 3]
-    return cleaned[:MAX_REQUIRED_TERMS] or ordered_terms(question)[:MAX_REQUIRED_TERMS]
+    if raw:
+        cleaned = _clean_required_terms(raw)
+        if cleaned:
+            return cleaned[:MAX_REQUIRED_TERMS]
+    fallback = _fallback_required_terms(title=title, objective=objective, question=question)
+    return fallback[:MAX_REQUIRED_TERMS]
+
+
+def _clean_required_terms(raw_terms: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for term in raw_terms:
+        normalized = re.sub(r"\s+", " ", term).strip(" .:;,-")
+        if not normalized:
+            continue
+        if contains_cjk(normalized):
+            cleaned.extend(cjk_content_chunks(normalized) or [normalized])
+            continue
+        terms = ordered_terms(normalized)
+        if len(terms) >= 2 or _is_high_information_single_term(normalized, terms):
+            cleaned.append(normalized)
+    return _dedupe(cleaned)
+
+
+def _is_high_information_single_term(raw: str, terms: list[str]) -> bool:
+    if len(terms) != 1:
+        return False
+    token = terms[0]
+    if re.search(r"[A-Z]{2,}|[A-Z][a-z]+[A-Z]", raw):
+        return True
+    return len(token) >= 12
+
+
+def _fallback_required_terms(*, title: str, objective: str, question: str) -> list[str]:
+    if contains_cjk(f"{title} {objective} {question}"):
+        chunks = cjk_content_chunks(f"{title} {objective}") or cjk_content_chunks(question)
+        return _dedupe(chunks)[:MAX_REQUIRED_TERMS]
+
+    seed_terms = ordered_terms(f"{title} {objective}") or ordered_terms(question)
+    phrases: list[str] = []
+    for size in (3, 2):
+        if len(seed_terms) < size:
+            continue
+        for index in range(0, len(seed_terms) - size + 1):
+            phrases.append(" ".join(seed_terms[index : index + size]))
+    if not phrases and seed_terms:
+        phrases = [term for term in seed_terms if len(term) >= 10]
+    return _dedupe(phrases) or _dedupe(ordered_terms(question)[:MAX_REQUIRED_TERMS])
 
 
 def _source_requirements(payload: dict[str, Any]) -> list[SourceRequirement]:

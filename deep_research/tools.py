@@ -6,9 +6,9 @@ from urllib.parse import urlsplit
 
 from langchain.tools import BaseTool, tool
 from langchain_experimental.utilities import PythonREPL
-from tavily import TavilyClient
 
 from deep_research.artifacts import RunArtifacts
+from deep_research.acquisition import TavilySearchClientPool
 from deep_research.models import Metrics
 from deep_research.progress import ActivityLog, ProgressCallback, progress_line
 from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
@@ -37,7 +37,7 @@ class ToolContext:
 
     def __post_init__(self) -> None:
         if self.search_client is None:
-            self.search_client = TavilyClient(api_key=self.settings.tavily_api_key)
+            self.search_client = TavilySearchClientPool(self.settings)
         if self.scraper is None:
             self.scraper = PlaywrightScraper()
 

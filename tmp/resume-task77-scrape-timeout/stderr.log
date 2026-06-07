@@ -1,0 +1,25 @@
+node:events:486
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: EPIPE: broken pipe, write
+    at Socket._write (node:internal/net:75:18)
+    at writeOrBuffer (node:internal/streams/writable:570:12)
+    at _write (node:internal/streams/writable:499:10)
+    at Writable.write (node:internal/streams/writable:508:10)
+    at PipeTransport.send (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\server\utils\pipeTransport.js:52:21)
+    at dispatcherConnection.onmessage (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\cli\driver.js:60:59)
+    at DispatcherConnection.sendCreate (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\server\dispatchers\dispatcher.js:181:10)
+    at new Dispatcher (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\server\dispatchers\dispatcher.js:69:23)
+    at new BrowserTypeDispatcher (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\server\dispatchers\browserTypeDispatcher.js:29:5)
+    at new PlaywrightDispatcher (C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver\package\lib\server\dispatchers\playwrightDispatcher.js:39:22)
+Emitted 'error' event on Socket instance at:
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  errno: -4047,
+  syscall: 'write',
+  code: 'EPIPE'
+}
+
+Node.js v24.14.1

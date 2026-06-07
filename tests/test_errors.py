@@ -33,6 +33,20 @@ def test_classify_groq_tpm_error_as_token_budget() -> None:
     assert "DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT" in failure.suggested_action
 
 
+def test_classify_groq_tpm_retry_window_as_retryable_rate_limit() -> None:
+    exc = RuntimeError(
+        "Error code: 429 - Rate limit reached for model `openai/gpt-oss-20b` "
+        "on tokens per minute (TPM): Limit 8000, Used 4972, Requested 6862. "
+        "Please try again in 28.755s."
+    )
+
+    failure = classify_exception(exc)
+
+    assert failure.category == "quota_or_rate_limit"
+    assert failure.retryable is True
+    assert failure.retry_after_seconds == 29
+
+
 def test_classify_tool_call_parse_error() -> None:
     exc = RuntimeError("Failed to parse tool call arguments as JSON: tool_use_failed")
 

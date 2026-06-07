@@ -4,7 +4,7 @@ import argparse
 import inspect
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -34,6 +34,15 @@ class DeepResearchBenchTask:
 
 Runner = Callable[[str, Settings], ResearchRunResult]
 ProxyJudge = Callable[[dict[str, Any]], dict[str, Any]]
+
+BENCHMARK_SOURCE_BLOCK_PATTERNS = (
+    r"\bdeep[_-]?research[_-]?bench\b",
+    r"\bdeepresearch[_-]?bench\b",
+    r"\bdeepresearch[_-]?bench[_-]?reference\b",
+    r"\bquery\.jsonl\b",
+    r"\breference\.jsonl\b",
+    r"\bcriteria\.jsonl\b",
+)
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,7 @@ def generate_raw_submission(
 ) -> Path:
     tasks = load_benchmark_tasks(benchmark_dir, language=language, limit=limit, ids=ids)
     criteria_by_id = load_criteria_by_id(benchmark_dir) if include_criteria_guidance else {}
+    benchmark_settings = _benchmark_safe_settings(settings)
     output_path = benchmark_dir / "data" / "test_data" / "raw_data" / f"{model_name}.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     completed = _completed_ids(output_path) if resume_existing else set()
@@ -114,7 +124,7 @@ def generate_raw_submission(
                 continue
             writing_guidance = _criteria_guidance(criteria_by_id.get(task.id))
             try:
-                result = _run_task(runner, task.prompt, settings, writing_guidance=writing_guidance)
+                result = _run_task(runner, task.prompt, benchmark_settings, writing_guidance=writing_guidance)
                 article = result.report_path.read_text(encoding="utf-8", errors="replace")
             except ResearchRunError as exc:
                 article = _failed_article(task, exc)
@@ -789,7 +799,7 @@ def _without_fact_sources(article: str) -> str:
 
 
 def _strip_fact_citations(text: str) -> str:
-    return re.sub(r"\[([0-9][0-9,\s]*)\]", "", text)
+    return re.sub(r"\[([0-9][0-9,;\s]*)\]", "", text)
 
 
 def _source_list_consistency_score(
@@ -1542,18 +1552,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-usable-sources", type=int, default=None)
     parser.add_argument("--max-search-queries", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=None)
-    parser.add_argument("--no-llm-planning", action="store_true")
-    parser.add_argument("--no-llm-synthesis", action="store_true")
-    parser.add_argument("--no-semantic-verification", action="store_true")
+    parser.add_argument("--max-followup-queries-per-branch", type=int, default=None)
+    parser.add_argument("--no-llm-planning", action="store_true", default=None)
+    parser.add_argument("--no-llm-synthesis", action="store_true", default=None)
+    parser.add_argument("--no-semantic-verification", action="store_true", default=None)
     parser.add_argument("--semantic-evidence-max-llm-cards", type=int, default=None)
-    parser.add_argument("--allow-failed-verification", action="store_true")
-    parser.add_argument("--no-model-fallbacks", action="store_true")
+    parser.add_argument("--allow-failed-verification", action="store_true", default=None)
+    parser.add_argument("--no-model-fallbacks", action="store_true", default=None)
     parser.add_argument("--provider-retry-attempts", type=int, default=None)
     parser.add_argument("--provider-retry-max-wait-seconds", type=int, default=None)
     parser.add_argument("--model-request-timeout-seconds", type=int, default=None)
     parser.add_argument("--model-max-output-tokens", type=int, default=None)
     parser.add_argument("--scrape-timeout-ms", type=int, default=None)
     parser.add_argument("--scrape-retries", type=int, default=None)
+    parser.add_argument("--max-browser-scrapes-per-query", type=int, default=None)
     parser.add_argument(
         "--score-proxy",
         action="store_true",
@@ -1665,19 +1677,25 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         min_usable_sources=args.min_usable_sources,
         max_search_queries=args.max_search_queries,
         max_candidates=args.max_candidates,
-        llm_planning=not args.no_llm_planning,
-        llm_synthesis=not args.no_llm_synthesis,
-        semantic_verification=not args.no_semantic_verification,
+        max_followup_queries_per_branch=args.max_followup_queries_per_branch,
+        llm_planning=_enabled_unless_disabled(args.no_llm_planning),
+        llm_synthesis=_enabled_unless_disabled(args.no_llm_synthesis),
+        semantic_verification=_enabled_unless_disabled(args.no_semantic_verification),
         semantic_evidence_max_llm_cards=args.semantic_evidence_max_llm_cards,
         allow_failed_verification=args.allow_failed_verification,
-        model_fallbacks=not args.no_model_fallbacks,
+        model_fallbacks=_enabled_unless_disabled(args.no_model_fallbacks),
         provider_retry_attempts=args.provider_retry_attempts,
         provider_retry_max_wait_seconds=args.provider_retry_max_wait_seconds,
         model_request_timeout_seconds=args.model_request_timeout_seconds,
         model_max_output_tokens=args.model_max_output_tokens,
         scrape_timeout_ms=args.scrape_timeout_ms,
         scrape_retries=args.scrape_retries,
+        max_browser_scrapes_per_query=args.max_browser_scrapes_per_query,
     )
+
+
+def _enabled_unless_disabled(flag_value: bool | None) -> bool | None:
+    return None if flag_value is None else not flag_value
 
 
 def _planning_audit_settings_from_args(args: argparse.Namespace) -> Settings:
@@ -1745,6 +1763,15 @@ def _run_task(
     if "writing_guidance" in signature.parameters:
         return runner(prompt, settings, writing_guidance=writing_guidance)
     return runner(prompt, settings)
+
+
+def _benchmark_safe_settings(settings: Settings) -> Settings:
+    existing = tuple(settings.blocked_source_patterns)
+    merged: list[str] = []
+    for pattern in [*existing, *BENCHMARK_SOURCE_BLOCK_PATTERNS]:
+        if pattern not in merged:
+            merged.append(pattern)
+    return replace(settings, blocked_source_patterns=tuple(merged))
 
 
 def _criteria_guidance(criteria: dict | None) -> str:

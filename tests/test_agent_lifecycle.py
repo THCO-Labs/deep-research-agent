@@ -104,6 +104,31 @@ def test_resume_from_coverage_checkpoint_reloads_source_texts_for_verification(
     assert verification["source_support_score"] >= 0.35
 
 
+def test_resume_from_read_sources_checkpoint_reloads_source_texts_for_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("deep_research.research_graph.acquire_sources", fake_acquire_sources)
+    settings = _settings(tmp_path)
+    result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
+    checkpoint_path = result.run_dir / "checkpoints" / "read_sources.json"
+    latest_path = result.run_dir / "checkpoints" / "latest.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["checkpoint_phase"] = "read_sources"
+    checkpoint.pop("evidence_cards", None)
+    checkpoint.pop("coverage_matrix", None)
+    checkpoint.pop("draft_report", None)
+    checkpoint.pop("verification", None)
+    latest_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    resumed = resume_research(result.run_dir.name, settings, progress_mode="quiet")
+
+    metrics = json.loads(resumed.metrics_path.read_text(encoding="utf-8"))
+    evidence_lines = (resumed.run_dir / "evidence_cards.jsonl").read_text(encoding="utf-8").splitlines()
+    assert metrics["raw_evidence_card_count"] >= 17
+    assert len(evidence_lines) >= 7
+
+
 def test_resume_entry_point_continues_after_checkpoint_phase(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     checkpoint_dir = run_dir / "checkpoints"

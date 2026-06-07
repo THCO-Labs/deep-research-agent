@@ -25,6 +25,84 @@ LANGUAGE_ALIGNMENT_THRESHOLD = 0.80
 REPORT_DEPTH_THRESHOLD = 0.45
 CRITERIA_RICH_REPORT_DEPTH_THRESHOLD = 0.90
 CITED_SOURCE_ALIGNMENT_THRESHOLD = 1.0
+CRITERION_EVALUATOR_TERMS = frozenset(
+    {
+        "assess",
+        "assesses",
+        "assessment",
+        "clearly",
+        "consider",
+        "considers",
+        "consistently",
+        "criteria",
+        "criterion",
+        "evaluate",
+        "evaluates",
+        "evaluation",
+        "explained",
+        "explains",
+        "quality",
+        "report",
+        "article",
+        "text",
+        "terms",
+        "employ",
+        "ensure",
+        "maintain",
+        "overall",
+        "use",
+        "used",
+        "whether",
+    }
+)
+CRITERION_WRITING_QUALITY_TERMS = frozenset(
+    {
+        "accessibility",
+        "accessibly",
+        "active",
+        "audience",
+        "balance",
+        "bolding",
+        "clarity",
+        "cohesion",
+        "conciseness",
+        "concise",
+        "correctness",
+        "digressions",
+        "engagement",
+        "engaging",
+        "fluency",
+        "formatting",
+        "flow",
+        "grammatical",
+        "headings",
+        "italics",
+        "jargon",
+        "logical",
+        "navigation",
+        "novelty",
+        "originality",
+        "organization",
+        "paragraph",
+        "paragraphing",
+        "paragraphs",
+        "passive",
+        "precision",
+        "precise",
+        "readability",
+        "redundancy",
+        "sentence",
+        "sentences",
+        "style",
+        "terminology",
+        "tone",
+        "transitions",
+        "viewpoint",
+        "viewpoints",
+        "voice",
+    }
+)
+CRITERION_RUBRIC_TERMS = CRITERION_EVALUATOR_TERMS | CRITERION_WRITING_QUALITY_TERMS
 
 
 def verify_report_v2(
@@ -220,23 +298,56 @@ def _source_support_checks(report: str, source_texts: dict[int, str]) -> tuple[l
                     "missing_terms": sorted(claim_terms - source_terms)[:20],
                 }
             )
-        for source_id in cited_ids:
-            individual_source_terms = source_terms_by_id.get(source_id, set())
-            individual_score = round(len(claim_terms & individual_source_terms) / max(len(claim_terms), 1), 4)
-            checks.append(individual_score)
-            if individual_score < INDIVIDUAL_CITATION_SUPPORT_THRESHOLD:
-                weak.append(
-                    {
-                        "paragraph": paragraph[:240],
-                        "cited_source_ids": [source_id],
-                        "support_kind": "individual_citation",
-                        "support_score": individual_score,
-                        "missing_terms": sorted(claim_terms - individual_source_terms)[:20],
-                    }
-                )
+        for context in _citation_contexts(paragraph):
+            context_terms = content_terms(_strip_citations(context))
+            if len(context_terms) < 5:
+                continue
+            for source_id in sorted(set(parse_inline_citations(context))):
+                individual_source_terms = source_terms_by_id.get(source_id, set())
+                individual_score = round(len(context_terms & individual_source_terms) / max(len(context_terms), 1), 4)
+                checks.append(individual_score)
+                if individual_score < INDIVIDUAL_CITATION_SUPPORT_THRESHOLD:
+                    weak.append(
+                        {
+                            "paragraph": context[:240],
+                            "cited_source_ids": [source_id],
+                            "support_kind": "individual_citation",
+                            "support_score": individual_score,
+                            "missing_terms": sorted(context_terms - individual_source_terms)[:20],
+                        }
+                    )
     if not checks:
         return weak, 0.0
     return weak, round(sum(checks) / len(checks), 4)
+
+
+def _citation_contexts(paragraph: str) -> list[str]:
+    contexts: list[str] = []
+    for match in re.finditer(r"\[[0-9][0-9,;\s]*\]", paragraph):
+        start = _previous_sentence_boundary(paragraph, match.start())
+        end = _next_sentence_boundary(paragraph, match.end())
+        context = paragraph[start:end].strip()
+        if context:
+            contexts.append(context)
+    return contexts
+
+
+def _previous_sentence_boundary(text: str, offset: int) -> int:
+    candidates = [0]
+    for pattern in (". ", "? ", "! ", "\n", " - "):
+        index = text.rfind(pattern, 0, offset)
+        if index != -1:
+            candidates.append(index + len(pattern))
+    return max(candidates)
+
+
+def _next_sentence_boundary(text: str, offset: int) -> int:
+    candidates = [len(text)]
+    for pattern in (". ", "? ", "! ", "\n", " - "):
+        index = text.find(pattern, offset)
+        if index != -1:
+            candidates.append(index + len(pattern.rstrip()))
+    return min(candidates)
 
 
 def _answer_coverage_score(report: str, plan: ResearchPlan) -> float:
@@ -278,7 +389,10 @@ def _criteria_coverage(report: str, plan: ResearchPlan) -> tuple[float, list[dic
             )
     if not scores:
         return 1.0, []
-    return round(sum(scores) / len(scores), 4), undercovered
+    aggregate = round(sum(scores) / len(scores), 4)
+    if not undercovered:
+        aggregate = max(aggregate, CRITERIA_COVERAGE_THRESHOLD)
+    return aggregate, undercovered
 
 
 def _report_level_criteria(criteria: list[str]) -> list[str]:
@@ -292,6 +406,8 @@ def _report_level_criteria(criteria: list[str]) -> list[str]:
             continue
         if _looks_like_internal_runtime_criterion(cleaned):
             continue
+        if _looks_like_writing_quality_criterion(cleaned):
+            continue
         selected.append(cleaned)
     return selected
 
@@ -300,6 +416,7 @@ def _clean_criterion(criterion: str) -> str:
     cleaned = re.sub(r"\s+", " ", criterion).strip()
     cleaned = re.sub(r"(?i)^cover this task-specific criterion in synthesis:\s*", "", cleaned).strip()
     cleaned = re.sub(r"(?i)\(\s*weight\s*:\s*[^)]*\)", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^task-specific\s+[^:]{1,80}\s+criterion:\s*", "", cleaned).strip()
     return cleaned.strip(" .:")
 
 
@@ -307,15 +424,33 @@ def _looks_like_internal_runtime_criterion(criterion: str) -> bool:
     return bool(
         re.search(
             r"\b(?:evidence cards?|inline citations?|factual paragraphs?|verification passes?|quality gates?|"
-            r"citation|citations|source list|sources section|report answers?|answers? the question)\b",
+            r"citation|citations|cited sources?|traceable|data points?|source list|sources section|"
+            r"report answers?|answers? the question)\b",
             criterion,
             flags=re.I,
         )
     )
 
 
+def _looks_like_writing_quality_criterion(criterion: str) -> bool:
+    terms = content_terms(criterion)
+    if not terms:
+        return False
+    normalized = criterion.lower()
+    if re.search(r"\b(?:readability|writing|formatting|style|fluency)\s+criterion\b", normalized):
+        return True
+    writing_hits = terms & CRITERION_WRITING_QUALITY_TERMS
+    evaluator_hits = terms & CRITERION_EVALUATOR_TERMS
+    content_terms_after_filter = terms - CRITERION_RUBRIC_TERMS
+    if len(writing_hits) >= 2 and evaluator_hits:
+        return True
+    if len(writing_hits) >= 2 and len(content_terms_after_filter) <= 2:
+        return True
+    return len(writing_hits) / max(len(terms), 1) >= 0.28
+
+
 def _criterion_terms(criterion: str) -> set[str]:
-    return content_terms(criterion)
+    return content_terms(criterion) - CRITERION_RUBRIC_TERMS
 
 
 def _coverage_point_is_present(term: str, report_terms: set[str]) -> bool:
@@ -485,7 +620,9 @@ def _target_heading_count(plan: ResearchPlan, *, criteria_rich: bool) -> int:
 
 def _criteria_rich_plan(plan: ResearchPlan) -> bool:
     return len(_report_level_criteria(plan.acceptance_criteria)) >= 8 or any(
-        "task-specific" in criterion.lower() and "criterion" in criterion.lower()
+        "task-specific" in criterion.lower()
+        and "criterion" in criterion.lower()
+        and not _looks_like_writing_quality_criterion(_clean_criterion(criterion))
         for criterion in plan.acceptance_criteria
     )
 
@@ -534,10 +671,8 @@ def _topic_guard_terms(plan: ResearchPlan) -> set[str]:
 def _opening_answer_text(body: str) -> str:
     paragraphs = []
     for paragraph in re.split(r"\n\s*\n", body):
-        text = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
+        text = _substantive_paragraph_text(paragraph)
         if not text:
-            continue
-        if text.startswith("#") or text.startswith("|"):
             continue
         paragraphs.append(text)
         if len(paragraphs) >= 1:
@@ -724,8 +859,8 @@ def _paragraphs_without_citations(markdown: str) -> list[str]:
     body = _without_sources(markdown)
     unsupported: list[str] = []
     for paragraph in re.split(r"\n\s*\n", body):
-        text = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
-        if not text or text.startswith("#") or text.startswith("|"):
+        text = _substantive_paragraph_text(paragraph)
+        if not text:
             continue
         if len(text) < 80:
             continue
@@ -738,12 +873,28 @@ def _paragraphs_with_citations(markdown: str) -> list[str]:
     body = _without_sources(markdown)
     cited: list[str] = []
     for paragraph in re.split(r"\n\s*\n", body):
-        text = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
-        if not text or text.startswith("#") or text.startswith("|"):
+        text = _substantive_paragraph_text(paragraph)
+        if not text:
             continue
         if parse_inline_citations(text):
             cited.append(text)
     return cited
+
+
+def _substantive_paragraph_text(paragraph: str) -> str:
+    lines: list[str] = []
+    for line in paragraph.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("|"):
+            continue
+        if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
+            continue
+        if re.fullmatch(r"\*?\s*(?:end of report|end)\s*\*?", stripped, flags=re.I):
+            continue
+        lines.append(stripped)
+    return " ".join(lines)
 
 
 def _without_sources(markdown: str) -> str:
@@ -752,4 +903,4 @@ def _without_sources(markdown: str) -> str:
 
 
 def _strip_citations(text: str) -> str:
-    return re.sub(r"\[([0-9][0-9,\s]*)\]", "", text)
+    return re.sub(r"\[([0-9][0-9,;\s]*)\]", "", text)

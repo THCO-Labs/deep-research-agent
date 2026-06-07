@@ -50,6 +50,7 @@ class Settings:
     min_usable_sources: int = MINIMUM_SOURCE_TARGET
     max_search_queries: int = 12
     max_candidates: int = 80
+    max_followup_queries_per_branch: int = 12
     min_source_words: int = 250
     min_relevant_chunks: int = 1
     search_depth: str = "advanced"
@@ -74,6 +75,8 @@ class Settings:
     scrape_char_limit: int = 15_000
     scrape_timeout_ms: int = 20_000
     scrape_retries: int = 1
+    max_browser_scrapes_per_query: int = 4
+    blocked_source_patterns: tuple[str, ...] = field(default_factory=tuple)
     tool_excerpt_char_limit: int = 2_500
     precollect_sources: bool = True
     model_fallbacks: bool = True
@@ -106,6 +109,7 @@ class Settings:
         min_usable_sources: int | None = None,
         max_search_queries: int | None = None,
         max_candidates: int | None = None,
+        max_followup_queries_per_branch: int | None = None,
         min_source_words: int | None = None,
         min_relevant_chunks: int | None = None,
         search_depth: str | None = None,
@@ -130,6 +134,8 @@ class Settings:
         scrape_char_limit: int | None = None,
         scrape_timeout_ms: int | None = None,
         scrape_retries: int | None = None,
+        max_browser_scrapes_per_query: int | None = None,
+        blocked_source_patterns: tuple[str, ...] | None = None,
         precollect_sources: bool | None = None,
         model_fallbacks: bool | None = None,
         provider_retry_attempts: int | None = None,
@@ -151,7 +157,10 @@ class Settings:
         google_api_key = google_api_keys[0] if google_api_keys else ""
         groq_api_key = groq_api_keys[0] if groq_api_keys else ""
         openrouter_api_key = openrouter_api_keys[0] if openrouter_api_keys else ""
-        tavily_api_keys = _collect_numbered_env_values("TAVILY_API_KEY")
+        tavily_api_keys = _collect_numbered_env_values(
+            "TAVILY_API_KEY",
+            extra_names=_semantic_api_key_env_names("TAVILY"),
+        )
         tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip()
         if not tavily_api_key and tavily_api_keys:
             tavily_api_key = tavily_api_keys[0]
@@ -199,6 +208,9 @@ class Settings:
             if max_search_queries is not None
             else int(os.environ.get("DEEP_RESEARCH_MAX_SEARCH_QUERIES") or depth["max_search_queries"]),
             max_candidates=resolved_max_candidates,
+            max_followup_queries_per_branch=max_followup_queries_per_branch
+            if max_followup_queries_per_branch is not None
+            else int(os.environ.get("DEEP_RESEARCH_MAX_FOLLOWUP_QUERIES_PER_BRANCH") or "12"),
             min_source_words=min_source_words
             if min_source_words is not None
             else int(os.environ.get("DEEP_RESEARCH_MIN_SOURCE_WORDS") or depth["min_source_words"]),
@@ -294,6 +306,12 @@ class Settings:
             scrape_retries=scrape_retries
             if scrape_retries is not None
             else int(os.environ.get("DEEP_RESEARCH_SCRAPE_RETRIES") or _default_scrape_retries(mode)),
+            max_browser_scrapes_per_query=max_browser_scrapes_per_query
+            if max_browser_scrapes_per_query is not None
+            else int(os.environ.get("DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY") or "4"),
+            blocked_source_patterns=blocked_source_patterns
+            if blocked_source_patterns is not None
+            else _split_env_list(os.environ.get("DEEP_RESEARCH_BLOCKED_SOURCE_PATTERNS", "")),
             tool_excerpt_char_limit=int(
                 os.environ.get("DEEP_RESEARCH_TOOL_EXCERPT_CHAR_LIMIT") or _default_excerpt_limit(resolved_provider)
             ),
@@ -394,6 +412,13 @@ class Settings:
             raise ConfigError("scrape_timeout_ms must be at least 1000.")
         if self.scrape_retries < 1:
             raise ConfigError("scrape_retries must be at least 1.")
+        if self.max_browser_scrapes_per_query < 0:
+            raise ConfigError("max_browser_scrapes_per_query must be zero or greater.")
+        for pattern in self.blocked_source_patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ConfigError(f"Invalid blocked source pattern {pattern!r}: {exc}") from exc
         if self.tool_excerpt_char_limit < 500:
             raise ConfigError("tool_excerpt_char_limit must be at least 500.")
         if self.min_usable_sources < MINIMUM_SOURCE_TARGET:
@@ -402,6 +427,8 @@ class Settings:
             raise ConfigError("max_search_queries must be at least 1.")
         if self.max_candidates < self.min_usable_sources:
             raise ConfigError("max_candidates must be at least min_usable_sources.")
+        if self.max_followup_queries_per_branch < 1:
+            raise ConfigError("max_followup_queries_per_branch must be at least 1.")
         if self.min_source_words < 40:
             raise ConfigError("min_source_words must be at least 40.")
         if self.min_relevant_chunks < 1:
@@ -571,10 +598,14 @@ def _env_model_override(name: str, *, provider_explicit: bool) -> str | None:
     return os.environ.get(name)
 
 
-def _collect_numbered_env_values(base_name: str) -> tuple[str, ...]:
+def _collect_numbered_env_values(base_name: str, *, extra_names: Iterable[str] = ()) -> tuple[str, ...]:
     values: list[str] = []
     seen: set[str] = set()
-    for name in [*_numbered_env_names(base_name), *_list_env_names(base_name)]:
+    ordered_extra_names = []
+    for name in extra_names:
+        if name not in ordered_extra_names:
+            ordered_extra_names.append(name)
+    for name in [*_numbered_env_names(base_name), *_list_env_names(base_name), *ordered_extra_names]:
         raw_value = os.environ.get(name, "").strip()
         for value in _split_env_value_pool(raw_value):
             if value and value not in seen:
@@ -629,3 +660,13 @@ def _list_env_names(base_name: str) -> list[str]:
         if candidate in os.environ:
             names.append(candidate)
     return names
+
+
+def _semantic_api_key_env_names(service_name: str) -> tuple[str, ...]:
+    service = service_name.upper()
+    names = []
+    for name in os.environ:
+        normalized = name.upper()
+        if service in normalized and "API" in normalized and "KEY" in normalized:
+            names.append(name)
+    return tuple(sorted(names, key=lambda name: (not name.upper().startswith(service), name.upper())))

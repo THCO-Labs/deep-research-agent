@@ -8,7 +8,7 @@ from deep_research.models import SourceRecord, VerificationResult
 from deep_research.text_terms import term_set
 from deep_research.urls import canonicalize_url
 
-CITATION_RE = re.compile(r"\[([0-9][0-9,\s]*)\]")
+CITATION_RE = re.compile(r"\[([0-9][0-9,;\s]*)\]")
 SOURCE_LINE_RE = re.compile(r"^\[(\d+)\]\s+(.+?):\s+(https?://\S+)\s*$")
 SUPPORT_THRESHOLD = 0.28
 MIN_SUPPORT_TOKENS = 6
@@ -218,7 +218,7 @@ def _has_inline_citation(text: str) -> bool:
 
 def _citation_ids_from_match(raw_ids: str) -> list[int]:
     ids: list[int] = []
-    for part in raw_ids.split(","):
+    for part in re.split(r"[,;\s]+", raw_ids):
         stripped = part.strip()
         if stripped:
             ids.append(int(stripped))

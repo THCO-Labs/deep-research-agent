@@ -13,11 +13,13 @@ from deep_research.coverage import build_coverage_matrix
 from deep_research.guidance import format_criteria_guidance_block
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2, VerificationResultV2
 from deep_research.semantic import (
+    _load_json_object,
     apply_semantic_report_result,
     enrich_evidence_cards_with_semantics,
     verify_report_with_semantics,
 )
 from deep_research.semantic_planning import build_or_enrich_research_plan
+from deep_research.semantic_planning import _loads_json_object
 from deep_research.settings import Settings
 from deep_research.source_validation import validate_source_content
 from deep_research.synthesis import (
@@ -28,12 +30,13 @@ from deep_research.synthesis import (
     _repair_weak_citation_support,
     _synthesis_model_spec,
     _synthesis_prompt,
+    _synthesis_request_kwargs,
     _target_report_profile,
     build_report_blueprint,
     synthesize_report,
     synthesize_report_with_model,
 )
-from deep_research.verifier_v2 import _report_depth_score, verify_report_v2
+from deep_research.verifier_v2 import _report_depth_score, _report_level_criteria, verify_report_v2
 from deep_research.research_graph import _acquire_route, _coverage_route, _focus_terms_from_state, _verification_route
 
 
@@ -56,6 +59,42 @@ def test_generic_plan_handles_paragraph_length_medical_question() -> None:
     assert "hypertension" in all_queries.lower()
     assert "blood pressure" in branch_text.lower() or "pressure" in branch_text.lower()
     assert "urban heat" not in branch_text.lower()
+
+
+def test_generic_plan_uses_cjk_chunks_without_character_ngram_requirements() -> None:
+    question = (
+        "收集整理目前国际综合实力前十的保险公司的相关资料，横向比较各公司的融资情况、信誉度、"
+        "过往五年的增长幅度、实际分红、未来在中国发展潜力等维度，并为我评估出最有可能"
+        "在未来资产排名靠前的2-3家公司"
+    )
+
+    plan = build_research_plan(question)
+
+    assert len(plan.branches) >= 5
+    assert sum(branch.min_sources for branch in plan.branches) >= 17
+    all_required = [term for branch in plan.branches for term in branch.required_terms]
+    assert "保险公司" in all_required
+    assert "融资" in all_required
+    assert "实际分红" in all_required
+    assert "际综合实" not in all_required
+    assert "向比较各" not in all_required
+    assert all(question not in query for branch in plan.branches for query in branch.queries)
+
+
+def test_semantic_planning_json_loader_repairs_near_json() -> None:
+    payload = _loads_json_object(
+        """
+        {
+          audience: 'analyst',
+          branches: [
+            {title: 'Market context', objective: 'Find market context', queries: ['market context']}
+          ],
+        }
+        """
+    )
+
+    assert payload["audience"] == "analyst"
+    assert payload["branches"][0]["title"] == "Market context"
 
 
 def test_acquisition_trims_overlong_search_queries() -> None:
@@ -86,6 +125,8 @@ def test_acquisition_followup_queries_stay_evidence_neutral() -> None:
     assert "source credibility" in query_text
     assert "implementation" not in query_text
     assert "best practices" not in query_text
+    assert len(queries) > 4
+    assert any(query.endswith("source credibility") for query in queries)
 
 
 def test_tavily_key_pool_rotates_when_key_hits_usage_limit(monkeypatch) -> None:
@@ -178,6 +219,292 @@ def test_acquisition_uses_configured_scrape_timeout_and_emits_progress(tmp_path:
     assert len(result.sources) == 1
     assert any(message == "searching source candidates" for message, _ in progress_events)
     assert any(message.startswith("accepted source") for message, _ in progress_events)
+
+
+def test_acquisition_skips_configured_blocked_source_patterns(tmp_path: Path) -> None:
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            blocked_content = "benchmark prompt dataset reference row " * 50
+            accepted_content = (
+                "Need for closure is an epistemic motivation linked to fast belief formation, "
+                "misinformation acceptance, ambiguity reduction, evidence scrutiny, source evaluation, "
+                "confidence, and false belief acceptance. "
+            ) * 10
+            return {
+                "results": [
+                    {
+                        "url": "https://huggingface.co/datasets/example/deep_research_bench_eval",
+                        "title": "Deep Research Bench eval dataset",
+                        "content": blocked_content,
+                        "raw_content": blocked_content,
+                        "score": 0.99,
+                    },
+                    {
+                        "url": "https://example.com/need-for-closure-study",
+                        "title": "Need for closure and misinformation acceptance",
+                        "content": accepted_content,
+                        "raw_content": accepted_content,
+                        "score": 0.9,
+                    },
+                ]
+            }
+
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure shapes misinformation acceptance.",
+        queries=["need for closure misinformation acceptance evidence"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=20,
+        max_sources=17,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+        blocked_source_patterns=(r"deep[_-]?research[_-]?bench",),
+    )
+    progress_events: list[tuple[str, dict]] = []
+
+    result = acquire_sources(
+        question="What is the role of need for closure on misinformation acceptance?",
+        branches=[branch],
+        artifacts=ResearchArtifactsV2.create(tmp_path, "blocked source"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        progress_callback=lambda message, data: progress_events.append((message, data)),
+    )
+
+    assert [source.url for source in result.sources] == ["https://example.com/need-for-closure-study"]
+    assert len(result.candidates) == 1
+    assert any(message == "blocked source candidate" for message, _ in progress_events)
+
+
+def test_acquisition_respects_browser_fallback_budget(tmp_path: Path) -> None:
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            return {
+                "results": [
+                    {
+                        "url": "https://example.com/no-raw",
+                        "title": "Need for closure short snippet",
+                        "content": "short snippet without enough raw article content",
+                        "score": 0.8,
+                    }
+                ]
+            }
+
+    class UnexpectedScraper:
+        def fetch(self, url: str):  # pragma: no cover - budget should skip browser fallback.
+            raise AssertionError(f"unexpected browser scrape for {url}")
+
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure shapes misinformation acceptance.",
+        queries=["need for closure misinformation acceptance evidence"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=20,
+        max_sources=17,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+        max_browser_scrapes_per_query=0,
+    )
+    progress_events: list[tuple[str, dict]] = []
+
+    result = acquire_sources(
+        question="What is the role of need for closure on misinformation acceptance?",
+        branches=[branch],
+        artifacts=ResearchArtifactsV2.create(tmp_path, "browser budget"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        scraper=UnexpectedScraper(),
+        progress_callback=lambda message, data: progress_events.append((message, data)),
+    )
+
+    assert result.sources == []
+    assert result.candidates == []
+    assert any(message == "skipped source candidate" for message, _ in progress_events)
+
+
+def test_acquisition_followup_targets_only_missing_coverage_branches(tmp_path: Path) -> None:
+    searched_queries: list[str] = []
+
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            searched_queries.append(query)
+            raw_content = (
+                "Misinformation acceptance research examines need for closure, belief formation, "
+                "future research limitations, mixed evidence, boundary conditions, and uncertainty. "
+            ) * 10
+            return {
+                "results": [
+                    {
+                        "url": f"https://example.com/{len(searched_queries)}",
+                        "title": query,
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.9,
+                    }
+                ]
+            }
+
+    class UnexpectedScraper:
+        def fetch(self, url: str):  # pragma: no cover - raw Tavily content should bypass fetch.
+            raise AssertionError(f"unexpected scrape for {url}")
+
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="Completed mechanism branch",
+            objective="Already covered branch.",
+            queries=["completed branch should not run"],
+            min_sources=1,
+            required_terms=["need for closure"],
+        ),
+        ResearchBranch(
+            id="branch_2",
+            title="Missing limitations branch",
+            objective="Cover limitations and future research.",
+            queries=["need for closure misinformation limitations future research"],
+            min_sources=1,
+            required_terms=["limitations", "future research"],
+        ),
+    ]
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=20,
+        max_sources=17,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+    )
+    existing_source = SourceRecordV2(
+        id=1,
+        branch_id="branch_2",
+        title="Existing limitations source",
+        url="https://example.com/existing",
+        canonical_url="https://example.com/existing",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=100,
+        quality_score=0.8,
+        quality_label="strong",
+        quality_type="general_web",
+        relevance_score=0.8,
+    )
+
+    acquire_sources(
+        question="What is the role of need for closure on misinformation acceptance?",
+        branches=branches,
+        artifacts=ResearchArtifactsV2.create(tmp_path, "active branches"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        scraper=UnexpectedScraper(),
+        existing_sources=[existing_source],
+        existing_source_texts={1: "existing source text"},
+        active_branch_ids={"branch_2"},
+    )
+
+    assert searched_queries
+    assert "completed branch should not run" not in searched_queries
+    assert searched_queries[0] == "need for closure misinformation limitations future research"
+
+
+def test_acquisition_interleaves_missing_branch_followups(tmp_path: Path) -> None:
+    searched_queries: list[str] = []
+
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            searched_queries.append(query)
+            raw_content = (
+                "Need for closure, misinformation acceptance, mediators, limitations, future research, "
+                "source credibility, cognitive load, and evidence quality are discussed in context. "
+            ) * 10
+            return {
+                "results": [
+                    {
+                        "url": f"https://example.com/interleave-{len(searched_queries)}",
+                        "title": query,
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.9,
+                    }
+                ]
+            }
+
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="Mediators",
+            objective="Explain mediators.",
+            queries=["mediator query one", "mediator query two"],
+            min_sources=1,
+            required_terms=["source credibility", "cognitive load"],
+        ),
+        ResearchBranch(
+            id="branch_2",
+            title="Limitations",
+            objective="Explain limitations.",
+            queries=["limitations query one", "limitations query two"],
+            min_sources=1,
+            required_terms=["future research", "mixed evidence"],
+        ),
+    ]
+    existing_sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=branch.id,
+            title=f"Existing {branch.id}",
+            url=f"https://example.com/existing-{branch.id}",
+            canonical_url=f"https://example.com/existing-{branch.id}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=100,
+            quality_score=0.8,
+            quality_label="strong",
+            quality_type="general_web",
+            relevance_score=0.8,
+        )
+        for index, branch in enumerate(branches, start=1)
+    ]
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=20,
+        max_sources=17,
+        min_usable_sources=17,
+        max_followup_queries_per_branch=1,
+        search_depth="advanced",
+        allow_raw_content=True,
+    )
+
+    acquire_sources(
+        question="How does need for closure affect misinformation acceptance?",
+        branches=branches,
+        artifacts=ResearchArtifactsV2.create(tmp_path, "interleaved branches"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        existing_sources=existing_sources,
+        existing_source_texts={1: "existing one", 2: "existing two"},
+        active_branch_ids={"branch_1", "branch_2"},
+    )
+
+    assert searched_queries == ["mediator query one", "limitations query one"]
 
 
 def test_generic_plan_handles_food_question_without_topic_specific_branches() -> None:
@@ -340,6 +667,43 @@ def test_llm_semantic_planning_rejects_invalid_output_without_losing_fallback(tm
     assert sum(branch.min_sources for branch in result.plan.branches) >= 17
 
 
+def test_llm_semantic_planning_rejects_unresolved_placeholder_queries(tmp_path: Path) -> None:
+    planner = FakeSemanticJudge(
+        {
+            "audience": "financial analyst",
+            "report_outline": ["Ranking", "Comparison", "Sources"],
+            "branches": [
+                {
+                    "title": "Identify top global insurers",
+                    "objective": "Determine the strongest global insurers by assets and financial strength.",
+                    "queries": ["top global insurers by assets financial strength"],
+                    "min_sources": 4,
+                    "required_terms": ["global insurers", "financial strength"],
+                },
+                {
+                    "title": "Company metrics",
+                    "objective": "Collect financial metrics for each insurer.",
+                    "queries": ["Company X 2022 annual report", "Company X credit rating 2023"],
+                    "min_sources": 13,
+                    "required_terms": ["financing", "credit rating"],
+                },
+            ],
+        }
+    )
+    settings = Settings(project_root=tmp_path, out_dir=tmp_path, llm_planning=True)
+
+    result = build_or_enrich_research_plan(
+        "收集整理目前国际综合实力前十的保险公司的相关资料，横向比较各公司的融资情况、信誉度、过往五年的增长幅度、实际分红、未来在中国发展潜力等维度。",
+        settings=settings,
+        model=planner,
+    )
+
+    assert result.accepted is False
+    assert result.used_model is True
+    assert any("unresolved placeholder" in failure.lower() for failure in result.failures)
+    assert all("Company X" not in " ".join(branch.queries) for branch in result.plan.branches)
+
+
 def test_llm_semantic_planning_accepts_focused_single_branch_with_guidance(tmp_path: Path) -> None:
     planner = FakeSemanticJudge(
         {
@@ -372,6 +736,55 @@ def test_llm_semantic_planning_accepts_focused_single_branch_with_guidance(tmp_p
     assert len(result.plan.branches) == 1
     assert result.plan.branches[0].min_sources >= 17
     assert "Benchmark criterion" in planner.prompts[0]
+
+
+def test_llm_semantic_planning_does_not_append_title_words_to_required_terms(tmp_path: Path) -> None:
+    planner = FakeSemanticJudge(
+        {
+            "audience": "social psychology researcher",
+            "report_outline": ["Mechanisms", "Sources"],
+            "branches": [
+                {
+                    "title": "Mediating variables in misinformation acceptance",
+                    "objective": "Identify how need for closure can shape misinformation acceptance through intermediate variables.",
+                    "queries": ["need for closure misinformation mediating variables"],
+                    "min_sources": 17,
+                    "required_terms": [
+                        "mediating variables",
+                        "depth of processing",
+                        "source credibility assessment",
+                        "trust in sources",
+                        "emotional regulation",
+                        "anxiety",
+                        "cognitive load",
+                        "mediating",
+                        "variables",
+                        "explaining",
+                        "NFC",
+                        "impacts",
+                    ],
+                }
+            ],
+        }
+    )
+    settings = Settings(project_root=tmp_path, out_dir=tmp_path, llm_planning=True)
+
+    result = build_or_enrich_research_plan(
+        "What is the role of need for closure on misinformation acceptance?",
+        settings=settings,
+        model=planner,
+    )
+
+    terms = result.plan.branches[0].required_terms
+    lowered = {term.lower() for term in terms}
+    assert "depth of processing" in lowered
+    assert "source credibility assessment" in lowered
+    assert "nfc" in lowered
+    assert "mediating" not in lowered
+    assert "variables" not in lowered
+    assert "explaining" not in lowered
+    assert "impacts" not in lowered
+    assert "role" not in lowered
 
 
 def test_llm_semantic_planning_keeps_guidance_out_of_search_branches(tmp_path: Path) -> None:
@@ -634,6 +1047,39 @@ def test_source_validation_accepts_chinese_sentence_chunks() -> None:
     assert result.relevant_chunk_count >= 1
 
 
+def test_source_validation_accepts_translated_branch_source_context() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Top global insurers by assets",
+        objective="Identify the strongest global insurance companies by assets and financial strength.",
+        queries=["largest insurance companies worldwide by assets"],
+        min_sources=1,
+        required_terms=["global insurers", "assets", "financial strength"],
+    )
+    content = (
+        "A ranking of the largest insurance companies worldwide by total assets identifies major global insurers "
+        "and explains how asset scale, financial strength, and market position differ across companies. "
+        "The report compares life insurers and diversified insurance groups across regions. "
+    ) * 6
+
+    result = validate_source_content(
+        title="Largest insurance companies worldwide by assets",
+        content=content,
+        branch=branch,
+        min_words=40,
+        min_relevant_chunks=1,
+        question=(
+            "\u6536\u96c6\u6574\u7406\u76ee\u524d\u56fd\u9645\u7efc\u5408\u5b9e\u529b\u524d\u5341"
+            "\u7684\u4fdd\u9669\u516c\u53f8\u7684\u76f8\u5173\u8d44\u6599\uff0c\u5e76\u6a2a"
+            "\u5411\u6bd4\u8f83\u878d\u8d44\u3001\u4fe1\u8a89\u5ea6\u3001\u589e\u957f"
+            "\u3001\u5206\u7ea2\u548c\u4e2d\u56fd\u53d1\u5c55\u6f5c\u529b\u3002"
+        ),
+    )
+
+    assert result.usable is True
+    assert result.relevance_score >= 0.30
+
+
 def test_build_evidence_cards_splits_chinese_sentences() -> None:
     branch = ResearchBranch(
         id="branch_1",
@@ -676,6 +1122,51 @@ def test_build_evidence_cards_splits_chinese_sentences() -> None:
     assert cards
     assert "中性粒细胞" in cards[0].claim
     assert "脑缺血急性期" in cards[0].claim
+
+
+def test_evidence_builder_accepts_translated_branch_context() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Global insurance companies by assets",
+        objective="Identify the largest insurance companies worldwide by assets.",
+        queries=["top insurance companies by assets"],
+        min_sources=1,
+        required_terms=["global insurance companies", "insurance companies assets"],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Largest global insurers by assets",
+        url="https://example.com/insurers-assets",
+        canonical_url="https://example.com/insurers-assets",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="industry",
+        relevance_score=0.8,
+    )
+    text = (
+        "A ranking of global insurance companies by total assets identifies major insurers worldwide "
+        "and compares their asset scale, market position, and balance sheet strength across regions."
+    )
+
+    cards = build_evidence_cards(
+        branches=[branch],
+        sources=[source],
+        source_texts={1: text},
+        question=(
+            "\u6536\u96c6\u6574\u7406\u76ee\u524d\u56fd\u9645\u7efc\u5408\u5b9e\u529b"
+            "\u524d\u5341\u7684\u4fdd\u9669\u516c\u53f8\u7684\u76f8\u5173\u8d44\u6599"
+        ),
+    )
+
+    assert cards
+    assert cards[0].branch_id == branch.id
+    assert "global insurance companies" in cards[0].claim.lower()
 
 
 def test_source_validation_rejects_generic_content_that_misses_original_question() -> None:
@@ -1037,6 +1528,178 @@ def test_coverage_accepts_strong_semantic_evidence_without_exact_phrase_matches(
     assert coverage.complete is True
     assert coverage.missing_branches == []
     assert any("semantic evidence sufficiency" in point for point in coverage.branches[0].covered_points)
+
+
+def test_coverage_allows_evidence_limited_synthesis_when_direct_cards_are_sparse() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Nuanced relationship and evidence limits",
+        objective="Synthesize what available evidence can and cannot establish about the relationship.",
+        queries=["relationship evidence limitations"],
+        min_sources=2,
+        required_terms=[
+            "relationship evidence",
+            "methodological limitations",
+            "future studies",
+            "boundary conditions",
+            "alternative explanations",
+            "context dependence",
+        ],
+    )
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=branch.id,
+            title=f"Limited Source {index}",
+            url=f"https://example.com/limited/{index}",
+            canonical_url=f"https://example.com/limited/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=500,
+            quality_score=0.88,
+            quality_label="good",
+            quality_type="academic",
+            relevance_score=0.72,
+        )
+        for index in range(1, 7)
+    ]
+    cards = [
+        EvidenceCard(
+            id=1,
+            source_id=1,
+            branch_id=branch.id,
+            claim="The evidence identifies relationship evidence and methodological limitations without proving a direct pathway.",
+            supporting_excerpt="The evidence identifies relationship evidence and methodological limitations without proving a direct pathway.",
+            source_url=sources[0].url,
+            source_title=sources[0].title,
+            quality_score=0.88,
+            relevance_score=0.62,
+            confidence=0.62,
+            semantic_score=0.50,
+        ),
+        EvidenceCard(
+            id=2,
+            source_id=2,
+            branch_id=branch.id,
+            claim="The review calls for future studies because boundary conditions and context dependence remain unresolved.",
+            supporting_excerpt="The review calls for future studies because boundary conditions and context dependence remain unresolved.",
+            source_url=sources[1].url,
+            source_title=sources[1].title,
+            quality_score=0.88,
+            relevance_score=0.62,
+            confidence=0.62,
+            semantic_score=0.50,
+        ),
+    ]
+
+    coverage = build_coverage_matrix(branches=[branch], evidence_cards=cards, sources=sources)
+
+    assert coverage.complete is True
+    assert coverage.missing_branches == []
+    assert "evidence-limited synthesis readiness" in coverage.branches[0].covered_points
+    assert not any("strong semantic evidence cards" in point for point in coverage.branches[0].covered_points)
+
+
+def test_coverage_accepts_evidence_rich_branch_with_planner_phrase_drift() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Five-year growth analysis",
+        objective="Compare growth patterns across sources.",
+        queries=["growth analysis"],
+        min_sources=3,
+        required_terms=[
+            "growth analysis calculate",
+            "analysis calculate compare",
+            "calculate compare revenue",
+            "growth analysis",
+        ],
+    )
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=branch.id,
+            title=f"Growth Source {index}",
+            url=f"https://example.com/growth/{index}",
+            canonical_url=f"https://example.com/growth/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=500,
+            quality_score=0.72,
+            quality_label="usable",
+            quality_type="industry",
+            relevance_score=0.3,
+        )
+        for index in range(1, 5)
+    ]
+    cards = [
+        EvidenceCard(
+            id=index,
+            source_id=((index - 1) % 4) + 1,
+            branch_id=branch.id,
+            claim="Revenue and asset growth are compared across insurers over several years.",
+            supporting_excerpt="Revenue and asset growth are compared across insurers over several years.",
+            source_url=sources[((index - 1) % 4)].url,
+            source_title=sources[((index - 1) % 4)].title,
+            quality_score=0.72,
+            relevance_score=0.3,
+            confidence=0.63,
+        )
+        for index in range(1, 13)
+    ]
+
+    coverage = build_coverage_matrix(branches=[branch], evidence_cards=cards, sources=sources)
+
+    assert coverage.complete is True
+    assert "evidence-limited synthesis readiness" in coverage.branches[0].covered_points
+
+
+def test_evidence_builder_uses_heading_windows_for_ranking_sources() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Future asset ranking prediction",
+        objective="Forecast likely future asset ranking among major insurers.",
+        queries=["predict insurance industry asset rankings"],
+        min_sources=1,
+        required_terms=["asset ranking"],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Best's Rankings and World's Largest Insurance Companies",
+        url="https://example.com/rankings",
+        canonical_url="https://example.com/rankings",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.8,
+        quality_label="strong",
+        quality_type="industry",
+        relevance_score=0.7,
+    )
+    text = "\n".join(
+        [
+            "# Best's Rankings and World's Largest Insurance Companies",
+            "## By assets",
+            "The annual ranking compares insurance groups by assets and premium scale.",
+            "The table gives a basis for assessing future asset leadership.",
+        ]
+    )
+
+    cards = build_evidence_cards(
+        branches=[branch],
+        sources=[source],
+        source_texts={1: text},
+        question="Which insurers are likely to lead future asset ranking?",
+    )
+
+    assert cards
+    assert any("assets" in card.claim.lower() for card in cards)
 
 
 def test_evidence_builder_uses_strong_branch_overlap_without_exact_anchor_phrase() -> None:
@@ -1973,6 +2636,80 @@ def test_verifier_rejects_undercovered_acceptance_criteria() -> None:
     assert any("acceptance criteria coverage" in failure.lower() for failure in result.failures)
 
 
+def test_verifier_does_not_treat_readability_rubrics_as_content_criteria() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+        acceptance_criteria=[
+            "Task-specific comprehensiveness criterion: Explain mechanisms linking need for closure and misinformation acceptance.",
+            "Task-specific readability criterion: Effective Use of Formatting for Readability - Assesses headings, paragraphing, sentence variety, and navigation.",
+            "Clarity, Precision, and Appropriate Use of Psychological Terminology - Assesses whether psychological terms (e.g., 'need for closure,' 'epistemic motivation,' 'heuristics,' 'misinformation susceptibility') are clearly defined, used accurately and consistently, and explained appropriately for an academic audience.",
+            "Paragraph Cohesion, Clarity, and Transitions - Assesses if each paragraph focuses on a single, clear idea related to the topic, with well-structured sentences.",
+            "Overall Textual Fluency and Engagement - Considers the overall quality of the writing style, including sentence variety and an engaging academic tone.",
+        ],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Need for Closure Source",
+        url="https://example.com/nfc",
+        canonical_url="https://example.com/nfc",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=160,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for closure affects misinformation acceptance by encouraging quick certainty and reduced scrutiny.",
+        supporting_excerpt="Need for closure affects misinformation acceptance by encouraging quick certainty and reduced scrutiny.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    report = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "Need for closure affects misinformation acceptance by encouraging quick certainty, heuristic processing, and reduced scrutiny of false claims. [1]\n\n"
+        "## Evidence Strength and Limits\n\n"
+        "The evidence supports a mechanism-focused interpretation, while remaining cautious about causal strength and boundary conditions. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Need for Closure Source: https://example.com/nfc\n"
+    )
+
+    result = verify_report_v2(
+        report_markdown=report,
+        plan=plan,
+        sources=[source],
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        source_texts={1: report},
+    )
+
+    assert result.criteria_coverage_score >= 0.65
+    assert not any("readability" in row["criterion"].lower() for row in result.undercovered_criteria)
+    assert not any("acceptance criteria coverage" in failure.lower() for failure in result.failures)
+
+
 def test_verifier_rejects_shallow_report_even_with_supported_citation() -> None:
     branch = ResearchBranch(
         id="branch_1",
@@ -2758,6 +3495,16 @@ def test_semantic_report_verification_can_fail_valid_deterministic_result(tmp_pa
     assert merged.semantic_verification["search_focus"] == ["cooling center access barriers"]
 
 
+def test_semantic_json_loader_accepts_python_literal_objects() -> None:
+    payload = _load_json_object(
+        "{'overall_score': 0.82, 'failures': [], 'unsupported_claims': [], "
+        "'contradictions': [], 'missing_context': [], 'search_focus': []}"
+    )
+
+    assert payload["overall_score"] == 0.82
+    assert payload["failures"] == []
+
+
 def test_semantic_report_verification_accepts_json_like_failure_entries(tmp_path: Path) -> None:
     plan = build_research_plan("How do cooling centers reduce heat illness risk during heat waves?")
     card = EvidenceCard(
@@ -2825,6 +3572,63 @@ def test_normalize_report_sources_section_includes_multi_citation_ids() -> None:
 
     assert "[1] Source 1: https://example.com/1" in normalized
     assert "[10] Source 10: https://example.com/10" in normalized
+
+
+def test_normalize_report_removes_malformed_source_dump_before_canonical_sources() -> None:
+    sources = [
+        SourceRecordV2(
+            id=1,
+            branch_id="branch_1",
+            title="Need for Closure Source",
+            url="https://example.com/nfc",
+            canonical_url="https://example.com/nfc",
+            provenance="web",
+            content_path="source_docs/source_1.md",
+            content_hash="hash",
+            extraction_method="test",
+            word_count=120,
+            quality_score=0.9,
+            quality_label="high",
+            quality_type="academic",
+            relevance_score=0.9,
+        ),
+        SourceRecordV2(
+            id=2,
+            branch_id="branch_1",
+            title="Misinformation Source",
+            url="https://example.com/misinfo",
+            canonical_url="https://example.com/misinfo",
+            provenance="web",
+            content_path="source_docs/source_2.md",
+            content_hash="hash",
+            extraction_method="test",
+            word_count=120,
+            quality_score=0.9,
+            quality_label="high",
+            quality_type="academic",
+            relevance_score=0.9,
+        ),
+    ]
+    raw = (
+        "# Need for Closure and Misinformation Acceptance\n\n"
+        "Need for closure can shape misinformation acceptance through quick certainty and reduced scrutiny. [1]\n\n"
+        "## Sources  [1] Old Source: https://old.example/source\n"
+        "[2] Misinformation Source: https://example.com/misinfo\n"
+        "Unnumbered Source: https://example.com/unlisted\n"
+        "More copied metadata: https://example.com/metadata\n\n"
+        "---\n\n"
+        "*End of Report*\n"
+    )
+
+    normalized = _normalize_report_markdown(raw, sources)
+    body = normalized.split("## Sources")[0]
+
+    assert "https://old.example/source" not in normalized
+    assert "Unnumbered Source" not in normalized
+    assert "*End of Report*" not in body
+    assert normalized.count("## Sources") == 1
+    assert "[1] Need for Closure Source: https://example.com/nfc" in normalized
+    assert "[2] Misinformation Source: https://example.com/misinfo" not in normalized
 
 
 def test_report_blueprint_and_writer_use_professional_report_sections() -> None:
@@ -2939,6 +3743,233 @@ def test_model_synthesis_falls_back_when_model_returns_degenerate_report(tmp_pat
     assert "[1]" in report.split("## Sources")[0]
 
 
+def test_model_synthesis_preserves_previous_report_when_repair_response_is_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class EmptyReportModel:
+        def invoke(self, _messages, **_kwargs):
+            return SimpleNamespace(content="")
+
+    monkeypatch.setattr("deep_research.synthesis.model_for_role", lambda *_args, **_kwargs: EmptyReportModel())
+    monkeypatch.setattr("deep_research.synthesis.BaseChatModel", object)
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Urban heat health effects",
+        objective="Explain how urban heat affects public health.",
+        queries=["urban heat health effects"],
+        required_terms=["urban heat", "public health"],
+    )
+    plan = ResearchPlan(
+        question="How does urban heat affect public health?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Urban Heat Evidence",
+        url="https://example.com/urban-heat",
+        canonical_url="https://example.com/urban-heat",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="high",
+        quality_type="official_docs",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        supporting_excerpt="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    previous = (
+        "# Urban Heat\n\n"
+        "Urban heat increases public health risks by raising local temperatures and heat exposure. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Urban Heat Evidence: https://example.com/urban-heat\n"
+    )
+
+    report = synthesize_report_with_model(
+        plan=plan,
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        sources=[source],
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path),
+        previous_report=previous,
+        verification_failures=["repair this draft"],
+    )
+
+    assert "Urban heat increases public health risks" in report
+    assert "[1] Urban Heat Evidence: https://example.com/urban-heat" in report
+
+
+def test_model_synthesis_excludes_sources_failed_by_alignment_verification(tmp_path: Path, monkeypatch) -> None:
+    captured_prompts: list[str] = []
+
+    class CapturingReportModel:
+        def invoke(self, messages):
+            captured_prompts.append(messages[0].content)
+            return SimpleNamespace(
+                content=(
+                    "# Need for Closure and Misinformation Acceptance\n\n"
+                    "Need for closure can shape misinformation acceptance when people seek quick certainty. [1]\n\n"
+                    "## Sources\n\n"
+                    "[1] Direct Source: https://example.com/direct\n"
+                )
+            )
+
+    monkeypatch.setattr("deep_research.synthesis.model_for_role", lambda *_args, **_kwargs: CapturingReportModel())
+    monkeypatch.setattr("deep_research.synthesis.BaseChatModel", object)
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure affects misinformation acceptance.",
+        queries=["need for closure misinformation acceptance"],
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    plan = ResearchPlan(
+        question="What is the role of need for closure on misinformation acceptance?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    direct_source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Direct Source",
+        url="https://example.com/direct",
+        canonical_url="https://example.com/direct",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash-1",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="high",
+        quality_type="academic",
+        relevance_score=0.9,
+    )
+    adjacent_source = SourceRecordV2(
+        id=2,
+        branch_id=branch.id,
+        title="Adjacent Topic Source",
+        url="https://example.com/adjacent",
+        canonical_url="https://example.com/adjacent",
+        provenance="web",
+        content_path="source_docs/source_2.md",
+        content_hash="hash-2",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="high",
+        quality_type="academic",
+        relevance_score=0.4,
+    )
+    direct_card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Need for closure can shape misinformation acceptance when people seek quick certainty.",
+        supporting_excerpt="Need for closure can shape misinformation acceptance when people seek quick certainty.",
+        source_url=direct_source.url,
+        source_title=direct_source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    adjacent_card = EvidenceCard(
+        id=2,
+        source_id=2,
+        branch_id=branch.id,
+        claim="Need for closure can shape a neighboring attitude outcome.",
+        supporting_excerpt="Need for closure can shape a neighboring attitude outcome.",
+        source_url=adjacent_source.url,
+        source_title=adjacent_source.title,
+        quality_score=0.9,
+        relevance_score=0.4,
+        confidence=0.9,
+    )
+
+    report = synthesize_report_with_model(
+        plan=plan,
+        evidence_cards=[direct_card, adjacent_card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        sources=[direct_source, adjacent_source],
+        settings=Settings(project_root=tmp_path, out_dir=tmp_path),
+        verification_failures=[
+            "Cited source [2] fails current branch/request alignment: source main topic appears to be a neighboring concept rather than the requested concept",
+        ],
+    )
+
+    assert captured_prompts
+    assert "Adjacent Topic Source" not in captured_prompts[0]
+    assert "https://example.com/adjacent" not in captured_prompts[0]
+    assert "[2] Adjacent Topic Source" not in report
+
+
+def test_report_level_criteria_ignores_traceability_quality_gate() -> None:
+    criteria = _report_level_criteria(
+        [
+            "All data points must be traceable to at least one cited source",
+            "Compare financing conditions across companies",
+        ]
+    )
+
+    assert criteria == ["Compare financing conditions across companies"]
+
+
+def test_synthesis_request_budget_caps_groq_completion_tokens(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:openai/gpt-oss-20b",
+        groq_api_keys=("groq-a",),
+        model_max_output_tokens=4000,
+    )
+
+    kwargs = _synthesis_request_kwargs(
+        settings=settings,
+        prompt="evidence " * 2500,
+        model_spec=settings.model,
+    )
+
+    assert kwargs["max_tokens"] < 4000
+    assert kwargs["max_tokens"] >= 768
+
+
+def test_synthesis_request_budget_leaves_google_completion_tokens_unforced(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="google",
+        model="google_genai:gemini-2.5-flash",
+        google_api_keys=("google-a",),
+        model_max_output_tokens=4000,
+    )
+
+    kwargs = _synthesis_request_kwargs(
+        settings=settings,
+        prompt="evidence " * 2500,
+        model_spec=settings.model,
+    )
+
+    assert kwargs == {}
+
+
 def test_criteria_rich_synthesis_profile_requires_reference_grade_depth() -> None:
     branch = ResearchBranch(
         id="branch_1",
@@ -2990,7 +4021,7 @@ def test_criteria_rich_synthesis_profile_requires_reference_grade_depth() -> Non
     assert any(row["purpose"] == "Mechanisms and causal logic" for row in profile["section_plan"])
 
 
-def test_criteria_rich_synthesis_uses_large_context_google_model_when_available(tmp_path: Path) -> None:
+def test_criteria_rich_synthesis_respects_configured_provider(tmp_path: Path) -> None:
     branch = ResearchBranch(
         id="branch_1",
         title="Need for closure and misinformation acceptance",
@@ -3018,7 +4049,18 @@ def test_criteria_rich_synthesis_uses_large_context_google_model_when_available(
         groq_api_keys=("groq-a",),
     )
 
-    assert _synthesis_model_spec(settings, plan) == "google_genai:gemini-2.5-flash"
+    assert _synthesis_model_spec(settings, plan) == "groq:openai/gpt-oss-20b"
+
+    hybrid_settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="hybrid",
+        model="groq:openai/gpt-oss-20b",
+        google_api_keys=("google-a",),
+        groq_api_keys=("groq-a",),
+    )
+
+    assert _synthesis_model_spec(hybrid_settings, plan) == "google_genai:gemini-2.5-flash"
 
 
 def test_normal_synthesis_keeps_configured_model(tmp_path: Path) -> None:
@@ -3699,6 +4741,49 @@ def test_verification_route_rewrites_unsupported_claims_before_more_search() -> 
     }
 
     assert _verification_route(state) == "rewrite"
+
+
+def test_verification_route_rewrites_writing_and_support_failures_without_more_search() -> None:
+    state = {
+        "coverage_matrix": {"complete": True},
+        "verification": {
+            "valid": False,
+            "failures": [
+                "Weakly supported cited paragraph: the report overgeneralizes a mechanism.",
+                "Acceptance criteria coverage below threshold: 0.59",
+                "Report depth below threshold: 0.76",
+                "Semantic report judge returned invalid structured output: bad json",
+            ],
+        },
+        "metrics": {
+            "verification_rounds": 1,
+            "max_rounds": 4,
+            "last_acquire_added_sources": 3,
+            "last_acquire_added_candidates": 20,
+        },
+    }
+
+    assert _verification_route(state) == "rewrite"
+
+
+def test_coverage_route_synthesizes_after_zero_progress_followup() -> None:
+    state = {
+        "coverage_matrix": {"complete": False, "missing_branches": ["branch_1"]},
+        "evidence_cards": [{"id": 1}],
+        "metrics": {
+            "coverage_rounds": 2,
+            "max_rounds": 8,
+            "search_count": 31,
+            "max_search_queries": 80,
+            "candidate_count_total": 132,
+            "max_candidates": 750,
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "last_acquire_searches": 0,
+        },
+    }
+
+    assert _coverage_route(state) == "synthesize"
 
 
 def test_verification_route_rewrites_instead_of_researching_after_source_plateau() -> None:

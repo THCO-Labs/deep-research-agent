@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 
 from deep_research.schemas import EvidenceCard, ResearchBranch, SourceRecordV2
-from deep_research.source_validation import anchor_groups_for_branch, branch_terms, content_terms, validate_source_content
+from deep_research.source_validation import (
+    anchor_groups_for_branch,
+    branch_terms,
+    content_terms,
+    uses_translated_branch_context,
+    validate_source_content,
+)
 
 SENTENCE_SPLIT_RE = re.compile(r"\n\s*\n|(?<=[.!?。！？])\s*|[;；]\s*")
 
@@ -36,7 +42,17 @@ def build_evidence_cards(
         if not alignment.usable:
             continue
         terms = branch_terms(branch)
-        candidates = _rank_sentences(source_text, terms, question_terms, anchor_groups_for_branch(branch))
+        source_question_terms = (
+            set()
+            if uses_translated_branch_context(
+                question=question,
+                branch=branch,
+                title=source.title,
+                content=source_text,
+            )
+            else question_terms
+        )
+        candidates = _rank_sentences(source_text, terms, source_question_terms, anchor_groups_for_branch(branch))
         for sentence in candidates[:max_cards_per_source]:
             claim = _clean_claim(sentence)
             if len(claim) < 50:
@@ -79,11 +95,7 @@ def _rank_sentences(
     question_terms: set[str],
     anchor_groups: list[frozenset[str]],
 ) -> list[str]:
-    sentences = [
-        sentence.strip()
-        for sentence in SENTENCE_SPLIT_RE.split(text)
-        if 60 <= len(sentence.strip()) <= 600
-    ]
+    sentences = _candidate_passages(text)
     minimum_question_hits = _minimum_question_hits(question_terms)
     ranked = sorted(
         ((index, sentence, content_terms(sentence)) for index, sentence in enumerate(sentences)),
@@ -107,6 +119,47 @@ def _rank_sentences(
     ]
 
 
+def _candidate_passages(text: str) -> list[str]:
+    passages: list[str] = []
+    for segment in SENTENCE_SPLIT_RE.split(text):
+        cleaned = _clean_passage(segment)
+        if _passage_length_ok(cleaned):
+            passages.append(cleaned)
+
+    lines = [_clean_passage(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    for line in lines:
+        if _passage_length_ok(line, min_length=35):
+            passages.append(line)
+
+    for window_size in (2, 3, 4):
+        for index in range(0, max(0, len(lines) - window_size + 1)):
+            window = _clean_passage(" ".join(lines[index : index + window_size]))
+            if _passage_length_ok(window):
+                passages.append(window)
+    return _dedupe_passages(passages)
+
+
+def _clean_passage(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().strip(" -|")
+
+
+def _passage_length_ok(text: str, *, min_length: int = 50, max_length: int = 800) -> bool:
+    return min_length <= len(text) <= max_length
+
+
+def _dedupe_passages(passages: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for passage in passages:
+        key = re.sub(r"\s+", " ", passage.lower()).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(passage)
+    return result
+
+
 def _minimum_question_hits(question_terms: set[str]) -> int:
     if not question_terms:
         return 0
@@ -115,7 +168,7 @@ def _minimum_question_hits(question_terms: set[str]) -> int:
 
 def _matches_anchor_group(sentence_terms: set[str], anchor_groups: list[frozenset[str]]) -> bool:
     for group in anchor_groups:
-        if group <= sentence_terms:
+        if group and all(_term_matches(term, sentence_terms) for term in group):
             return True
     return False
 
@@ -136,11 +189,36 @@ def _sentence_matches_branch(
         return False
     if not anchor_groups or _matches_anchor_group(sentence_terms, anchor_groups):
         return True
+    if not question_terms and branch_hits >= _translated_branch_overlap_threshold(branch_terms):
+        return True
     return branch_hits >= _strong_branch_overlap_threshold(branch_terms)
+
+
+def _translated_branch_overlap_threshold(branch_terms: set[str]) -> int:
+    return max(2, min(4, len(branch_terms) // 14))
 
 
 def _strong_branch_overlap_threshold(branch_terms: set[str]) -> int:
     return max(3, min(6, len(branch_terms) // 8))
+
+
+def _term_matches(term: str, observed_terms: set[str]) -> bool:
+    if term in observed_terms:
+        return True
+    return any(variant in observed_terms for variant in _term_variants(term))
+
+
+def _term_variants(term: str) -> set[str]:
+    variants = {term}
+    if len(term) > 4 and term.endswith("ies"):
+        variants.add(term[:-3] + "y")
+    if len(term) > 4 and term.endswith("es"):
+        variants.add(term[:-2])
+    if len(term) > 3 and term.endswith("s"):
+        variants.add(term[:-1])
+    if len(term) > 3:
+        variants.add(term + "s")
+    return variants
 
 
 def _clean_claim(sentence: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -90,6 +91,7 @@ def acquire_sources(
     existing_source_texts: dict[int, str] | None = None,
     searched_queries: set[str] | None = None,
     focus_terms_by_branch: dict[str, list[str]] | None = None,
+    active_branch_ids: set[str] | None = None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AcquisitionResult:
     metrics = AcquisitionMetrics()
@@ -136,20 +138,32 @@ def acquire_sources(
     next_candidate_id = max((candidate.id for candidate in candidates), default=0) + 1
     focus_terms_by_branch = focus_terms_by_branch or {}
     for branch in branches:
+        if active_branch_ids is not None and branch.id not in active_branch_ids:
+            continue
         if len(sources) >= max_sources:
             break
         branch_source_count = sum(1 for source in sources if source.branch_id == branch.id)
         forced_terms = focus_terms_by_branch.get(branch.id, [])
-        if branch_source_count >= branch.min_sources and not forced_terms:
+        coverage_followup = active_branch_ids is not None and branch.id in active_branch_ids
+        if branch_source_count >= branch.min_sources and not forced_terms and not coverage_followup:
             continue
-        branch_queries = _branch_queries(branch, forced_terms, question)
+        branch_queries = _branch_queries(
+            branch,
+            forced_terms or (branch.required_terms if coverage_followup else []),
+            question,
+        )
+        branch_query_limit = int(getattr(settings, "max_followup_queries_per_branch", 12) or 12)
+        searched_for_branch = 0
         for query in branch_queries:
+            if coverage_followup and searched_for_branch >= branch_query_limit:
+                break
             if len(candidates) >= max_candidates or len(sources) >= max_sources:
                 break
             query = _trim_search_query(query)
             if query in searched:
                 continue
             searched.add(query)
+            searched_for_branch += 1
             metrics.search_count += 1
             _emit_progress(
                 progress_callback,
@@ -184,9 +198,49 @@ def acquire_sources(
                 candidates=len(candidates),
                 searches=metrics.search_count,
             )
+            browser_scrapes_for_query = 0
+            browser_scrape_limit = int(getattr(settings, "max_browser_scrapes_per_query", 4) or 0)
             for item in search_results:
                 url = str(item.get("url") or "")
                 if not url:
+                    continue
+                title = str(item.get("title") or url)
+                snippet = str(item.get("content") or item.get("snippet") or "")
+                block_reason = _blocked_source_reason(
+                    url=url,
+                    title=title,
+                    snippet=snippet,
+                    settings=settings,
+                )
+                if block_reason:
+                    metrics.rejected_source_count += 1
+                    metrics.failures.append(f"Blocked {url}: {block_reason}")
+                    _emit_progress(
+                        progress_callback,
+                        "blocked source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        reason=block_reason,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
+                    continue
+                requires_browser = not _candidate_has_raw_content(candidate_raw := _raw_content(item))
+                if requires_browser and browser_scrapes_for_query >= browser_scrape_limit:
+                    metrics.rejected_source_count += 1
+                    reason = f"browser fallback budget exhausted for query ({browser_scrape_limit})"
+                    metrics.failures.append(f"Skipped {url}: {reason}")
+                    _emit_progress(
+                        progress_callback,
+                        "skipped source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        reason=reason,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
                     continue
                 canonical = _safe_canonical(url)
                 if canonical in seen_urls:
@@ -195,17 +249,19 @@ def acquire_sources(
                 candidate = SourceCandidate(
                     id=next_candidate_id,
                     branch_id=branch.id,
-                    title=str(item.get("title") or url),
+                    title=title,
                     url=url,
                     query=query,
-                    snippet=str(item.get("content") or item.get("snippet") or ""),
+                    snippet=snippet,
                     search_score=_float_or_none(item.get("score")),
-                    raw_content=_raw_content(item),
+                    raw_content=candidate_raw,
                     provenance="web",
                 )
                 next_candidate_id += 1
                 candidates.append(candidate)
                 metrics.candidate_count += 1
+                if requires_browser:
+                    browser_scrapes_for_query += 1
                 record = _candidate_to_source(
                     candidate,
                     branch,
@@ -218,6 +274,15 @@ def acquire_sources(
                     source_id=len(sources) + 1,
                 )
                 if record is None:
+                    _emit_progress(
+                        progress_callback,
+                        "rejected source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
                     continue
                 sources.append(record.source)
                 source_texts[record.source.id] = record.text
@@ -459,15 +524,28 @@ def _search(client: Any, query: str, settings: Any) -> list[dict[str, Any]]:
 def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: str) -> list[str]:
     if not forced_terms:
         return branch.queries
-    focus = " ".join(term for term in forced_terms if term).strip()
-    followups = _dedupe(
-        branch.queries
-        + [
-            f"{question} {branch.title} {focus}",
-            f"{branch.title} {focus} evidence review findings",
-            f"{branch.title} {focus} mechanisms context limitations",
-        ]
-    )
+    terms = _dedupe([term for term in forced_terms if term])[:12]
+    focus = " ".join(terms).strip()
+    followups = list(branch.queries)
+    if focus:
+        followups.extend(
+            [
+                f"{question} {branch.title} {focus}",
+                f"{branch.title} {focus} evidence review findings",
+                f"{branch.title} {focus} mechanisms context limitations",
+                f"{branch.objective} {focus} empirical evidence",
+            ]
+        )
+    for term in terms:
+        followups.extend(
+            [
+                f"{question} {term}",
+                f"{branch.title} {term} evidence",
+                f"{branch.objective} {term}",
+            ]
+        )
+    for index in range(0, max(0, len(terms) - 1), 2):
+        followups.append(f"{question} {terms[index]} {terms[index + 1]}")
     return followups
 
 
@@ -509,6 +587,21 @@ def _raw_content(item: dict[str, Any]) -> str | None:
         if isinstance(value, str) and len(value.split()) >= 120:
             return value
     return None
+
+
+def _candidate_has_raw_content(raw_content: str | None) -> bool:
+    return bool(raw_content and len(raw_content.split()) >= 80)
+
+
+def _blocked_source_reason(*, url: str, title: str, snippet: str, settings: Any) -> str:
+    patterns = tuple(getattr(settings, "blocked_source_patterns", ()) or ())
+    if not patterns:
+        return ""
+    haystack = "\n".join([url, title, snippet])
+    for pattern in patterns:
+        if re.search(pattern, haystack, flags=re.I):
+            return f"matched blocked source pattern: {pattern}"
+    return ""
 
 
 def _dedupe(values: list[str]) -> list[str]:

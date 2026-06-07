@@ -261,6 +261,7 @@ def test_model_router_can_disable_fallback_wrapping(tmp_path: Path, monkeypatch)
         groq_api_keys=("groq-a", "groq-b"),
         tavily_api_key="tavily",
         model_fallbacks=False,
+        provider_retry_attempts=0,
     )
 
     model = model_router.model_for_role(settings, "orchestrator", settings.model)
@@ -268,6 +269,33 @@ def test_model_router_can_disable_fallback_wrapping(tmp_path: Path, monkeypatch)
 
     assert isinstance(model, FakeChatModel)
     assert manifest["model_fallbacks"] is False
+    assert manifest["roles"][0]["fallback_routes"] == []
+
+
+def test_model_router_preserves_retries_when_fallback_routes_are_disabled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_router, "ChatGroq", FakeChatModel)
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:main",
+        fast_model="groq:fast",
+        planner_model="groq:planner",
+        researcher_model="groq:researcher",
+        analyst_model="groq:analyst",
+        verifier_model="groq:verifier",
+        judge_model="groq:judge",
+        groq_api_keys=("groq-a", "groq-b"),
+        tavily_api_key="tavily",
+        model_fallbacks=False,
+        provider_retry_attempts=1,
+    )
+
+    model = model_router.model_for_role(settings, "orchestrator", settings.model)
+    manifest = model_router.describe_model_routes(settings)
+
+    assert isinstance(model, model_router.FallbackChatModel)
+    assert model.fallbacks == ()
     assert manifest["roles"][0]["fallback_routes"] == []
 
 

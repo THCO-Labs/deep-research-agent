@@ -89,6 +89,7 @@ Key options:
 - `--min-usable-sources N`
 - `--max-search-queries N`
 - `--max-candidates N`
+- `--max-followup-queries-per-branch N`: interleave missing-branch follow-up searches fairly
 - `--min-source-words N`
 - `--provider auto|google|groq|hybrid|ollama|openrouter`
 - `--provider openrouter`: use OpenRouter-compatible chat completions; the default model is `openrouter/free`
@@ -192,6 +193,7 @@ TAVILY_API_KEY1=...
 TAVILY_API_KEY2=...
 TAVILY_API_KEY_3=...
 TAVILY_API_KEYS=key-a,key-b
+TAVILY_SEARCH_API_KEY=...
 ```
 
-If one key hits a usage/rate limit, the search client tries the next configured key before failing the query.
+If one key hits a usage/rate limit, the search client tries the next configured key before failing the query. The documented names are preferred, but the loader also discovers other environment variables whose names contain `TAVILY`, `API`, and `KEY`.

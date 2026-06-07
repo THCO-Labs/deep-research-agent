@@ -23,6 +23,17 @@ def classify_exception(exc: BaseException) -> FailureClassification:
     retry_after = _extract_retry_after_seconds(message)
 
     if _is_token_budget_error(lower):
+        if retry_after is not None and _is_retry_window_error(lower):
+            return FailureClassification(
+                category="quota_or_rate_limit",
+                retryable=True,
+                retry_after_seconds=retry_after,
+                suggested_action=(
+                    "Wait for the provider retry window or route affected roles to a different provider/key pool."
+                ),
+                error_type=type(exc).__name__,
+                message=message,
+            )
         return FailureClassification(
             category="token_budget_exceeded",
             retryable=False,
@@ -97,6 +108,17 @@ def _is_token_budget_error(lower_message: str) -> bool:
     return any(token in lower_message for token in tokens)
 
 
+def _is_retry_window_error(lower_message: str) -> bool:
+    tokens = (
+        "rate limit reached",
+        "please try again",
+        "try again in",
+        "retry in",
+        "retry after",
+    )
+    return any(token in lower_message for token in tokens)
+
+
 def _is_quota_error(lower_message: str) -> bool:
     tokens = (
         "resource_exhausted",
@@ -150,6 +172,7 @@ def _is_auth_error(lower_message: str) -> bool:
 def _extract_retry_after_seconds(message: str) -> int | None:
     patterns = (
         r"retry(?:Delay| delay)?['\"]?\s*[:=]\s*['\"]?(\d+)s",
+        r"try again in\s+(\d+(?:\.\d+)?)s",
         r"retry in\s+(\d+(?:\.\d+)?)s",
         r"retry after\s+(\d+(?:\.\d+)?)\s*seconds?",
     )

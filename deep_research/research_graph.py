@@ -197,6 +197,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             existing_source_texts=runtime.source_texts,
             searched_queries=runtime.searched_queries,
             focus_terms_by_branch=_focus_terms_from_state(state),
+            active_branch_ids=_active_branch_ids_from_state(state),
             progress_callback=lambda message, data: runtime.emit_status("acquire_sources", message, **data),
         )
         runtime.source_texts.update(result.source_texts)
@@ -231,6 +232,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def build_evidence(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         sources = [_source_from_dict(row) for row in state.get("source_records", [])]
+        runtime.source_texts.update(_load_source_texts(runtime.artifacts, sources))
         cards = build_evidence_cards(
             branches=plan_obj.branches,
             sources=sources,
@@ -385,7 +387,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
                 sources=sources,
                 settings=runtime.settings,
                 previous_report=str(state.get("draft_report") or ""),
-                verification_failures=list(state.get("failures", [])),
+                verification_failures=_synthesis_repair_guidance_from_state(state),
                 blueprint=blueprint,
                 writing_guidance=str(state.get("request", {}).get("writing_guidance") or ""),
             )
@@ -566,6 +568,12 @@ def _acquire_route(state: ResearchState) -> str:
 
 
 def _source_acquisition_plateaued(metrics: dict[str, Any]) -> bool:
+    if (
+        int(metrics.get("last_acquire_added_sources", 1)) <= 0
+        and int(metrics.get("last_acquire_added_candidates", 1)) <= 0
+        and int(metrics.get("last_acquire_searches", 1)) <= 0
+    ):
+        return True
     candidate_total = int(metrics.get("candidate_count_total", metrics.get("candidate_count", 0)) or 0)
     candidate_budget = int(metrics.get("max_candidates", 0) or 0)
     search_count = int(metrics.get("search_count", 0) or 0)
@@ -592,14 +600,21 @@ def _verification_route(state: ResearchState) -> str:
         any("semantic judge found unsupported claim" in failure for failure in failures)
         or any("some claims are not directly supported" in failure for failure in failures)
         or any("cited evidence-backed source count" in failure for failure in failures)
+        or any("weakly supported cited paragraph" in failure for failure in failures)
+        or any("acceptance criteria coverage below threshold" in failure for failure in failures)
+        or any("under-covered acceptance criterion" in failure for failure in failures)
+        or any("report depth below threshold" in failure for failure in failures)
+        or any("semantic report judge returned invalid structured output" in failure for failure in failures)
     )
     if rewrite_only:
+        return "rewrite"
+    coverage_complete = bool(state.get("coverage_matrix", {}).get("complete"))
+    if coverage_complete and any("semantic report verification below threshold" in failure for failure in failures):
         return "rewrite"
     needs_more_sources = (
         any("coverage below threshold" in failure for failure in failures)
         or any("coverage incomplete" in failure for failure in failures)
         or any("source quality" in failure for failure in failures)
-        or any("weakly supported" in failure for failure in failures)
         or any("semantic report verification below threshold" in failure for failure in failures)
         or any("missing context" in failure for failure in failures)
     )
@@ -643,7 +658,52 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
             if branch_id and (not missing_branch_ids or branch_id in missing_branch_ids):
                 focus.setdefault(branch_id, [])
                 focus[branch_id].extend(_clean_focus_terms(semantic_focus))
+    if missing_branch_ids:
+        for branch in state.get("plan", {}).get("branches", []):
+            branch_id = str(branch.get("id", ""))
+            if branch_id in missing_branch_ids and branch_id not in focus:
+                terms = _clean_focus_terms(
+                    list(branch.get("required_terms", []))
+                    + [branch.get("title", ""), branch.get("objective", "")]
+                )
+                if terms:
+                    focus[branch_id] = terms
     return {branch_id: _dedupe_focus_terms(terms) for branch_id, terms in focus.items() if terms}
+
+
+def _synthesis_repair_guidance_from_state(state: ResearchState) -> list[str]:
+    verification = state.get("verification", {})
+    guidance = [str(failure) for failure in state.get("failures", []) if str(failure).strip()]
+    for weak in verification.get("weakly_supported_claims", []) if isinstance(verification, dict) else []:
+        if not isinstance(weak, dict):
+            continue
+        source_ids = [int(value) for value in weak.get("cited_source_ids", []) if str(value).isdigit()]
+        if not source_ids:
+            continue
+        snippet = re.sub(r"\s+", " ", str(weak.get("paragraph", "")).strip())[:180]
+        score = weak.get("support_score")
+        kind = str(weak.get("support_kind") or "citation")
+        guidance.append(
+            "Repair weak citation support: "
+            f"{kind} using source(s) {', '.join(f'[{source_id}]' for source_id in source_ids)} "
+            f"scored {score}; rewrite or remove the claim unless an evidence card directly supports it. "
+            f"Claim context: {snippet}"
+        )
+    for criterion in verification.get("undercovered_criteria", []) if isinstance(verification, dict) else []:
+        if not isinstance(criterion, dict):
+            continue
+        text = re.sub(r"\s+", " ", str(criterion.get("criterion", "")).strip())[:220]
+        if text:
+            guidance.append(f"Expand under-covered report criterion with cited evidence: {text}")
+    return _dedupe_focus_terms(guidance)
+
+
+def _active_branch_ids_from_state(state: ResearchState) -> set[str] | None:
+    coverage = state.get("coverage_matrix", {})
+    if not coverage or coverage.get("complete"):
+        return None
+    missing = {str(branch_id) for branch_id in coverage.get("missing_branches", []) if str(branch_id).strip()}
+    return missing or None
 
 
 def _clean_focus_terms(terms: list[Any]) -> list[str]:

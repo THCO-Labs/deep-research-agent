@@ -50,7 +50,7 @@ def test_generate_raw_submission_writes_deepresearch_bench_format(tmp_path: Path
     ]
 
 
-def test_benchmark_settings_enable_model_fallbacks_by_default(tmp_path: Path, monkeypatch) -> None:
+def test_benchmark_settings_honor_model_fallback_env_by_default(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env").write_text(
         "GROQ_API_KEY=groq-test\n"
         "TAVILY_API_KEY=tavily-test\n"
@@ -63,7 +63,7 @@ def test_benchmark_settings_enable_model_fallbacks_by_default(tmp_path: Path, mo
 
     settings = _settings_from_args(args)
 
-    assert settings.model_fallbacks is True
+    assert settings.model_fallbacks is False
 
 
 def test_benchmark_settings_can_disable_model_fallbacks_explicitly(tmp_path: Path, monkeypatch) -> None:
@@ -112,6 +112,22 @@ def test_benchmark_settings_accept_model_output_token_flag(tmp_path: Path, monke
     assert settings.model_max_output_tokens == 12000
 
 
+def test_benchmark_settings_accept_browser_fallback_budget_flag(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--benchmark-dir", str(_bench_dir(tmp_path)), "--provider", "groq", "--max-browser-scrapes-per-query", "1"]
+    )
+
+    settings = _settings_from_args(args)
+
+    assert settings.max_browser_scrapes_per_query == 1
+
+
 def test_generate_raw_submission_resumes_without_duplicate_rows(tmp_path: Path) -> None:
     bench = _bench_dir(tmp_path)
     settings = Settings(project_root=tmp_path, out_dir=tmp_path / "runs")
@@ -133,6 +149,33 @@ def test_generate_raw_submission_resumes_without_duplicate_rows(tmp_path: Path) 
 
     assert first == second
     assert len(second.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_generate_raw_submission_blocks_benchmark_corpus_sources(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path / "runs",
+        blocked_source_patterns=(r"already-blocked",),
+    )
+    seen_patterns: list[tuple[str, ...]] = []
+
+    def runner(question: str, settings: Settings) -> ResearchRunResult:
+        seen_patterns.append(settings.blocked_source_patterns)
+        return _fake_runner(question, settings)
+
+    generate_raw_submission(
+        benchmark_dir=bench,
+        model_name="local-blocked",
+        settings=settings,
+        language="en",
+        runner=runner,
+    )
+
+    assert seen_patterns
+    assert r"already-blocked" in seen_patterns[0]
+    assert any("deep" in pattern and "bench" in pattern for pattern in seen_patterns[0])
+    assert any("reference" in pattern for pattern in seen_patterns[0])
 
 
 def test_generate_raw_submission_records_internal_failure(tmp_path: Path) -> None:

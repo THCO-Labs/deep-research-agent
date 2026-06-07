@@ -12,12 +12,15 @@ from deep_research.model_router import model_for_role
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2
 from deep_research.settings import GOOGLE_DEFAULT_MODEL, Settings
 from deep_research.source_validation import content_terms
-from deep_research.text_terms import preferred_output_language
+from deep_research.text_terms import cjk_char_count, preferred_output_language
 
 MAX_SYNTHESIS_CARDS_PER_BRANCH = 8
-MAX_SYNTHESIS_CARDS_TOTAL = 96
-MAX_SYNTHESIS_EXCERPT_CHARS = 500
+MAX_SYNTHESIS_CARDS_TOTAL = 20
+MAX_SYNTHESIS_EXCERPT_CHARS = 160
+MAX_DEPTH_EXPANSION_ROUNDS = 2
 INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.22
+LOW_TPM_PROVIDER_BUDGET_TOKENS = 7_600
+MIN_SYNTHESIS_COMPLETION_TOKENS = 768
 REPORT_STYLE_EXAMPLES = (
     {
         "name": "Analytical explainer",
@@ -218,16 +221,26 @@ def synthesize_report_with_model(
 ) -> str:
     if not evidence_cards:
         return synthesize_report(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
-    model = model_for_role(settings, "orchestrator", _synthesis_model_spec(settings, plan, writing_guidance))
+    model_spec = _synthesis_model_spec(settings, plan, writing_guidance)
+    model = model_for_role(settings, "orchestrator", model_spec)
     if not isinstance(model, BaseChatModel):
         raise RuntimeError(f"Synthesis role did not resolve to a chat model: {model!r}")
-    synthesis_cards = _cards_for_synthesis(plan, evidence_cards)
+    blocked_source_ids = _blocked_source_ids_from_failures(verification_failures or [])
+    candidate_cards = _without_blocked_sources(evidence_cards, blocked_source_ids)
+    if not candidate_cards:
+        candidate_cards = evidence_cards
+    synthesis_cards = _cards_for_synthesis(plan, candidate_cards)
     evidence_sources = _evidence_backed_sources(sources, synthesis_cards)
     report_blueprint = blueprint or build_report_blueprint(
         plan=plan,
         evidence_cards=synthesis_cards,
         coverage=coverage,
         sources=evidence_sources,
+    )
+    target_profile = _target_report_profile(
+        plan=plan,
+        evidence_cards=synthesis_cards,
+        writing_guidance=writing_guidance,
     )
     prompt = _synthesis_prompt(
         plan=plan,
@@ -239,24 +252,77 @@ def synthesize_report_with_model(
         blueprint=report_blueprint,
         writing_guidance=writing_guidance,
     )
-    response = model.invoke([HumanMessage(content=prompt)])
+    response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
     text = str(response.content).strip()
     if not text:
-        raise RuntimeError("Synthesis model returned an empty report.")
-    if _is_degenerate_model_report(text, evidence_cards):
-        return synthesize_report(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
+        if previous_report.strip():
+            return _normalize_report_markdown(previous_report, evidence_sources)
+        return synthesize_report(plan=plan, evidence_cards=synthesis_cards, coverage=coverage, sources=evidence_sources)
+    if _is_degenerate_model_report(text, synthesis_cards):
+        return synthesize_report(plan=plan, evidence_cards=synthesis_cards, coverage=coverage, sources=evidence_sources)
     normalized = _normalize_report_markdown(text, evidence_sources)
     citation_repaired = _repair_weak_citation_support(normalized, synthesis_cards, evidence_sources)
     coverage_repaired = _append_evidence_coverage_if_needed(citation_repaired, plan, synthesis_cards)
-    return _normalize_report_markdown(coverage_repaired, evidence_sources)
+    normalized_report = _normalize_report_markdown(coverage_repaired, evidence_sources)
+    expanded_report = _expand_report_depth_if_needed(
+        model=model,
+        plan=plan,
+        evidence_cards=synthesis_cards,
+        coverage=coverage,
+        sources=evidence_sources,
+        report=normalized_report,
+        target_profile=target_profile,
+        verification_failures=verification_failures or [],
+        writing_guidance=writing_guidance,
+        model_spec=model_spec,
+        settings=settings,
+    )
+    return _normalize_report_markdown(expanded_report, evidence_sources)
 
 
 def _synthesis_model_spec(settings: Settings, plan: ResearchPlan, writing_guidance: str = "") -> str:
-    if _criteria_rich_plan(plan, writing_guidance=writing_guidance) and settings.google_key_pool:
-        provider, _, _model = settings.model.partition(":")
-        if provider != "google_genai":
-            return GOOGLE_DEFAULT_MODEL
+    if not _criteria_rich_plan(plan, writing_guidance=writing_guidance):
+        return settings.model
+    provider, _, _model = settings.model.partition(":")
+    if provider == "google_genai":
+        return settings.model
+    if settings.provider == "hybrid" and settings.google_key_pool:
+        return GOOGLE_DEFAULT_MODEL
     return settings.model
+
+
+def _invoke_with_synthesis_budget(
+    model: BaseChatModel,
+    *,
+    prompt: str,
+    settings: Settings,
+    model_spec: str,
+) -> Any:
+    kwargs = _synthesis_request_kwargs(settings=settings, prompt=prompt, model_spec=model_spec)
+    try:
+        return model.invoke([HumanMessage(content=prompt)], **kwargs)
+    except TypeError as exc:
+        if kwargs and "unexpected" in str(exc).lower() and "keyword" in str(exc).lower():
+            return model.invoke([HumanMessage(content=prompt)])
+        raise
+
+
+def _synthesis_request_kwargs(*, settings: Settings, prompt: str, model_spec: str) -> dict[str, int]:
+    provider, _separator, _model_name = model_spec.partition(":")
+    if provider != "groq":
+        return {}
+    prompt_tokens = _rough_token_count(prompt)
+    requested_completion_tokens = min(
+        settings.model_max_output_tokens,
+        max(MIN_SYNTHESIS_COMPLETION_TOKENS, LOW_TPM_PROVIDER_BUDGET_TOKENS - prompt_tokens),
+    )
+    return {"max_tokens": requested_completion_tokens}
+
+
+def _rough_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
 
 
 def _synthesis_prompt(
@@ -278,34 +344,25 @@ def _synthesis_prompt(
         if source is None:
             continue
         evidence_lines.append(
-            "\n".join(
-                [
-                    f"Evidence card {card.id}",
-                    f"- branch_id: {card.branch_id}",
-                    f"- source_id: {card.source_id}",
-                    f"- source_title: {source.title}",
-                    f"- source_quality: {source.quality_label} ({source.quality_score})",
-                    f"- semantic_score: {card.semantic_score if card.semantic_score is not None else 'not_judged'}",
-                    f"- claim: {card.claim}",
-                    f"- excerpt: {card.supporting_excerpt[:MAX_SYNTHESIS_EXCERPT_CHARS]}",
-                    f"- limitations: {', '.join(card.limitations) or 'none'}",
-                ]
+            (
+                f"- card {card.id}; branch {card.branch_id}; source [{card.source_id}] {source.title}; "
+                f"claim: {card.claim}; excerpt: {card.supporting_excerpt[:MAX_SYNTHESIS_EXCERPT_CHARS]}; "
+                f"limits: {', '.join(card.limitations[:2]) or 'none'}"
             )
         )
-    source_lines = "\n".join(f"[{source.id}] {source.title}: {source.url}" for source in sorted(sources, key=lambda item: item.id))
+    source_lines = "\n".join(f"[{source.id}] {source.title}" for source in sorted(sources, key=lambda item: item.id))
     branch_lines = "\n".join(
-        f"- {branch.id}: {branch.title}; objective: {branch.objective}; required terms: {', '.join(branch.required_terms)}"
+        f"- {branch.id}: {branch.title}; objective: {branch.objective[:220]}"
         for branch in plan.branches
     )
-    acceptance_criteria_lines = "\n".join(f"- {criterion}" for criterion in plan.acceptance_criteria[:32]) or "None"
-    repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:20]) or "None"
-    previous_text = previous_report[:3000] if previous_report else "None"
+    acceptance_criteria_lines = "\n".join(f"- {criterion}" for criterion in plan.acceptance_criteria[:8]) or "None"
+    repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:8]) or "None"
+    previous_text = previous_report[:800] if previous_report else "None"
     report_blueprint = blueprint or build_report_blueprint(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
-    quality_contract = report_blueprint.get("quality_contract", {})
     visual_assets = report_blueprint.get("visual_assets", [])
     visual_text = "\n".join(
         f"- {asset['alt']}: {asset['url']} (source_id {asset['source_id']})"
-        for asset in visual_assets[:12]
+        for asset in visual_assets[:6]
     ) or "None"
     language_instruction = _language_instruction(plan.question)
     opening_cards = _opening_cards(plan, evidence_cards)[:8]
@@ -331,14 +388,8 @@ Research branches:
 Acceptance criteria to satisfy in the report:
 {acceptance_criteria_lines}
 
-Report-writing blueprint:
-{json_dumps(_compact_blueprint_for_prompt(report_blueprint))}
-
-Report quality contract:
-{json_dumps(_compact_quality_contract(quality_contract))}
-
 Report depth and structure target:
-{json_dumps(target_profile)}
+{json_dumps(_compact_target_profile(target_profile))}
 
 Coverage status:
 - complete: {coverage.complete}
@@ -349,7 +400,7 @@ Prior verification failures to repair:
 {repair_text}
 
 Additional report-writing guidance:
-{writing_guidance.strip()[:8000] if writing_guidance.strip() else 'None'}
+{writing_guidance.strip()[:2500] if writing_guidance.strip() else 'None'}
 
 Previous draft, if any:
 {previous_text}
@@ -357,7 +408,7 @@ Previous draft, if any:
 Evidence cards:
 {chr(10).join(evidence_lines)}
 
-Allowed sources:
+Allowed source IDs and titles:
 {source_lines}
 
 Evidence-backed visual assets, if any:
@@ -372,47 +423,278 @@ Opening-answer evidence priority:
 Write the final report in Markdown.
 
 Report style examples to learn from, not copy:
-{json_dumps({"examples": list(REPORT_STYLE_EXAMPLES)})}
+- Analytical explainer: direct answer, mechanisms, evidence strength, debates, implications.
+- Evidence review: bottom-line evidence assessment, study/evidence distinctions, conflicts, gaps.
+- Technical or decision brief: system/choice framing, trade-offs, constraints, verification checks.
 
 Hard requirements:
-- Answer the user's question directly in the first substantive paragraph.
-- Keep the title, opening answer, and body centered on the user's exact question. If the previous draft drifts to a different topic, ignore the drift and rebuild from the evidence cards.
-- Write the title, section headings, opening answer, and body in the requested output language above. Source titles, URLs, citations, acronyms, and quoted terms may remain in their original language.
-- Do not let a narrower context, example case, disease, country, product, dataset, or source-specific framing replace the user's requested relationship or scope unless the user explicitly asked for that narrower context.
-- Use the opening-answer evidence priority to write the first substantive paragraph; it ranks cards by direct relevance to the user's exact question.
-- Use only the evidence cards above. Do not add uncited facts from memory.
-- Every factual paragraph must include at least one inline citation like [3].
-- Citation IDs must be source_id values from the allowed sources list.
-- Do not cite evidence card IDs. Cite source IDs only.
-- Cite at least {required_source_breadth} distinct evidence-backed source IDs when that many are available.
+- Answer the exact user question in the first substantive paragraph, using the opening-answer evidence priority.
+- Use only the evidence cards above; every factual paragraph needs inline source citations like [3].
+- Cite source IDs only, never evidence-card IDs, and cite at least {required_source_breadth} distinct evidence-backed sources when available.
 - Depth target: {target_depth_hint}
-- Treat the report depth and structure target as a minimum acceptable plan, not an aspiration. If the target calls for a long-form report, do not stop after a short overview.
-- Optimize for report quality as well as factuality: broad coverage, non-obvious synthesis, strict task fit, and readable organization.
-- Use the report quality contract as a writing checklist, but do not print it as a checklist.
-- Satisfy the acceptance criteria as report coverage requirements. Do not quote them as a checklist, but make the relevant concepts and analysis visible in the prose.
-- Treat the research branches and any additional report-writing guidance as a coverage checklist.
-- Every branch with evidence cards must be substantively answered in the report, either in its own section or in a clearly relevant grouped section.
-- For each evidence-rich branch, write analytical paragraphs that define the issue, summarize the strongest evidence, explain mechanisms or trade-offs, and state limitations. Do not compress a branch into a single sentence when multiple cards support it.
-- When prior failures mention answer coverage, missing context, or semantic completeness, expand the under-covered branch objectives and required points instead of writing a short overview.
-- For criteria-rich benchmark-style prompts, write a comprehensive report rather than a brief answer; depth and coverage matter more than brevity.
-- For criteria-rich benchmark-style prompts, build an argument at reference-report depth: define constructs, explain mechanisms, review evidence, compare mediators/moderators or alternatives, discuss boundary conditions, and end with implications and future research when supported.
-- Use the dynamic section plan in the report depth target to decide what each section must accomplish. You may rename sections naturally, but every planned section purpose must be represented in the final report.
-- Do not include structural extraction artifacts in the body: raw URLs, markdown link/media syntax, page-control text, key-value scrape metadata, or extraction notes.
-- Do not copy low-information page chrome or boilerplate-like text.
-- Treat prior verification failures as private repair instructions only; never quote them or mention branch IDs, evidence card IDs, missing-citation diagnostics, or internal coverage scores in the report body.
-- Choose natural section headings for this question. Do not force a fixed template or reuse the same headings for every topic.
-- Write in polished report prose with synthesis across sources, not a bullet dump of evidence cards.
-- Make the first paragraph self-contained: answer, core mechanism or decision frame, confidence level, and why the answer matters.
-- Each major section must make a claim, interpret the claim, explain why it matters for the user's question, and connect back to the report's central thesis.
-- Prefer cohesive analytical paragraphs over isolated bullets. Use bullets only for compact enumerations where the items are parallel and evidence-backed.
-- Use precise domain terminology, define specialized terms when needed, and keep paragraph transitions explicit so the argument reads as one coherent report.
-- Include synthesis paragraphs that compare agreement, tension, evidence strength, mechanisms, boundary conditions, and trade-offs across sources.
-- Where the evidence supports it, include a final integrative section that states implications, unresolved questions, and what would change the conclusion.
-- Add forward-looking or decision-relevant implications only when the evidence supports them; frame uncertainty and open questions clearly.
-- The table must use question-specific dimensions, not generic labels.
-- Include images only when listed under evidence-backed visual assets and only when the visual helps inspect the topic; otherwise omit images.
+- Cover the branches, acceptance criteria, and depth profile as report coverage requirements, but do not print them as checklists.
+- Use natural question-specific headings and polished analytical prose; synthesize across sources instead of dumping evidence cards.
+- Define central constructs, explain mechanisms and trade-offs, compare evidence strength/tensions, and state limitations or unresolved questions when supported.
+- Keep the title, opening, and body centered on the requested scope; ignore any previous-draft drift.
+- Do not include raw URLs, markdown links/media, page chrome, scrape metadata, branch IDs, evidence-card IDs, or verification diagnostics outside Sources.
+- Include images only when listed as evidence-backed visual assets and useful for inspection.
 - End with exactly one ## Sources section. Each entry must be exactly: [N] Title: https://url
 """
+
+
+def _expand_report_depth_if_needed(
+    *,
+    model: BaseChatModel,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    coverage: CoverageMatrix,
+    sources: list[SourceRecordV2],
+    report: str,
+    target_profile: dict[str, Any],
+    verification_failures: list[str],
+    writing_guidance: str,
+    model_spec: str,
+    settings: Settings,
+) -> str:
+    expanded = report
+    for round_index in range(MAX_DEPTH_EXPANSION_ROUNDS):
+        if not _report_needs_depth_expansion(expanded, target_profile):
+            break
+        prompt = _depth_expansion_prompt(
+            plan=plan,
+            evidence_cards=evidence_cards,
+            coverage=coverage,
+            sources=sources,
+            current_report=expanded,
+            target_profile=target_profile,
+            verification_failures=verification_failures,
+            writing_guidance=writing_guidance,
+            round_index=round_index,
+        )
+        response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
+        addition = _clean_depth_expansion_markdown(str(response.content), sources)
+        if _is_degenerate_expansion(addition):
+            break
+        expanded = _insert_before_sources(expanded, addition)
+        expanded = _normalize_report_markdown(expanded, sources)
+        expanded = _repair_weak_citation_support(expanded, evidence_cards, sources)
+        expanded = _append_evidence_coverage_if_needed(expanded, plan, evidence_cards)
+    return expanded
+
+
+def _depth_expansion_prompt(
+    *,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    coverage: CoverageMatrix,
+    sources: list[SourceRecordV2],
+    current_report: str,
+    target_profile: dict[str, Any],
+    verification_failures: list[str],
+    writing_guidance: str,
+    round_index: int,
+) -> str:
+    source_lookup = {source.id: source for source in sources}
+    evidence_lines = []
+    expansion_cards = _cards_for_depth_expansion(
+        plan=plan,
+        evidence_cards=evidence_cards,
+        current_report=current_report,
+        round_index=round_index,
+    )
+    for card in expansion_cards:
+        source = source_lookup.get(card.source_id)
+        if source is None:
+            continue
+        evidence_lines.append(
+            "\n".join(
+                [
+                    f"Evidence card {card.id}",
+                    f"- branch_id: {card.branch_id}",
+                    f"- source_id: {card.source_id}",
+                    f"- source_title: {source.title}",
+                    f"- claim: {card.claim}",
+                    f"- excerpt: {card.supporting_excerpt[:320]}",
+                    f"- limitations: {', '.join(card.limitations) or 'none'}",
+                ]
+            )
+        )
+    body, _separator, _source_tail = _split_sources(current_report)
+    repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:16]) or "None"
+    current_excerpt = body[-3500:] if round_index else body[:2500] + "\n\n" + body[-1500:]
+    return f"""You are extending a research report that is factually grounded but too shallow for its evidence plan.
+
+User question:
+{plan.question}
+
+Output language:
+{_language_instruction(plan.question)}
+
+Current depth status:
+{json_dumps(_depth_status(current_report, target_profile))}
+
+Target report profile:
+{json_dumps(target_profile)}
+
+Coverage status:
+- complete: {coverage.complete}
+- coverage_score: {coverage.coverage_score}
+- missing_branches: {', '.join(coverage.missing_branches) or 'none'}
+
+Prior verification feedback to repair:
+{repair_text}
+
+Additional writing guidance:
+{writing_guidance.strip()[:4000] if writing_guidance.strip() else 'None'}
+
+Current report excerpt:
+{current_excerpt}
+
+Evidence cards available for expansion:
+{chr(10).join(evidence_lines)}
+
+Write only additional Markdown sections or paragraphs to insert before the Sources section.
+
+Requirements:
+- Do not repeat the full report, title, or Sources section.
+- Choose natural headings that fit this question and the evidence; do not force a universal template.
+- Every factual paragraph must include source citations like [3].
+- Use only source_id values from the evidence cards above.
+- Expand underdeveloped mechanisms, evidence strength, disagreements, boundary conditions, implications, limitations, and unresolved questions when supported by evidence.
+- Repair weak-citation feedback by rewriting unsupported claims or replacing broad citations with claims that the cited evidence cards directly support.
+- Prefer cohesive analytical prose over bullet dumps.
+- Do not include raw URLs, markdown links, images, scrape metadata, branch IDs, evidence card IDs, or verification diagnostics in the report text.
+"""
+
+
+def _cards_for_depth_expansion(
+    *,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    current_report: str,
+    round_index: int,
+    limit: int = 28,
+) -> list[EvidenceCard]:
+    if not evidence_cards:
+        return []
+    body, _separator, _source_tail = _split_sources(current_report)
+    report_terms = content_terms(body)
+    cited_source_ids = set(_numeric_citation_ids(body))
+    selected: list[EvidenceCard] = []
+    selected_ids: set[int] = set()
+    cards_by_branch = _cards_by_branch(evidence_cards)
+    per_branch_limit = 2 if round_index == 0 else 1
+    for branch in plan.branches:
+        branch_cards = cards_by_branch.get(branch.id, [])
+        if not branch_cards:
+            continue
+        branch_terms = content_terms(branch.title + " " + branch.objective + " " + " ".join(branch.required_terms))
+        branch_coverage = len(branch_terms & report_terms) / max(len(branch_terms), 1) if branch_terms else 1.0
+        branch_cited = bool({card.source_id for card in branch_cards} & cited_source_ids)
+        if branch_coverage >= 0.45 and branch_cited and round_index > 0:
+            continue
+        for card in _source_diverse_cards(_rank_cards(branch_cards, question=plan.question), limit=per_branch_limit):
+            if card.id in selected_ids:
+                continue
+            selected.append(card)
+            selected_ids.add(card.id)
+            if len(selected) >= limit:
+                return selected
+
+    remaining = [
+        card
+        for card in _cards_for_synthesis(plan, evidence_cards)
+        if card.id not in selected_ids and card.source_id not in cited_source_ids
+    ]
+    for card in _source_diverse_cards(remaining, limit=limit - len(selected)):
+        selected.append(card)
+        selected_ids.add(card.id)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _report_needs_depth_expansion(report: str, target_profile: dict[str, Any]) -> bool:
+    status = _depth_status(report, target_profile)
+    return bool(
+        status["word_count"] < status["minimum_words"]
+        or status["cited_paragraphs"] < status["minimum_cited_paragraphs"]
+        or status["major_sections_before_sources"] < status["minimum_major_sections_before_sources"]
+    )
+
+
+def _depth_status(report: str, target_profile: dict[str, Any]) -> dict[str, int]:
+    body, _separator, _source_tail = _split_sources(report)
+    return {
+        "word_count": _body_word_count(body),
+        "minimum_words": int(target_profile.get("minimum_words", 0) or 0),
+        "cited_paragraphs": _cited_paragraph_count(body),
+        "minimum_cited_paragraphs": int(target_profile.get("minimum_cited_paragraphs", 0) or 0),
+        "major_sections_before_sources": len(re.findall(r"(?m)^##\s+.+$", body)),
+        "minimum_major_sections_before_sources": int(target_profile.get("minimum_major_sections_before_sources", 0) or 0),
+    }
+
+
+def _body_word_count(text: str) -> int:
+    latin_words = len(re.findall(r"\b[A-Za-z0-9][A-Za-z0-9+.-]*\b", text))
+    return latin_words + (cjk_char_count(text) // 2)
+
+
+def _cited_paragraph_count(text: str) -> int:
+    count = 0
+    for paragraph in re.split(r"\n\s*\n", text):
+        stripped = _substantive_paragraph_text(paragraph)
+        if stripped and re.search(r"\[[0-9][0-9,;\s]*\]", stripped):
+            count += 1
+    return count
+
+
+def _substantive_paragraph_text(paragraph: str) -> str:
+    lines: list[str] = []
+    for line in paragraph.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("|"):
+            continue
+        if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
+            continue
+        if re.fullmatch(r"\*?\s*(?:end of report|end)\s*\*?", stripped, flags=re.I):
+            continue
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def _clean_depth_expansion_markdown(text: str, sources: list[SourceRecordV2]) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = _remove_existing_source_listing(cleaned)
+    cleaned = re.sub(r"(?m)^#\s+.+$", "", cleaned)
+    cleaned = _normalize_markdown_headings(cleaned)
+    cleaned = _separate_heading_blocks(cleaned)
+    cleaned = _clean_malformed_citation_punctuation(cleaned)
+    cleaned = _strip_report_chrome_lines(cleaned)
+    cleaned = _strip_source_artifact_lines(cleaned)
+    cleaned = _remove_unknown_numeric_citations(cleaned, sources)
+    return cleaned.strip()
+
+
+def _is_degenerate_expansion(text: str) -> bool:
+    body = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#")).strip()
+    normalized = body.lower().strip(" .`'\"")
+    if not normalized or normalized in {"none", "null", "n/a", "na"}:
+        return True
+    return len(content_terms(body)) < 20 or not _numeric_citation_ids(body)
+
+
+def _insert_before_sources(report: str, addition: str) -> str:
+    if not addition.strip():
+        return report
+    body, separator, source_tail = _split_sources(report)
+    if separator:
+        return body.rstrip() + "\n\n" + addition.strip() + "\n\n" + separator + source_tail
+    return report.rstrip() + "\n\n" + addition.strip() + "\n"
 
 
 def _normalize_report_markdown(report: str, sources: list[SourceRecordV2]) -> str:
@@ -420,17 +702,35 @@ def _normalize_report_markdown(report: str, sources: list[SourceRecordV2]) -> st
     cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     cleaned = _normalize_markdown_headings(cleaned)
+    cleaned = _separate_heading_blocks(cleaned)
+    cleaned = _clean_malformed_citation_punctuation(cleaned)
+    cleaned = _strip_report_chrome_lines(cleaned)
+    cleaned = _remove_existing_source_listing(cleaned)
+    cleaned = _strip_source_artifact_lines(cleaned)
     cleaned = _remove_unknown_numeric_citations(cleaned, sources)
     cleaned = _repair_uncited_body_paragraphs(cleaned, sources)
     if not re.search(r"(?im)^#\s+", cleaned):
         cleaned = "# Research Report\n\n" + cleaned
     cleaned = _remove_existing_source_listing(cleaned)
+    cleaned = _clean_malformed_citation_punctuation(cleaned)
+    cleaned = _strip_report_chrome_lines(cleaned)
+    cleaned = _strip_source_artifact_lines(cleaned)
     source_section = _sources_section(sources, cleaned)
     if re.search(r"(?ims)^##\s+Sources\s*$", cleaned):
         cleaned = re.sub(r"(?ims)^##\s+Sources\s*$.*\Z", source_section, cleaned).strip()
     else:
         cleaned = cleaned.rstrip() + "\n\n" + source_section
     return cleaned.rstrip() + "\n"
+
+
+def _clean_malformed_citation_punctuation(report: str) -> str:
+    cleaned = report
+    cleaned = re.sub(r"\((\s*\[[0-9][0-9,;\s]*\])\s*;\s*\)", r"(\1)", cleaned)
+    cleaned = re.sub(r"\[\s*([0-9][0-9,;\s]*)\s*;\s*]", r"[\1]", cleaned)
+    cleaned = re.sub(r"\[\s*([0-9][0-9,;\s]*)\s*,\s*]", r"[\1]", cleaned)
+    cleaned = re.sub(r"\[\s*([0-9][0-9,;\s]*)\s+]", r"[\1]", cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    return cleaned
 
 
 def _is_degenerate_model_report(report: str, evidence_cards: list[EvidenceCard]) -> bool:
@@ -467,9 +767,28 @@ def _normalize_markdown_headings(report: str) -> str:
     return "\n".join(normalized_lines)
 
 
+def _separate_heading_blocks(report: str) -> str:
+    return re.sub(r"(?m)^(#{1,6}\s+.+?)\s*\n(?!\s*\n)", r"\1\n\n", report)
+
+
+def _strip_report_chrome_lines(report: str) -> str:
+    cleaned_lines: list[str] = []
+    for line in report.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
+            continue
+        if re.fullmatch(r"\*?\s*(?:end of report|end)\s*\*?", stripped, flags=re.I):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
 def _remove_existing_source_listing(report: str) -> str:
     if re.search(r"(?ims)^##\s+Sources\s*$", report):
         return re.sub(r"(?ims)^##\s+Sources\s*$.*\Z", "", report).strip()
+    bibliography_heading = _malformed_bibliography_heading_match(report)
+    if bibliography_heading is not None:
+        return report[: bibliography_heading.start()].strip()
 
     lines = report.splitlines()
     index = len(lines) - 1
@@ -495,13 +814,72 @@ def _remove_existing_source_listing(report: str) -> str:
 
     if source_line_count == 0:
         return report
-    if index >= 0 and re.fullmatch(r"(?:#{1,6}\s+.+|\*\*[^*]{2,120}\*\*)", lines[index].strip()):
+    if index >= 0 and _looks_like_bibliography_heading(lines[index].strip()):
         block_start = index
     return "\n".join(lines[:block_start]).rstrip()
 
 
 def _looks_like_source_entry(line: str) -> bool:
-    return bool(re.search(r"^\s*\[[0-9]+]\s+.+https?://\S+", line, flags=re.I))
+    stripped = line.strip()
+    if not re.search(r"https?://\S+", stripped, flags=re.I):
+        return False
+    return bool(
+        re.search(r"^\s*\[[0-9]+]\s+.+https?://\S+", stripped, flags=re.I)
+        or re.search(r"^\s*(?:[-*]\s*)?[^:]{2,240}:\s+https?://\S+", stripped, flags=re.I)
+        or re.search(r"^\s*(?:[-*]\s*)?https?://\S+", stripped, flags=re.I)
+    )
+
+
+def _malformed_bibliography_heading_match(report: str) -> re.Match[str] | None:
+    for match in re.finditer(r"(?im)^#{1,6}\s+(.+?)\s*$", report):
+        if not _looks_like_bibliography_heading(match.group(0)):
+            continue
+        tail = report[match.end() :]
+        preview_lines = [line.strip() for line in tail.splitlines()[:12] if line.strip()]
+        if _looks_like_source_entry(match.group(0)) or any(_looks_like_source_entry(line) for line in preview_lines):
+            return match
+    return None
+
+
+def _looks_like_bibliography_heading(line: str) -> bool:
+    stripped = re.sub(r"^\s*#{1,6}\s*", "", line.strip())
+    stripped = re.sub(r"^\*\*|\*\*$", "", stripped).strip()
+    return bool(
+        re.match(
+            r"^(?:sources|references|bibliography|works cited)\s*(?:$|[:\-]|\[[0-9]+])",
+            stripped,
+            flags=re.I,
+        )
+    )
+
+
+def _strip_source_artifact_lines(report: str) -> str:
+    body, separator, source_tail = _split_sources(report)
+    cleaned_lines = [
+        line
+        for line in body.splitlines()
+        if not _looks_like_source_artifact_line(line)
+    ]
+    cleaned_body = "\n".join(cleaned_lines).strip()
+    return cleaned_body + (separator + source_tail if separator else "")
+
+
+def _looks_like_source_artifact_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _looks_like_bibliography_heading(stripped) and (
+        _looks_like_source_entry(stripped) or re.search(r"\[[0-9]+]\s+.+https?://", stripped, flags=re.I)
+    ):
+        return True
+    if _looks_like_source_entry(stripped):
+        return True
+    if re.search(r"https?://\S+", stripped, flags=re.I):
+        word_count = len(re.findall(r"\b[A-Za-z][A-Za-z0-9-]*\b", stripped))
+        url_chars = sum(len(match.group(0)) for match in re.finditer(r"https?://\S+", stripped, flags=re.I))
+        if word_count <= 24 or url_chars / max(len(stripped), 1) > 0.10:
+            return True
+    return False
 
 
 def _remove_unknown_numeric_citations(report: str, sources: list[SourceRecordV2]) -> str:
@@ -517,7 +895,7 @@ def _remove_unknown_numeric_citations(report: str, sources: list[SourceRecordV2]
             return ""
         return "[" + ", ".join(str(value) for value in sorted(set(kept))) + "]"
 
-    return re.sub(r"\[([0-9][0-9,\s]*)\]", replace, report)
+    return re.sub(r"\[([0-9][0-9,;\s]*)\]", replace, report)
 
 
 def _repair_uncited_body_paragraphs(report: str, sources: list[SourceRecordV2]) -> str:
@@ -664,7 +1042,7 @@ def _paragraph_can_receive_support_repair(text: str) -> bool:
         return False
     if text.startswith("#") or text.startswith("|"):
         return False
-    if not re.search(r"\[[0-9][0-9,\s]*\]", text):
+    if not re.search(r"\[[0-9][0-9,;\s]*\]", text):
         return False
     return True
 
@@ -706,7 +1084,7 @@ def _remove_numeric_citation_ids(paragraph: str, remove_ids: set[int]) -> str:
             return ""
         return "[" + ", ".join(str(value) for value in sorted(set(kept))) + "]"
 
-    cleaned = re.sub(r"\[([0-9][0-9,\s]*)\]", replace, paragraph)
+    cleaned = re.sub(r"\[([0-9][0-9,;\s]*)\]", replace, paragraph)
     cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
     return cleaned
 
@@ -750,13 +1128,13 @@ def _split_sources(report: str) -> tuple[str, str, str]:
 
 
 def _strip_numeric_citations(text: str) -> str:
-    return re.sub(r"\[([0-9][0-9,\s]*)\]", "", text)
+    return re.sub(r"\[([0-9][0-9,;\s]*)\]", "", text)
 
 
 def _numeric_citation_ids(text: str) -> list[int]:
     return [
         int(value)
-        for block in re.findall(r"\[([0-9][0-9,\s]*)\]", text)
+        for block in re.findall(r"\[([0-9][0-9,;\s]*)\]", text)
         for value in re.findall(r"\d+", block)
     ]
 
@@ -777,7 +1155,7 @@ def _paragraph_needs_repair(text: str) -> bool:
         return False
     if text.startswith("#") or text.startswith("|"):
         return False
-    if re.search(r"\[[0-9][0-9,\s]*\]", text):
+    if re.search(r"\[[0-9][0-9,;\s]*\]", text):
         return False
     return True
 
@@ -786,7 +1164,7 @@ def _sources_section(sources: list[SourceRecordV2], report: str) -> str:
     cited_ids = sorted(
         {
             int(value)
-            for block in re.findall(r"\[([0-9][0-9,\s]*)\]", report)
+            for block in re.findall(r"\[([0-9][0-9,;\s]*)\]", report)
             for value in re.findall(r"\d+", block)
         }
     )
@@ -813,6 +1191,21 @@ def _evidence_backed_sources(
 ) -> list[SourceRecordV2]:
     evidence_source_ids = {card.source_id for card in evidence_cards}
     return [source for source in sources if source.id in evidence_source_ids]
+
+
+def _blocked_source_ids_from_failures(failures: list[str]) -> set[int]:
+    blocked: set[int] = set()
+    for failure in failures:
+        if not re.search(r"\bfails current branch/request alignment\b", failure, flags=re.I):
+            continue
+        blocked.update(int(value) for value in re.findall(r"Cited source \[([0-9]+)]", failure, flags=re.I))
+    return blocked
+
+
+def _without_blocked_sources(evidence_cards: list[EvidenceCard], blocked_source_ids: set[int]) -> list[EvidenceCard]:
+    if not blocked_source_ids:
+        return evidence_cards
+    return [card for card in evidence_cards if card.source_id not in blocked_source_ids]
 
 
 def _cards_for_synthesis(plan: ResearchPlan, evidence_cards: list[EvidenceCard]) -> list[EvidenceCard]:
@@ -1353,9 +1746,45 @@ def _compact_blueprint_for_prompt(blueprint: dict[str, Any]) -> dict[str, Any]:
         "question": blueprint.get("question"),
         "audience": blueprint.get("audience"),
         "source_summary": blueprint.get("source_summary"),
-        "acceptance_criteria": list(blueprint.get("acceptance_criteria", []))[:24],
+        "acceptance_criteria": list(blueprint.get("acceptance_criteria", []))[:12],
         "branch_writing_briefs": branch_briefs,
         "structure_guidance": blueprint.get("structure_guidance"),
+    }
+
+
+def _minimal_blueprint_for_prompt(blueprint: dict[str, Any]) -> dict[str, Any]:
+    branch_briefs = []
+    for row in blueprint.get("branch_writing_briefs", []):
+        if not isinstance(row, dict):
+            continue
+        branch_briefs.append(
+            {
+                "heading": row.get("heading"),
+                "objective": str(row.get("objective") or "")[:180],
+                "source_count": row.get("source_count"),
+            }
+        )
+    return {
+        "report_title": blueprint.get("report_title"),
+        "audience": blueprint.get("audience"),
+        "source_summary": blueprint.get("source_summary"),
+        "branch_writing_briefs": branch_briefs[:10],
+    }
+
+
+def _compact_target_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "minimum_words": profile.get("minimum_words"),
+        "target_words": profile.get("target_words"),
+        "minimum_cited_paragraphs": profile.get("minimum_cited_paragraphs"),
+        "minimum_major_sections_before_sources": profile.get("minimum_major_sections_before_sources"),
+        "criteria_rich": profile.get("criteria_rich"),
+        "style": profile.get("style"),
+        "section_purposes": [
+            str(row.get("purpose", ""))[:120]
+            for row in profile.get("section_plan", [])
+            if isinstance(row, dict)
+        ][:12],
     }
 
 

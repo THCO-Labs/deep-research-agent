@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import hashlib
+import ast
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -217,7 +218,7 @@ def _load_json_object(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
-        parsed = _raw_decode_first_object(cleaned)
+        parsed = _raw_decode_first_object_or_literal(cleaned)
     if not isinstance(parsed, dict):
         raise ValueError("response JSON must be an object")
     return parsed
@@ -236,6 +237,17 @@ def _raw_decode_first_object(text: str) -> Any:
     decoder = json.JSONDecoder()
     parsed, _end = decoder.raw_decode(text[start:])
     return parsed
+
+
+def _raw_decode_first_object_or_literal(text: str) -> Any:
+    try:
+        return _raw_decode_first_object(text)
+    except json.JSONDecodeError:
+        extracted = _extract_json_object(text)
+        try:
+            return ast.literal_eval(extracted)
+        except (SyntaxError, ValueError) as exc:
+            raise json.JSONDecodeError(str(exc), text, 0) from exc
 
 
 def _extract_json_object(text: str) -> str:
