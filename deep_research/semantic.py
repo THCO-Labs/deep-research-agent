@@ -5,7 +5,7 @@ import re
 import hashlib
 import ast
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage
 
@@ -48,6 +48,7 @@ def enrich_evidence_cards_with_semantics(
     settings: Settings,
     model: Any | None = None,
     prior_judgments: list[dict[str, Any]] | None = None,
+    batch_checkpoint_callback: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> SemanticEvidenceResult:
     if not settings.semantic_verification:
         return SemanticEvidenceResult(
@@ -115,6 +116,14 @@ def enrich_evidence_cards_with_semantics(
                 f"Semantic evidence judge unavailable for batch; used deterministic fallback ({failure.category})."
             )
             judgments.extend(_fallback_card_judgments(batch, reason=f"{failure.category}: {failure.message}"))
+
+        # Mid-node checkpoint: persist accumulated judgments after each batch so a
+        # crash+resume can reuse them via prior_judgments and skip re-judging.
+        if batch_checkpoint_callback is not None:
+            try:
+                batch_checkpoint_callback(judgments)
+            except Exception:
+                pass
 
     cards, rejected, application_failures = _apply_card_judgments(evidence_cards, judgments)
     failures.extend(application_failures)
@@ -378,6 +387,10 @@ def _validate_report_judgment(payload: dict[str, Any]) -> dict[str, Any]:
         "citation_entailment_score": _score_field(payload, "citation_entailment_score"),
         "evidence_use_score": _score_field(payload, "evidence_use_score"),
         "contradiction_safety_score": _score_field(payload, "contradiction_safety_score"),
+        # Prose quality scores — optional for backwards compatibility with cached judgments.
+        "opening_directness_score": float(payload.get("opening_directness_score") or 1.0),
+        "argumentative_coherence_score": float(payload.get("argumentative_coherence_score") or 1.0),
+        "closing_synthesis_score": float(payload.get("closing_synthesis_score") or 1.0),
         "overall_score": _score_field(payload, "overall_score"),
         "failures": _string_list_field(payload, "failures"),
         "missing_context": _string_list_field(payload, "missing_context"),
@@ -489,6 +502,9 @@ Return exactly one JSON object:
   "citation_entailment_score": 0.0,
   "evidence_use_score": 0.0,
   "contradiction_safety_score": 0.0,
+  "opening_directness_score": 0.0,
+  "argumentative_coherence_score": 0.0,
+  "closing_synthesis_score": 0.0,
   "overall_score": 0.0,
   "failures": [],
   "missing_context": [],
@@ -502,7 +518,10 @@ Rubric:
 - citation_entailment_score: cited claims are supported by the evidence-card deck.
 - evidence_use_score: the report synthesizes evidence instead of copying fragments or adding unsupported material.
 - contradiction_safety_score: the report does not contain contradictions or unresolved tensions.
-- overall_score should be the minimum score you would defend from those criteria.
+- opening_directness_score: the first substantive paragraph directly answers the user's question with a clear claim and at least one citation, rather than restating the question or saying "this report examines..."
+- argumentative_coherence_score: sections develop a logical argument — each section advances the reader's understanding rather than just listing facts; transitions explain the logical connection to the next topic.
+- closing_synthesis_score: the report ends with a conclusion that synthesizes the key findings into a unified takeaway, not just a bullet summary of each section.
+- overall_score should be the minimum score you would defend from ALL of those criteria — factual accuracy and prose quality both count.
 - When missing_context is non-empty, search_focus must include concrete search phrases that would help repair those gaps.
 - search_focus should name topics to search, not internal branch IDs, card IDs, or generic complaints.
 """

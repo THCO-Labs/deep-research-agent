@@ -72,7 +72,10 @@ def validate_source_content(
             reasons.append("source partially matches a question anchor without the complete phrase")
     if branch_anchor_groups and not branch_anchor_matches and not branch_semantic_match:
         reasons.append("source lacks a branch-specific anchor phrase")
-    reasons.extend(_concept_dominance_rejections(title=title, content=normalized, branch=branch, question=question))
+    reasons.extend(_concept_dominance_rejections(
+        title=title, content=normalized, branch=branch, question=question,
+        branch_semantic_match=branch_semantic_match,
+    ))
     term_score = len(matched_terms) / max(len(terms), 1)
     anchor_score = len(branch_anchor_matches) / max(len(branch_anchor_groups), 1) if branch_anchor_groups else term_score
     relevance_score = round((term_score * 0.70) + (anchor_score * 0.30), 4)
@@ -258,8 +261,13 @@ def _concept_dominance_rejections(
     content: str,
     branch: ResearchBranch,
     question: str,
+    branch_semantic_match: bool = False,
 ) -> list[str]:
     if contains_cjk(f"{title} {content} {branch.title} {question}"):
+        return []
+    # If the source already proved itself by content (strong branch term coverage),
+    # skip the title-based dominance check — it would only produce false positives.
+    if branch_semantic_match:
         return []
     protected_phrases = _protected_concept_phrases(branch, question)
     if not protected_phrases:
@@ -276,8 +284,10 @@ def _concept_dominance_rejections(
             source_text,
             protected_phrase_sets=protected_phrase_sets,
         )
+        # Reject only when the target concept is completely absent (not merely sparse)
+        # and the competing concept dominates strongly — 2.5× ratio with a minimum of 4.
         if _title_competes_with_phrase(title_core_terms, phrase_terms) and (
-            target_count <= 1 or competing_count >= max(2, target_count * 1.5)
+            target_count == 0 or competing_count >= max(4, target_count * 2.5)
         ):
             reasons.append(
                 "source main topic appears to be a neighboring concept rather than the requested concept"
@@ -290,14 +300,25 @@ def _concept_dominance_rejections(
 
 
 def _protected_concept_phrases(branch: ResearchBranch, question: str) -> list[tuple[str, ...]]:
-    phrases: list[tuple[str, ...]] = []
+    # Derive protected phrases from branch.required_terms ONLY — not from the
+    # question text.  The question is long and unstructured; sliding a bigram window
+    # over it produces sentence-structure artifacts like ('transportation', 'based')
+    # or ('report', 'elderly') that are not meaningful concept discriminators and
+    # cause false rejections on any source whose title shares a single generic word
+    # with those noise phrases.  branch.required_terms are the planner's explicit,
+    # curated list of concepts a source must address — they are the right source.
     anchor_terms = set(ordered_terms(f"{question} {branch.title}"))
-    for text in [question]:
-        phrases.extend(_concept_phrases_from_text(text))
+    phrases: list[tuple[str, ...]] = []
     for text in branch.required_terms:
         terms = ordered_terms(text)
-        if 2 <= len(terms) <= 5 and set(terms) <= anchor_terms and len(set(terms)) == len(terms):
+        if 2 <= len(terms) <= 5 and len(set(terms)) == len(terms):
             phrases.append(tuple(terms))
+        elif len(terms) == 1:
+            # single-word required term: pair it with the branch title's first
+            # distinctive word so we still get a 2-term protected phrase
+            title_terms = [t for t in ordered_terms(branch.title) if t not in terms and len(t) > 3]
+            if title_terms:
+                phrases.append((terms[0], title_terms[0]))
     return _dedupe_phrases(phrases)[:24]
 
 

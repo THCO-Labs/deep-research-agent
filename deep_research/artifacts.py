@@ -49,7 +49,17 @@ class RunArtifacts:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         temporary.write_text(content, encoding="utf-8")
-        temporary.replace(target)
+        try:
+            temporary.replace(target)
+        except PermissionError:
+            # Windows can lock the target briefly between writes; fall back to direct write.
+            try:
+                target.write_text(content, encoding="utf-8")
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return target
 
     def read_text(self, file_path: str | Path) -> str:

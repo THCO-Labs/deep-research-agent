@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
 
 from tavily import TavilyClient
+
+try:
+    from ddgs import DDGS
+except Exception:
+    try:
+        from duckduckgo_search import DDGS
+    except Exception:
+        DDGS = None
 
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.errors import classify_exception
@@ -58,22 +67,69 @@ class TavilySearchClientPool:
         self._clients = tuple(TavilyClient(api_key=key) for key in keys)
         self.key_count = len(self._clients)
         self._cursor = 0
+        # Once all Tavily keys return quota errors, stop probing them — go straight
+        # to DuckDuckGo for the rest of the run. Avoids logging the same warning
+        # 149 times per run.
+        self._tavily_dead = False
+        # Track DuckDuckGo failures so we can short-circuit when DDG starts
+        # rate-limiting us (which happens after ~50-100 rapid queries).
+        self._ddg_consecutive_failures = 0
+        self._ddg_dead = False
 
     def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
         last_error: Exception | None = None
-        for offset in range(self.key_count):
-            index = (self._cursor + offset) % self.key_count
-            try:
-                response = self._clients[index].search(query, **kwargs)
-                self._cursor = (index + 1) % self.key_count
-                return response
-            except Exception as exc:
-                last_error = exc
-                if classify_exception(exc).category != "quota_or_rate_limit":
-                    raise
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("No Tavily search clients were available.")
+        if not self._tavily_dead:
+            for offset in range(self.key_count):
+                index = (self._cursor + offset) % self.key_count
+                try:
+                    response = self._clients[index].search(query, **kwargs)
+                    self._cursor = (index + 1) % self.key_count
+                    return response
+                except Exception as exc:
+                    last_error = exc
+                    if classify_exception(exc).category != "quota_or_rate_limit":
+                        raise
+                    if not _duckduckgo_available():
+                        raise
+                    continue  # try next key
+            # All Tavily keys returned quota errors. Mark as dead and log once.
+            if last_error is not None:
+                self._tavily_dead = True
+                logging.getLogger(__name__).warning(
+                    "All Tavily keys exhausted (%s); switching to DuckDuckGo for remainder of run.",
+                    last_error,
+                )
+        if self._ddg_dead:
+            raise RuntimeError("All search providers exhausted (Tavily quota + DuckDuckGo unavailable).")
+        try:
+            fallback_results = _search_with_duckduckgo(
+                query,
+                max_results=int(kwargs.get("max_results", 5)),
+            )
+        except Exception as exc:
+            self._ddg_consecutive_failures += 1
+            if self._ddg_consecutive_failures >= 5:
+                self._ddg_dead = True
+                logging.getLogger(__name__).error(
+                    "DuckDuckGo failed %d times in a row (%s); marking unavailable.",
+                    self._ddg_consecutive_failures, exc,
+                )
+            return {"results": [], "_provider": "duckduckgo"}
+        if fallback_results:
+            self._ddg_consecutive_failures = 0
+            return {"results": fallback_results, "_provider": "duckduckgo"}
+        # Empty results from DDG can mean rate-limited. Count as failure.
+        self._ddg_consecutive_failures += 1
+        if self._ddg_consecutive_failures >= 10:
+            self._ddg_dead = True
+            logging.getLogger(__name__).error(
+                "DuckDuckGo returned empty results %d times in a row; marking unavailable.",
+                self._ddg_consecutive_failures,
+            )
+        return {"results": [], "_provider": "duckduckgo"}
+
+
+MID_ACQUISITION_CHECKPOINT_INTERVAL = 5  # save state every N accepted sources
 
 
 def acquire_sources(
@@ -93,6 +149,7 @@ def acquire_sources(
     focus_terms_by_branch: dict[str, list[str]] | None = None,
     active_branch_ids: set[str] | None = None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    mid_checkpoint_callback: Callable[[list[SourceCandidate], list[SourceRecordV2]], None] | None = None,
 ) -> AcquisitionResult:
     metrics = AcquisitionMetrics()
     client = search_client or TavilySearchClientPool(settings)
@@ -175,7 +232,9 @@ def acquire_sources(
                 searches=metrics.search_count,
             )
             try:
-                search_results = _search(client, query, settings)
+                search_response = _search_raw(client, query, settings)
+                search_results = list(search_response.get("results", []))
+                search_provider = str(search_response.get("_provider", "tavily"))
             except Exception as exc:
                 metrics.failures.append(f"Search failed for {query!r}: {exc}")
                 _emit_progress(
@@ -194,6 +253,7 @@ def acquire_sources(
                 f"search returned {len(search_results)} candidate(s)",
                 branch_id=branch.id,
                 query=query,
+                search_provider=search_provider,
                 sources=len(sources),
                 candidates=len(candidates),
                 searches=metrics.search_count,
@@ -227,7 +287,7 @@ def acquire_sources(
                     )
                     continue
                 requires_browser = not _candidate_has_raw_content(candidate_raw := _raw_content(item))
-                if requires_browser and browser_scrapes_for_query >= browser_scrape_limit:
+                if requires_browser and browser_scrapes_for_query >= browser_scrape_limit and browser_scrape_limit > 0:
                     metrics.rejected_source_count += 1
                     reason = f"browser fallback budget exhausted for query ({browser_scrape_limit})"
                     metrics.failures.append(f"Skipped {url}: {reason}")
@@ -242,6 +302,11 @@ def acquire_sources(
                         searches=metrics.search_count,
                     )
                     continue
+                # When browser scraping is fully disabled (limit=0), fall through to httpx scraping
+                # rather than skipping — DuckDuckGo results have no raw content but httpx can still
+                # fetch many of them directly.
+                if requires_browser and browser_scrape_limit == 0:
+                    requires_browser = False
                 canonical = _safe_canonical(url)
                 if canonical in seen_urls:
                     continue
@@ -274,11 +339,20 @@ def acquire_sources(
                     source_id=len(sources) + 1,
                 )
                 if record is None:
+                    # Surface the rejection reason from the metrics failures log so
+                    # the activity file records WHY a candidate was rejected.
+                    rejection_reason = ""
+                    if metrics.failures:
+                        last_failure = metrics.failures[-1]
+                        if url in last_failure:
+                            # Strip the "Rejected <url>: " prefix for brevity
+                            rejection_reason = last_failure.split(": ", 2)[-1].split(";")[0].strip()[:200]
                     _emit_progress(
                         progress_callback,
                         "rejected source candidate",
                         branch_id=branch.id,
                         url=url,
+                        rejection_reason=rejection_reason,
                         sources=len(sources),
                         candidates=len(candidates),
                         searches=metrics.search_count,
@@ -295,6 +369,16 @@ def acquire_sources(
                     candidates=len(candidates),
                     searches=metrics.search_count,
                 )
+                # Mid-acquisition checkpoint: save progress every N sources so a
+                # crash/resume doesn't redo the entire acquisition from scratch.
+                if (
+                    mid_checkpoint_callback is not None
+                    and len(sources) % MID_ACQUISITION_CHECKPOINT_INTERVAL == 0
+                ):
+                    try:
+                        mid_checkpoint_callback(candidates, sources)
+                    except Exception:
+                        pass  # never let checkpoint failure abort acquisition
                 if sum(1 for source in sources if source.branch_id == branch.id) >= branch.min_sources:
                     break
 
@@ -501,7 +585,7 @@ def _write_source(
     )
 
 
-def _search(client: Any, query: str, settings: Any) -> list[dict[str, Any]]:
+def _search_raw(client: Any, query: str, settings: Any) -> dict[str, Any]:
     query = _trim_search_query(query)
     explicit_max_sources = int(getattr(settings, "max_sources", MINIMUM_SOURCE_TARGET) or 0)
     max_results = min(
@@ -518,7 +602,41 @@ def _search(client: Any, query: str, settings: Any) -> list[dict[str, Any]]:
         response = client.search(query, **kwargs)
     except TypeError:
         response = client.search(query, max_results=max_results)
-    return list(response.get("results", []))
+    return response
+
+
+def _duckduckgo_available() -> bool:
+    return DDGS is not None
+
+
+def _search_with_duckduckgo(query: str, *, max_results: int) -> list[dict[str, Any]]:
+    if DDGS is None:
+        return []
+    results: list[dict[str, Any]] = []
+    try:
+        with DDGS() as ddgs:
+            for rank, row in enumerate(ddgs.text(query, max_results=max_results)):
+                url = str((row or {}).get("href") or "")
+                if not url:
+                    continue
+                title = str((row or {}).get("title") or url)
+                snippet = str((row or {}).get("body") or (row or {}).get("snippet") or "")
+                if not snippet:
+                    snippet = title
+                # Assign a position-decay score (rank 0 → 0.9, rank 9 → 0.45) so
+                # search_score is informative even without Tavily relevance data.
+                positional_score = round(0.9 * (0.95 ** rank), 4)
+                results.append(
+                    {
+                        "url": url,
+                        "title": title,
+                        "content": snippet,
+                        "score": positional_score,
+                    }
+                )
+    except Exception:
+        return []
+    return results
 
 
 def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: str) -> list[str]:

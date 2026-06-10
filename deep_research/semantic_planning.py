@@ -88,6 +88,14 @@ def build_or_enrich_research_plan(
             failures=[f"LLM planning enrichment rejected: {exc}"],
         )
 
+    # Self-reflection: planner reviews its own output for gaps and redundancy.
+    # Only runs for non-trivial questions to avoid burning quota on simple lookups.
+    if len(enriched.branches) >= 2 and len(ordered_terms(enriched.question)) >= 5:
+        enriched = _critique_and_refine_plan(enriched, planner, planning_guidance=planning_guidance)
+
+    # Infer a dynamic writer persona from the question and plan domain.
+    enriched = _infer_writer_persona(enriched, planner)
+
     return PlanEnrichmentResult(
         plan=enriched,
         accepted=True,
@@ -95,6 +103,143 @@ def build_or_enrich_research_plan(
         payload=payload,
         failures=[],
     )
+
+
+def _critique_and_refine_plan(
+    plan: ResearchPlan,
+    planner: Any,
+    *,
+    planning_guidance: str = "",
+) -> ResearchPlan:
+    """Second LLM pass: planner reviews its own output for gaps and redundancy."""
+    branches_summary = "\n".join(
+        f"- {b.id}: {b.title} | queries: {', '.join(b.queries[:2])} | required_terms: {', '.join(b.required_terms[:3])}"
+        for b in plan.branches
+    )
+    prompt = f"""You are reviewing a research plan you just generated. Check it for three issues only:
+1. Missing angles — does the user request ask for something not covered by any branch?
+2. Redundant branches — do any two branches cover >80% of the same topic with near-identical queries?
+3. Overly generic queries — queries with fewer than 3 specific topic words that would return useless results.
+
+User request:
+{plan.question}
+
+Plan branches:
+{branches_summary}
+
+Additional guidance:
+{planning_guidance.strip()[:2000] if planning_guidance.strip() else "None"}
+
+Return exactly one JSON object.
+
+If the plan is sound:
+{{"approved": true}}
+
+If there are real issues:
+{{
+  "approved": false,
+  "suggested_fixes": [
+    {{"type": "add_queries", "branch_id": "branch_N", "queries": ["more specific query"]}},
+    {{"type": "remove_branch", "branch_id": "branch_N", "reason": "fully covered by branch_M"}},
+    {{"type": "add_branch", "title": "Missing angle title", "objective": "what to research", "queries": ["query 1", "query 2"], "required_terms": ["term1", "term2"]}}
+  ]
+}}
+
+Be conservative — only flag clear problems. JSON only."""
+    try:
+        response = planner.invoke([HumanMessage(content=prompt)])
+        text = str(getattr(response, "content", response)).strip()
+        if not text:
+            return plan
+        payload = _loads_json_object(_extract_json_object(text))
+        if payload.get("approved"):
+            return plan
+        fixes = payload.get("suggested_fixes")
+        if not isinstance(fixes, list) or not fixes:
+            return plan
+        return _apply_critique_fixes(plan, fixes)
+    except Exception:
+        return plan
+
+
+def _infer_writer_persona(plan: ResearchPlan, planner: Any) -> ResearchPlan:
+    """Ask the planner to infer a one-sentence writer persona from the question and domain.
+
+    The persona is used at synthesis time to give the writer a domain-appropriate
+    voice and expertise framing without any hardcoded domain lists.
+    Falls back silently — synthesis works fine with the default persona.
+    """
+    branch_titles = ", ".join(b.title for b in plan.branches[:6])
+    prompt = f"""Given this research question and its planned branches, write a single sentence describing the ideal expert who should write the final report.
+
+The sentence must:
+- Name the domain/field (e.g. "senior health policy analyst", "systems architect", "financial economist")
+- Specify the audience framing (e.g. "for a policy-informed technical audience", "for practitioners")
+- Sound like a role briefing, not a job posting
+
+User question:
+{plan.question[:600]}
+
+Research branches: {branch_titles}
+
+Return ONLY the one-sentence persona. No JSON, no extra text, no quotes."""
+    try:
+        response = planner.invoke([HumanMessage(content=prompt)])
+        persona = str(getattr(response, "content", response)).strip().strip('"').strip("'")
+        if len(persona) >= 40 and len(persona) <= 400 and "\n" not in persona:
+            return replace(plan, writer_persona=persona)
+    except Exception:
+        pass
+    return plan
+
+
+def _apply_critique_fixes(plan: ResearchPlan, fixes: list[dict[str, Any]]) -> ResearchPlan:
+    branches = list(plan.branches)
+    branch_index = {b.id: i for i, b in enumerate(branches)}
+    for fix in fixes[:6]:
+        if not isinstance(fix, dict):
+            continue
+        fix_type = str(fix.get("type", ""))
+
+        if fix_type == "add_queries":
+            bid = str(fix.get("branch_id", ""))
+            new_queries = [str(q) for q in (fix.get("queries") or []) if isinstance(q, str) and q.strip()]
+            if bid in branch_index and new_queries:
+                b = branches[branch_index[bid]]
+                merged = _dedupe(list(b.queries) + new_queries)[:MAX_QUERIES_PER_BRANCH]
+                branches[branch_index[bid]] = ResearchBranch(
+                    id=b.id, title=b.title, objective=b.objective,
+                    queries=merged, source_types=b.source_types,
+                    min_sources=b.min_sources, required_terms=b.required_terms,
+                    completion_criteria=b.completion_criteria,
+                )
+
+        elif fix_type == "remove_branch":
+            bid = str(fix.get("branch_id", ""))
+            if bid in branch_index and len(branches) > 1:
+                branches.pop(branch_index[bid])
+                branch_index = {b.id: i for i, b in enumerate(branches)}
+
+        elif fix_type == "add_branch" and len(branches) < MAX_LLM_BRANCHES:
+            title = str(fix.get("title", "")).strip()
+            objective = str(fix.get("objective", "")).strip()
+            queries = [str(q) for q in (fix.get("queries") or []) if isinstance(q, str) and q.strip()]
+            required_terms = [str(t) for t in (fix.get("required_terms") or []) if isinstance(t, str) and t.strip()]
+            if len(ordered_terms(title)) >= 1 and len(ordered_terms(objective)) >= 3 and queries:
+                new_id = f"branch_{len(branches) + 1}"
+                branches.append(ResearchBranch(
+                    id=new_id, title=title, objective=objective,
+                    queries=queries[:MAX_QUERIES_PER_BRANCH],
+                    source_types=["academic", "official_docs", "general_web"],
+                    min_sources=1, required_terms=required_terms[:MAX_REQUIRED_TERMS],
+                    completion_criteria=["Evidence addresses the branch objective."],
+                ))
+
+    if not branches:
+        return plan
+    branches = _renumber_branches(branches)
+    branches = _raise_branch_source_floor(branches, MINIMUM_SOURCE_TARGET)
+    return replace(plan, branches=branches, report_outline=[b.title for b in branches])
 
 
 def _planning_prompt(base_plan: ResearchPlan, *, planning_guidance: str = "") -> str:

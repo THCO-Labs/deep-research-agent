@@ -42,6 +42,7 @@ class ResearchPlan:
     branches: list[ResearchBranch]
     source_requirements: list[SourceRequirement] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
+    writer_persona: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

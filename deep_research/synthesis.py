@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+import json
 import re
 from typing import Any
 
@@ -242,6 +243,18 @@ def synthesize_report_with_model(
         evidence_cards=synthesis_cards,
         writing_guidance=writing_guidance,
     )
+    # Build an argumentative outline first so the writer has a thesis per section,
+    # not just a list of terms to cover. Only for multi-branch questions.
+    outline: dict[str, str] = {}
+    if len(plan.branches) >= 2:
+        outline = _build_argumentative_outline(
+            model=model,
+            plan=plan,
+            evidence_cards=synthesis_cards,
+            sources=evidence_sources,
+            settings=settings,
+            model_spec=model_spec,
+        )
     prompt = _synthesis_prompt(
         plan=plan,
         evidence_cards=synthesis_cards,
@@ -251,6 +264,7 @@ def synthesize_report_with_model(
         verification_failures=verification_failures or [],
         blueprint=report_blueprint,
         writing_guidance=writing_guidance,
+        argumentative_outline=outline,
     )
     response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
     text = str(response.content).strip()
@@ -277,10 +291,24 @@ def synthesize_report_with_model(
         model_spec=model_spec,
         settings=settings,
     )
-    return _normalize_report_markdown(expanded_report, evidence_sources)
+    # Targeted rewrite of the opening paragraph to ensure a direct answer leads.
+    final_report = _rewrite_opening_paragraph(
+        model=model,
+        report=_normalize_report_markdown(expanded_report, evidence_sources),
+        plan=plan,
+        opening_cards=_opening_cards(plan, synthesis_cards)[:6],
+        sources=evidence_sources,
+        settings=settings,
+        model_spec=model_spec,
+    )
+    return _normalize_report_markdown(final_report, evidence_sources)
 
 
 def _synthesis_model_spec(settings: Settings, plan: ResearchPlan, writing_guidance: str = "") -> str:
+    # Explicit synthesis_model override takes priority — allows routing the writer
+    # to a stronger model than the general orchestrator.
+    if getattr(settings, "synthesis_model", ""):
+        return settings.synthesis_model
     if not _criteria_rich_plan(plan, writing_guidance=writing_guidance):
         return settings.model
     provider, _, _model = settings.model.partition(":")
@@ -309,14 +337,18 @@ def _invoke_with_synthesis_budget(
 
 def _synthesis_request_kwargs(*, settings: Settings, prompt: str, model_spec: str) -> dict[str, int]:
     provider, _separator, _model_name = model_spec.partition(":")
-    if provider != "groq":
-        return {}
-    prompt_tokens = _rough_token_count(prompt)
-    requested_completion_tokens = min(
-        settings.model_max_output_tokens,
-        max(MIN_SYNTHESIS_COMPLETION_TOKENS, LOW_TPM_PROVIDER_BUDGET_TOKENS - prompt_tokens),
-    )
-    return {"max_tokens": requested_completion_tokens}
+    if provider == "groq":
+        prompt_tokens = _rough_token_count(prompt)
+        requested_completion_tokens = min(
+            settings.model_max_output_tokens,
+            max(MIN_SYNTHESIS_COMPLETION_TOKENS, LOW_TPM_PROVIDER_BUDGET_TOKENS - prompt_tokens),
+        )
+        return {"max_tokens": requested_completion_tokens}
+    if provider == "mistral_ai":
+        # Cap Mistral output so the streaming response can't hang indefinitely.
+        # 8000 tokens ≈ 6000 words — plenty for a long structured report.
+        return {"max_tokens": min(settings.model_max_output_tokens or 8000, 8000)}
+    return {}
 
 
 def _rough_token_count(text: str) -> int:
@@ -335,18 +367,25 @@ def _synthesis_prompt(
     verification_failures: list[str],
     blueprint: dict[str, Any] | None = None,
     writing_guidance: str = "",
+    argumentative_outline: dict[str, str] | None = None,
 ) -> str:
     source_lookup = {source.id: source for source in sources}
     evidence_lines = []
     selected_cards = _cards_for_synthesis(plan, evidence_cards)
+    # Track the top 2 cards per branch so we can give them richer excerpts.
+    branch_card_count: dict[str, int] = {}
     for card in selected_cards:
         source = source_lookup.get(card.source_id)
         if source is None:
             continue
+        branch_card_count[card.branch_id] = branch_card_count.get(card.branch_id, 0) + 1
+        # Top 2 cards per branch get the full excerpt (up to 320 chars) so the writer
+        # can quote or paraphrase from real language rather than just matching terms.
+        excerpt_limit = 320 if branch_card_count[card.branch_id] <= 2 else MAX_SYNTHESIS_EXCERPT_CHARS
         evidence_lines.append(
             (
                 f"- card {card.id}; branch {card.branch_id}; source [{card.source_id}] {source.title}; "
-                f"claim: {card.claim}; excerpt: {card.supporting_excerpt[:MAX_SYNTHESIS_EXCERPT_CHARS]}; "
+                f"claim: {card.claim}; excerpt: {card.supporting_excerpt[:excerpt_limit]}; "
                 f"limits: {', '.join(card.limitations[:2]) or 'none'}"
             )
         )
@@ -375,7 +414,17 @@ def _synthesis_prompt(
         writing_guidance=writing_guidance,
         target_profile=target_profile,
     )
-    return f"""You are writing a professional deep research report from verified evidence cards.
+    writer_persona = (plan.writer_persona.strip() if plan.writer_persona else "").strip()
+    persona_line = writer_persona if writer_persona else "You are writing a professional deep research report from verified evidence cards."
+    outline_text = "None"
+    if argumentative_outline:
+        outline_lines = [
+            f"- {bid}: {thesis}"
+            for bid, thesis in argumentative_outline.items()
+            if thesis.strip()
+        ]
+        outline_text = "\n".join(outline_lines) if outline_lines else "None"
+    return f"""{persona_line}
 
 Current date: {date.today().isoformat()}
 
@@ -419,6 +468,9 @@ Output language:
 
 Opening-answer evidence priority:
 {opening_priority}
+
+Argumentative outline — thesis to defend in each section (use this to structure your argument, not just list findings):
+{outline_text}
 
 Write the final report in Markdown.
 
@@ -695,6 +747,141 @@ def _insert_before_sources(report: str, addition: str) -> str:
     if separator:
         return body.rstrip() + "\n\n" + addition.strip() + "\n\n" + separator + source_tail
     return report.rstrip() + "\n\n" + addition.strip() + "\n"
+
+
+def _build_argumentative_outline(
+    *,
+    model: BaseChatModel,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    sources: list[SourceRecordV2],
+    settings: Settings,
+    model_spec: str,
+) -> dict[str, str]:
+    """Pre-synthesis pass: ask the model to commit to one thesis per branch.
+
+    Returns a {branch_id: thesis_sentence} dict. The thesis sentences are injected
+    into the main synthesis prompt so the writer has argumentative direction, not just
+    a coverage checklist. Falls back silently to an empty dict on any error.
+    """
+    source_lookup = {source.id: source for source in sources}
+    cards_by_branch: dict[str, list[EvidenceCard]] = {}
+    for card in evidence_cards:
+        cards_by_branch.setdefault(card.branch_id, []).append(card)
+
+    branch_summaries = []
+    for branch in plan.branches:
+        branch_cards = cards_by_branch.get(branch.id, [])[:5]
+        card_claims = "; ".join(f'"{c.claim}"' for c in branch_cards)
+        branch_summaries.append(
+            f"- {branch.id} ({branch.title}): objective={branch.objective[:200]}; top claims: {card_claims or 'none'}"
+        )
+
+    prompt = f"""You are planning a research report. For each branch below, write one sentence that states the main argument or finding the section should defend — not a topic label, but a claim the evidence supports.
+
+User question: {plan.question[:400]}
+
+Branches and their top evidence:
+{chr(10).join(branch_summaries)}
+
+Return ONLY a JSON object mapping branch_id to one thesis sentence. Example:
+{{"branch_1": "The evidence consistently shows X because Y.", "branch_2": "Despite claims of Z, the data supports W."}}
+
+JSON only. No prose, no markdown."""
+    try:
+        response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
+        text = str(response.content).strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return {
+                str(k): str(v).strip()
+                for k, v in parsed.items()
+                if isinstance(v, str) and v.strip()
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _rewrite_opening_paragraph(
+    *,
+    model: BaseChatModel,
+    report: str,
+    plan: ResearchPlan,
+    opening_cards: list[EvidenceCard],
+    sources: list[SourceRecordV2],
+    settings: Settings,
+    model_spec: str,
+) -> str:
+    """Targeted rewrite of the first substantive paragraph so it leads with a direct answer.
+
+    Only fires if the opening paragraph looks like hedging, a topic statement, or a
+    "this report examines..." preamble. Falls back to the original report on any error
+    or if the opening is already strong.
+    """
+    # Extract the first paragraph after headings.
+    lines = report.split("\n")
+    para_start = -1
+    para_end = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if para_start == -1:
+            if stripped and not stripped.startswith("#"):
+                para_start = i
+        elif para_start >= 0:
+            if not stripped:
+                para_end = i
+                break
+    if para_start < 0:
+        return report
+    if para_end < 0:
+        para_end = min(para_start + 8, len(lines))
+    opening_para = "\n".join(lines[para_start:para_end]).strip()
+    if not opening_para:
+        return report
+
+    # Skip rewrite if the paragraph already looks like a direct answer
+    # (contains a citation or is short and declarative).
+    if re.search(r"\[\d+\]", opening_para) and len(opening_para.split()) >= 30:
+        return report
+
+    source_lookup = {source.id: source for source in sources}
+    card_snippets = []
+    for card in opening_cards[:4]:
+        src = source_lookup.get(card.source_id)
+        if src:
+            card_snippets.append(f'[{card.source_id}] {card.claim} — "{card.supporting_excerpt[:200]}"')
+
+    prompt = f"""Rewrite the opening paragraph of this research report so that it immediately answers the user's question in one or two sentences, then develops the answer with cited evidence.
+
+User question: {plan.question[:400]}
+
+Current opening paragraph:
+{opening_para}
+
+Key evidence for the opening (use these source IDs for citations):
+{chr(10).join(card_snippets) or 'None'}
+
+Rules:
+- Start with the direct answer or main finding — not "This report examines..." or "Research has shown..."
+- Cite at least one source using [N] inline notation
+- Keep it 2–4 sentences maximum
+- Do not add section headings
+- Return ONLY the rewritten paragraph, nothing else"""
+    try:
+        response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
+        new_para = str(response.content).strip()
+        if not new_para or len(new_para) < 40 or len(new_para) > len(opening_para) * 4:
+            return report
+        # Splice the new paragraph back in.
+        new_lines = list(lines)
+        replacement = new_para.split("\n")
+        new_lines[para_start:para_end] = replacement
+        return "\n".join(new_lines)
+    except Exception:
+        return report
 
 
 def _normalize_report_markdown(report: str, sources: list[SourceRecordV2]) -> str:

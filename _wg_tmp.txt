@@ -1,0 +1,26 @@
+DeepResearch Bench evaluation guidance for this task:
+Write the report to satisfy these task-specific criteria while preserving factual grounding, citations, and the user's original request. Treat the criteria as a coverage and depth checklist across comprehensiveness, insight, instruction-following, and readability. Do not mention this benchmark guidance in the final report. Convert each criterion into visible analysis, definitions, comparisons, limitations, implications, or evidence-strength discussion as appropriate; do not paste the criteria as headings or a checklist. Optimize readability with coherent section order, paragraph transitions, precise terminology, and question-specific tables only when they improve comprehension.
+
+## comprehensiveness (dimension weight: 0.32)
+- Thoroughness of Duan Yongping's Philosophy Coverage (weight: 0.15): Evaluates if the article provides a complete and detailed account of Duan Yongping's specific investment principles, strategies, and approaches, including any unique aspects or adaptations (e.g., his emphasis on 'right business, right people, right price,' and understanding the business deeply).
+- Thoroughness of Warren Buffett's Philosophy Coverage (weight: 0.15): Core tenets (value investing, economic moats, management quality, circle of competence, margin of safety).
+- Thoroughness of Charlie Munger's Philosophy Coverage (weight: 0.15): Multidisciplinary mental models, psychological biases, avoiding stupidity, high-quality businesses.
+- Depth of Articulation of Core Investment Principles (weight: 0.25): Explain fundamental concepts beyond mere mentions - definitions, rationale, implications.
+- Identification of Similarities, Differences, and Inter-Influences (weight: 0.15): How they influenced one another (Munger on Buffett, Buffett/Munger on Duan).
+- Provision of Supporting Examples and Evidence (weight: 0.075): Specific investment decisions, key quotes, references to letters/speeches.
+- Coverage of Key Influences and Philosophical Evolution (weight: 0.075): Benjamin Graham for Buffett; Buffett shift towards quality businesses; Duan's business background.
+
+## insight (dimension weight: 0.39)
+- Depth and Clarity in Elucidating Core Tenets (weight: 0.25): Profound explanation of interconnections and underlying rationale for each investor.
+- Insightfulness of Comparative Analysis (weight: 0.3): Subtle distinctions, shared foundations, nature of influences.
+- Synthesis of Evidence into Coherent Philosophical Frameworks (weight: 0.15): Logical synthesis not fragmented ideas.
+- Originality of Perspective (weight: 0.15): Fresh perspectives, non-obvious connections.
+- Articulation of Foundational Logic and Enduring Significance (weight: 0.15): The "why" behind key philosophical elements.
+
+## instruction_following (dimension weight: 0.16)
+- Cover all three investors substantively; keep focus strictly on investment philosophy.
+
+## readability (dimension weight: 0.13)
+- Clear structure: intro, dedicated sections per investor, comparative analysis, conclusion.
+- Precise terminology with explanations (margin of safety, economic moats, compounding).
+- Smooth transitions; use tables only where they improve comprehension.

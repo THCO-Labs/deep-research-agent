@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 from deep_research.schemas import EvidenceCard, ResearchBranch, SourceRecordV2
 from deep_research.source_validation import (
@@ -21,12 +22,27 @@ def build_evidence_cards(
     source_texts: dict[int, str],
     question: str = "",
     max_cards_per_source: int = 3,
+    existing_cards: list[EvidenceCard] | None = None,
+    source_checkpoint_callback: Callable[[list[EvidenceCard]], None] | None = None,
 ) -> list[EvidenceCard]:
+    """Build evidence cards from sources.
+
+    existing_cards: cards already built in a previous (partial) run — sources
+      whose IDs already appear in existing_cards are skipped so we don't redo work.
+    source_checkpoint_callback: called after each source is processed so progress
+      is saved mid-node; never raises (caller must guard).
+    """
     branch_by_id = {branch.id: branch for branch in branches}
     question_terms = content_terms(question)
-    cards: list[EvidenceCard] = []
-    next_id = 1
+
+    # Re-use cards from a previous partial run and skip those source IDs.
+    cards: list[EvidenceCard] = list(existing_cards or [])
+    processed_source_ids: set[int] = {card.source_id for card in cards}
+    next_id = max((card.id for card in cards), default=0) + 1
+
     for source in sources:
+        if source.id in processed_source_ids:
+            continue
         branch = branch_by_id.get(source.branch_id)
         if branch is None:
             continue
@@ -73,6 +89,15 @@ def build_evidence_cards(
                 )
             )
             next_id += 1
+
+        # Mid-node checkpoint: save progress after each source so a crash+resume
+        # doesn't redo the full extraction from scratch.
+        if source_checkpoint_callback is not None:
+            try:
+                source_checkpoint_callback(cards)
+            except Exception:
+                pass
+
     return cards
 
 

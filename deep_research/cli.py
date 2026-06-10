@@ -79,6 +79,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--semantic-evidence-max-llm-cards", type=int, default=None)
     parser.add_argument("--allow-failed-verification", action="store_true", default=None)
     parser.add_argument("--allow-weak-tool-models", action="store_true", default=None)
+    parser.add_argument("--writing-guidance", default="", help="Optional guidance for the synthesis/writing stage.")
     parser.add_argument("--live", action="store_true")
     parser.add_argument(
         "--progress",
@@ -116,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 on_update=None if args.progress == "quiet" else print,
                 progress_mode=args.progress,
+                writing_guidance=args.writing_guidance or "",
             )
         else:
             settings = _settings_from_args(args, engine=args.engine or "local_langgraph")
@@ -124,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 on_update=None if args.progress == "quiet" else print,
                 progress_mode=args.progress,
+                writing_guidance=args.writing_guidance or "",
             )
     except ResearchRunError as exc:
         _print_run_error(exc)

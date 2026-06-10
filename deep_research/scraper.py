@@ -6,8 +6,12 @@ from functools import lru_cache
 from http import HTTPStatus
 from io import BytesIO
 import json
+import os
 import re
+import subprocess
+import sys
 from time import sleep
+import threading
 from typing import Any
 from urllib.parse import urljoin
 
@@ -99,6 +103,28 @@ def _request_headers(attempt: int) -> dict[str, str]:
     }
 
 
+def _kill_chrome_process(pid_holder: list[int]) -> None:
+    """Force-kill a Chromium process and its entire child tree.
+
+    Called after a browser-scrape hard timeout to ensure no orphan Chrome
+    processes accumulate.  Uses 'taskkill /T /F' on Windows (kills the whole
+    process tree) and SIGKILL on POSIX.  Silently ignores all errors so a
+    failed kill never blocks the caller.
+    """
+    for pid in pid_holder:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            else:
+                os.kill(pid, 9)
+        except Exception:
+            pass
+
+
 class PlaywrightScraper:
     def __init__(self, *, timeout_ms: int = 30_000, retries: int = 2):
         self.timeout_ms = timeout_ms
@@ -117,45 +143,103 @@ class PlaywrightScraper:
         raise ScrapeQualityError("; ".join(errors) or f"Could not fetch usable content from {url}")
 
     def _fetch_with_playwright(self, url: str) -> ScrapeResult:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+        """Run the browser fetch in a daemon thread so we can enforce a hard wall-clock
+        timeout independent of Playwright's internal timeouts.
+
+        Background: sync_playwright blocks the calling thread entirely.  page.evaluate()
+        has no reliable per-call timeout in the sync API, so a hung JS Promise (infinite
+        scroll, service workers, etc.) can freeze the process indefinitely.  Running in a
+        daemon thread lets us join() with a timeout and raise instead of hanging forever.
+
+        Chrome process cleanup: we track the Chromium subprocess PID and force-kill it
+        (plus its entire process tree) on timeout, so no orphan Chrome processes are left
+        behind even when the Playwright context never exits cleanly.
+        """
+        hard_timeout_s = (self.timeout_ms + 15_000) / 1000  # page timeout + 15 s grace
+
+        result_holder: list[ScrapeResult] = []
+        error_holder: list[BaseException] = []
+        browser_holder: list[Any] = []
+        chrome_pid_holder: list[int] = []
+
+        def _run() -> None:
             try:
-                page = browser.new_page()
-                response = page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
-                if response is not None and response.status >= 400:
-                    raise RuntimeError(f"HTTP {response.status} while fetching {url}")
-                if response is not None and _is_pdf_response(response.headers, response.url):
-                    markdown = _extract_pdf_text(response.body())
-                    return ScrapeResult(
-                        url=response.url,
-                        title=_title_from_url(response.url),
-                        markdown=markdown,
-                        extraction_method="playwright_pdf",
-                    )
-                try:
-                    page.wait_for_load_state("networkidle", timeout=5_000)
-                except PlaywrightTimeoutError:
-                    pass
-                _settle_dynamic_page(page)
-                title = page.title()
-                html = page.content()
-                refresh_url = _meta_refresh_url(html, page.url)
-                if refresh_url and refresh_url != page.url:
-                    page.goto(refresh_url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True)
+                    browser_holder.append(browser)
+                    # Record the Chromium PID so we can force-kill it on timeout.
                     try:
-                        page.wait_for_load_state("networkidle", timeout=5_000)
-                    except PlaywrightTimeoutError:
+                        pid = browser._impl_obj._channel._connection._transport._proc.pid
+                        if pid:
+                            chrome_pid_holder.append(pid)
+                    except Exception:
                         pass
-                    _settle_dynamic_page(page)
-                    title = page.title()
-                    html = page.content()
-                return ScrapeResult(
-                    url=page.url,
-                    title=title,
-                    markdown=html_to_markdown(html, title=title),
-                )
-            finally:
-                browser.close()
+                    try:
+                        page = browser.new_page()
+                        response = page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                        if response is not None and response.status >= 400:
+                            raise RuntimeError(f"HTTP {response.status} while fetching {url}")
+                        if response is not None and _is_pdf_response(response.headers, response.url):
+                            markdown = _extract_pdf_text(response.body())
+                            result_holder.append(ScrapeResult(
+                                url=response.url,
+                                title=_title_from_url(response.url),
+                                markdown=markdown,
+                                extraction_method="playwright_pdf",
+                            ))
+                            return
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=5_000)
+                        except PlaywrightTimeoutError:
+                            pass
+                        _settle_dynamic_page(page)
+                        title = page.title()
+                        html = page.content()
+                        refresh_url = _meta_refresh_url(html, page.url)
+                        if refresh_url and refresh_url != page.url:
+                            page.goto(refresh_url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=5_000)
+                            except PlaywrightTimeoutError:
+                                pass
+                            _settle_dynamic_page(page)
+                            title = page.title()
+                            html = page.content()
+                        result_holder.append(ScrapeResult(
+                            url=page.url,
+                            title=title,
+                            markdown=html_to_markdown(html, title=title),
+                        ))
+                    finally:
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+            except Exception as exc:
+                error_holder.append(exc)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=hard_timeout_s)
+
+        if thread.is_alive():
+            # Thread is still hung. Force-kill the Chrome process tree so no orphan
+            # processes are left behind, then raise a timeout error.
+            _kill_chrome_process(chrome_pid_holder)
+            if browser_holder:
+                try:
+                    browser_holder[0].close()
+                except Exception:
+                    pass
+            raise ScrapeQualityError(
+                f"Browser scrape hard timeout ({hard_timeout_s:.0f}s) exceeded for {url}"
+            )
+
+        if error_holder:
+            raise error_holder[0]
+        if result_holder:
+            return result_holder[0]
+        raise ScrapeQualityError(f"Browser scrape returned no result for {url}")
 
     def _fetch_with_httpx(self, url: str) -> ScrapeResult:
         response = self._httpx_get(url)
@@ -191,7 +275,15 @@ class PlaywrightScraper:
         )
 
     def _httpx_get(self, url: str) -> httpx.Response:
-        timeout = httpx.Timeout(self.timeout_ms / 1000, connect=min(10.0, self.timeout_ms / 1000))
+        # Separate connect/read/write/pool timeouts so a hostile server that drips
+        # bytes forever (or a stalled TCP read) can't pin the worker thread.
+        total = self.timeout_ms / 1000
+        timeout = httpx.Timeout(
+            connect=min(10.0, total),
+            read=total,
+            write=total,
+            pool=10.0,
+        )
         last_error: Exception | None = None
         attempts = self.retries
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
@@ -602,17 +694,20 @@ def _settle_dynamic_page(page: Any) -> None:
         page.wait_for_selector("article, main, [role='main'], body", timeout=3_000)
     except Exception:
         pass
+    # Scroll to trigger lazy-loaded content.  The evaluate() call uses a synchronous
+    # scroll pattern (no async/await) to avoid the hanging-Promise failure mode.
     try:
         page.evaluate(
             """
-            async () => {
-              for (const y of [0.35, 0.7, 1]) {
-                window.scrollTo(0, Math.floor(document.body.scrollHeight * y));
-                await new Promise(resolve => setTimeout(resolve, 250));
-              }
+            () => {
+              const h = document.body.scrollHeight;
+              window.scrollTo(0, Math.floor(h * 0.35));
+              window.scrollTo(0, Math.floor(h * 0.70));
+              window.scrollTo(0, h);
               window.scrollTo(0, 0);
             }
-            """
+            """,
+            timeout=3_000,
         )
     except Exception:
         pass
@@ -639,7 +734,8 @@ def _click_expand_controls(page: Any) -> None:
               }
               return clicks;
             }
-            """
+            """,
+            timeout=3_000,
         )
         if clicked:
             page.wait_for_timeout(500)

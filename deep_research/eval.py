@@ -101,6 +101,7 @@ def evaluate_dataset(
             expected_answer_recall >= EXPECTED_ANSWER_RECALL_THRESHOLD
             and must_include.score == 1.0
         )
+        branch_coverage = _branch_coverage_from_run(result.run_dir if result else None)
         row = {
             "id": case.id,
             "question": case.question,
@@ -134,6 +135,9 @@ def evaluate_dataset(
             "suggested_action": failure.get("suggested_action"),
             "repair_checklist_path": metrics.get("repair_checklist_path"),
             "report_reconstructed": metrics.get("report_reconstructed", False),
+            "branch_coverage_scores": branch_coverage,
+            "branch_coverage_mean": round(sum(branch_coverage.values()) / max(len(branch_coverage), 1), 4) if branch_coverage else 0.0,
+            "token_usage": metrics.get("token_usage"),
         }
         rows.append(row)
         with results_path.open("a", encoding="utf-8") as handle:
@@ -257,6 +261,9 @@ def summarize_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "failures": [row["id"] for row in rows if not row["verification_valid"]],
         "run_failure_count": sum(1 for row in rows if row.get("run_failed")),
         "failure_categories": _failure_categories(rows),
+        "avg_branch_coverage": round(
+            sum(float(row.get("branch_coverage_mean", 0.0)) for row in rows) / len(rows), 4
+        ),
     }
 
 
@@ -385,6 +392,22 @@ def _load_source_corpus(run_dir: Path | None) -> str:
         path.read_text(encoding="utf-8", errors="replace")
         for path in sorted(source_dir.glob("*.md"))
     )
+
+
+def _branch_coverage_from_run(run_dir: Path | None) -> dict[str, float]:
+    """Return per-branch coverage ratios from the semantic_enrichment checkpoint."""
+    if run_dir is None:
+        return {}
+    checkpoint = _read_json(run_dir / "checkpoints" / "semantic_enrichment.json")
+    matrix = checkpoint.get("coverage_matrix", {})
+    result: dict[str, float] = {}
+    for branch in matrix.get("branches", []):
+        bid = str(branch.get("branch_id", ""))
+        covered = len(branch.get("covered_points", []))
+        required = len(branch.get("required_points", []))
+        if bid:
+            result[bid] = round(covered / max(required, 1), 3)
+    return result
 
 
 def _failure_categories(rows: list[dict[str, Any]]) -> dict[str, int]:

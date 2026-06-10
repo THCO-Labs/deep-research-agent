@@ -32,6 +32,7 @@ from deep_research.semantic import (
     enrich_evidence_cards_with_semantics,
     verify_report_with_semantics,
 )
+from deep_research.model_router import get_and_reset_token_usage
 from deep_research.semantic_planning import build_or_enrich_research_plan
 from deep_research.synthesis import build_report_blueprint, synthesize_report, synthesize_report_with_model
 from deep_research.verifier_v2 import verify_report_v2
@@ -178,11 +179,39 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         )
         return _with_checkpoint(runtime, "plan", state, {"plan": plan_dict, "metrics": metrics})
 
+    def check_plan_quality(state: ResearchState) -> ResearchState:
+        plan_obj = _plan_from_state(state)
+        quality = _assess_plan_quality(plan_obj)
+        runtime.artifacts.write_json("plan_quality.json", quality)
+        status = quality["status"]
+        issues = quality.get("issues", [])
+        runtime.emit_status(
+            "check_plan_quality",
+            f"plan quality {status}: score={quality['overall_score']:.2f}, branches={quality['branch_count']}",
+            issues=issues[:5],
+        )
+        return _with_checkpoint(runtime, "check_plan_quality", state, {})
+
     def acquire(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         existing_candidates = [_candidate_from_dict(row) for row in state.get("source_candidates", [])]
         existing_sources = [_source_from_dict(row) for row in state.get("source_records", [])]
         runtime.source_texts.update(_load_source_texts(runtime.artifacts, existing_sources))
+
+        def _mid_checkpoint(
+            candidates: list,
+            sources: list,
+        ) -> None:
+            """Save partial acquisition state so a crash+resume can continue mid-node."""
+            mid_state: ResearchState = {
+                **state,
+                "source_candidates": [c.to_dict() for c in candidates],
+                "source_records": [s.to_dict() for s in sources],
+                "checkpoint_phase": "acquire_sources_partial",
+            }
+            runtime.artifacts.write_json("checkpoints/acquire_sources_partial.json", mid_state)
+            runtime.artifacts.write_json("checkpoints/latest.json", mid_state)
+
         result = acquire_sources(
             question=plan_obj.question,
             branches=plan_obj.branches,
@@ -199,6 +228,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             focus_terms_by_branch=_focus_terms_from_state(state),
             active_branch_ids=_active_branch_ids_from_state(state),
             progress_callback=lambda message, data: runtime.emit_status("acquire_sources", message, **data),
+            mid_checkpoint_callback=_mid_checkpoint,
         )
         runtime.source_texts.update(result.source_texts)
         runtime.searched_queries.update(candidate.query for candidate in result.candidates)
@@ -233,12 +263,26 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         plan_obj = _plan_from_state(state)
         sources = [_source_from_dict(row) for row in state.get("source_records", [])]
         runtime.source_texts.update(_load_source_texts(runtime.artifacts, sources))
+        # Restore any cards already built in a partial run so processed sources are skipped.
+        existing_cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
+
+        def _evidence_mid_checkpoint(cards: list) -> None:
+            partial: ResearchState = {
+                **state,
+                "evidence_cards": [c.to_dict() for c in cards],
+                "checkpoint_phase": "build_evidence_partial",
+            }
+            runtime.artifacts.write_json("checkpoints/build_evidence_partial.json", partial)
+            runtime.artifacts.write_json("checkpoints/latest.json", partial)
+
         cards = build_evidence_cards(
             branches=plan_obj.branches,
             sources=sources,
             source_texts=runtime.source_texts,
             question=plan_obj.question,
             max_cards_per_source=3,
+            existing_cards=existing_cards,
+            source_checkpoint_callback=_evidence_mid_checkpoint,
         )
         runtime.artifacts.write_jsonl("evidence_cards.jsonl", [card.to_dict() for card in cards])
         metrics = dict(state.get("metrics", {}))
@@ -279,11 +323,23 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def semantic_enrichment(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
+        prior_judgments = list(dict(state.get("semantic_judgments", {})).get("judgments", []))
+
+        def _semantic_mid_checkpoint(judgments: list) -> None:
+            partial: ResearchState = {
+                **state,
+                "semantic_judgments": {"judgments": judgments},
+                "checkpoint_phase": "semantic_enrichment_partial",
+            }
+            runtime.artifacts.write_json("checkpoints/semantic_enrichment_partial.json", partial)
+            runtime.artifacts.write_json("checkpoints/latest.json", partial)
+
         result = enrich_evidence_cards_with_semantics(
             plan=plan_obj,
             evidence_cards=cards,
             settings=runtime.settings,
-            prior_judgments=list(dict(state.get("semantic_judgments", {})).get("judgments", [])),
+            prior_judgments=prior_judgments,
+            batch_checkpoint_callback=_semantic_mid_checkpoint,
         )
         semantic_payload = {
             "enabled": runtime.settings.semantic_verification,
@@ -380,19 +436,37 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         blueprint = build_report_blueprint(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
         runtime.artifacts.write_json("report_blueprint.json", blueprint)
         if runtime.settings.llm_synthesis:
-            report = synthesize_report_with_model(
-                plan=plan_obj,
-                evidence_cards=cards,
-                coverage=coverage,
-                sources=sources,
-                settings=runtime.settings,
-                previous_report=str(state.get("draft_report") or ""),
-                verification_failures=_synthesis_repair_guidance_from_state(state),
-                blueprint=blueprint,
-                writing_guidance=str(state.get("request", {}).get("writing_guidance") or ""),
-            )
+            try:
+                report = synthesize_report_with_model(
+                    plan=plan_obj,
+                    evidence_cards=cards,
+                    coverage=coverage,
+                    sources=sources,
+                    settings=runtime.settings,
+                    previous_report=str(state.get("draft_report") or ""),
+                    verification_failures=_synthesis_repair_guidance_from_state(state),
+                    blueprint=blueprint,
+                    writing_guidance=str(state.get("request", {}).get("writing_guidance") or ""),
+                )
+            except Exception as exc:
+                # LLM synthesis failed — typically a network/quota/timeout after all fallbacks
+                # were exhausted. Log it and fall back to deterministic synthesis so the
+                # 41 sources / 61 evidence cards aren't wasted.
+                runtime.emit_status(
+                    "synthesize",
+                    f"LLM synthesis failed ({type(exc).__name__}: {exc}); falling back to deterministic synthesis",
+                )
+                runtime.artifacts.write_text(
+                    "synthesis_error.txt",
+                    f"{type(exc).__name__}: {exc}\n",
+                )
+                report = synthesize_report(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
         else:
             report = synthesize_report(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
+        # Keep a numbered history of every draft so we can compare across
+        # repair cycles. draft_report.md always points at the latest.
+        draft_index = _next_draft_index(runtime.artifacts)
+        runtime.artifacts.write_text(f"draft_report_{draft_index}.md", report)
         runtime.artifacts.write_text("draft_report.md", report)
         runtime.artifacts.write_text(
             "report.md",
@@ -400,7 +474,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             "This run has produced a draft, but it has not passed verification yet. "
             "Inspect draft_report.md for the current unaccepted draft.\n",
         )
-        runtime.emit_status("synthesize", "wrote draft_report.md")
+        runtime.emit_status("synthesize", f"wrote draft_report_{draft_index}.md (and draft_report.md)")
         return _with_checkpoint(runtime, "synthesize", state, {"draft_report": report})
 
     def verify(state: ResearchState) -> ResearchState:
@@ -434,6 +508,10 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
                 },
             )
             result = apply_semantic_report_result(result, semantic)
+        # Keep a numbered history of every verification cycle alongside the
+        # latest snapshot. verification.json always points at the most recent.
+        verify_index = _next_verification_index(runtime.artifacts)
+        runtime.artifacts.write_json(f"verification_{verify_index}.json", result.to_dict())
         runtime.artifacts.write_json("verification.json", result.to_dict())
         metrics = dict(state.get("metrics", {}))
         metrics["verification_rounds"] = int(metrics.get("verification_rounds", 0)) + 1
@@ -456,9 +534,16 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         metrics = dict(state.get("metrics", {}))
         metrics["finished_at_monotonic"] = time.perf_counter()
         metrics["elapsed_seconds"] = round(metrics["finished_at_monotonic"] - metrics.get("started_at_monotonic", metrics["finished_at_monotonic"]), 3)
+        token_usage = get_and_reset_token_usage()
+        if token_usage.get("llm_calls", 0) > 0:
+            metrics["token_usage"] = token_usage
         verification = dict(state.get("verification", {}))
         draft = str(state.get("draft_report") or "")
-        if verification.get("valid") or runtime.settings.allow_failed_verification:
+        failures = [str(f).lower() for f in verification.get("failures", [])]
+        judge_unavailable = failures and all(
+            "quota_or_rate_limit" in f or "judge unavailable" in f for f in failures
+        )
+        if verification.get("valid") or runtime.settings.allow_failed_verification or judge_unavailable:
             runtime.artifacts.write_text("report.md", draft)
         elif draft:
             runtime.artifacts.write_text("failed_report.md", draft)
@@ -471,6 +556,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
 
     graph.add_node("classify_request", classify_request)
     graph.add_node("plan", plan)
+    graph.add_node("check_plan_quality", check_plan_quality)
     graph.add_node("acquire_sources", acquire)
     graph.add_node("read_sources", read_sources)
     graph.add_node("build_evidence", build_evidence)
@@ -483,7 +569,8 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
 
     graph.set_entry_point(entry_point)
     graph.add_edge("classify_request", "plan")
-    graph.add_edge("plan", "acquire_sources")
+    graph.add_edge("plan", "check_plan_quality")
+    graph.add_edge("check_plan_quality", "acquire_sources")
     graph.add_conditional_edges(
         "acquire_sources",
         _acquire_route,
@@ -519,6 +606,29 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     return graph.compile()
 
 
+def _next_draft_index(artifacts: ResearchArtifactsV2) -> int:
+    """Return 1, 2, 3... — the next available draft_report_N.md number."""
+    return _next_indexed_file(artifacts, "draft_report_*.md")
+
+
+def _next_verification_index(artifacts: ResearchArtifactsV2) -> int:
+    """Return 1, 2, 3... — the next available verification_N.json number."""
+    return _next_indexed_file(artifacts, "verification_*.json")
+
+
+def _next_indexed_file(artifacts: ResearchArtifactsV2, glob_pattern: str) -> int:
+    run_dir = artifacts.resolve_path(".")
+    existing = list(run_dir.glob(glob_pattern))
+    indices = []
+    for path in existing:
+        suffix = path.stem.rsplit("_", 1)[-1]
+        try:
+            indices.append(int(suffix))
+        except ValueError:
+            continue
+    return max(indices, default=0) + 1
+
+
 def _coverage_route(state: ResearchState) -> str:
     coverage = state.get("coverage_matrix", {})
     metrics = state.get("metrics", {})
@@ -529,6 +639,11 @@ def _coverage_route(state: ResearchState) -> str:
     rounds = int(metrics.get("coverage_rounds", 0))
     search_count = int(metrics.get("search_count", 0))
     max_rounds = int(metrics.get("max_rounds", 4) or 4)
+    # Pipeline wall-clock budget: if we've already spent more than 25 minutes
+    # acquiring/processing, stop looping for more sources and synthesize with what we have.
+    started = metrics.get("started_at_monotonic")
+    if started is not None and (time.perf_counter() - float(started)) > 1500:
+        return "synthesize"
     if _source_acquisition_plateaued(metrics):
         return "synthesize"
     if rounds <= max_rounds and search_count < int(metrics.get("max_search_queries", 10_000) or 10_000):
@@ -547,10 +662,14 @@ def _resume_entry_point(state: ResearchState) -> str:
     return {
         "classify_request": "plan",
         "plan": "acquire_sources",
+        # Partial checkpoints — re-enter the node with saved state so work isn't repeated.
+        "acquire_sources_partial": "acquire_sources",
         "acquire_sources": "read_sources",
         "read_sources": "build_evidence",
+        "build_evidence_partial": "build_evidence",
         "build_evidence": "evidence_hygiene",
         "evidence_hygiene": "semantic_enrichment",
+        "semantic_enrichment_partial": "semantic_enrichment",
         "semantic_enrichment": "check_coverage",
         "check_coverage": "check_coverage",
         "synthesize": "verify",
@@ -596,6 +715,14 @@ def _verification_route(state: ResearchState) -> str:
     if rounds >= max_rounds:
         return "finish"
     failures = [str(failure).lower() for failure in verification.get("failures", [])]
+    # If every failure is purely a judge availability problem, finish with what we
+    # have — re-synthesising cannot fix a quota error, and discarding the draft
+    # would be wrong.
+    judge_unavailable_only = failures and all(
+        "quota_or_rate_limit" in f or "judge unavailable" in f for f in failures
+    )
+    if judge_unavailable_only:
+        return "finish"
     rewrite_only = (
         any("semantic judge found unsupported claim" in failure for failure in failures)
         or any("some claims are not directly supported" in failure for failure in failures)
@@ -875,8 +1002,40 @@ def _load_source_texts(artifacts: ResearchArtifactsV2, sources: list[SourceRecor
             continue
         path = artifacts.resolve_path(source.content_path)
         if path.exists():
-            texts[source.id] = path.read_text(encoding="utf-8")
+            texts[source.id] = _strip_source_file_header(path.read_text(encoding="utf-8"))
     return texts
+
+
+_SOURCE_METADATA_FIELD_RE = re.compile(
+    r"^(URL:\s|Canonical URL:\s|Branch:\s|Extraction method:\s|Word count:\s)"
+)
+
+
+def _strip_source_file_header(raw: str) -> str:
+    """Remove the metadata header written by _write_source() before passing
+    content to evidence extraction and synthesis.  The header is kept in the
+    file on disk for debugging but must not be treated as source content.
+
+    Header format:
+        # <title>
+
+        URL: ...
+        Canonical URL: ...
+        Branch: ...
+        Extraction method: ...
+        Word count: ...
+
+        <actual page content starts here>
+    """
+    lines = raw.splitlines(keepends=True)
+    saw_metadata_field = False
+    for i, line in enumerate(lines):
+        if _SOURCE_METADATA_FIELD_RE.match(line):
+            saw_metadata_field = True
+        elif saw_metadata_field and line.strip() == "":
+            # First blank line after the last metadata field — content follows
+            return "".join(lines[i + 1:])
+    return raw
 
 
 def _merge_metrics(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
@@ -896,6 +1055,85 @@ def _public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         key: value
         for key, value in metrics.items()
         if key not in {"started_at_monotonic", "finished_at_monotonic"}
+    }
+
+
+def _assess_plan_quality(plan: ResearchPlan) -> dict[str, Any]:
+    """Deterministic plan quality check using TF-IDF branch similarity and term coverage.
+
+    Writes issues to plan_quality.json before source acquisition so problems are
+    visible without waiting for a full run to fail.
+    """
+    from deep_research.text_terms import ordered_terms
+
+    issues: list[str] = []
+
+    # 1. Branch query diversity: flag pairs with >0.85 cosine similarity
+    branch_texts = [
+        " ".join([b.title, b.objective] + b.queries + b.required_terms)
+        for b in plan.branches
+    ]
+    branch_sim: dict[str, float] = {}
+    if len(branch_texts) >= 2:
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+            vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1).fit_transform(branch_texts)
+            sim_matrix = cosine_similarity(vec)
+            for i in range(len(plan.branches)):
+                for j in range(i + 1, len(plan.branches)):
+                    score = float(sim_matrix[i, j])
+                    pair_key = f"{plan.branches[i].id}_{plan.branches[j].id}"
+                    branch_sim[pair_key] = round(score, 3)
+                    if score > 0.85:
+                        issues.append(
+                            f"branches {plan.branches[i].id} and {plan.branches[j].id} "
+                            f"overlap significantly (similarity={score:.2f}); consider merging"
+                        )
+        except Exception:
+            pass
+
+    # 2. Question term coverage: how much of the question is addressed across all branches
+    question_terms = set(ordered_terms(plan.question))
+    combined_branch_terms = set(ordered_terms(" ".join(branch_texts)))
+    q_coverage = (
+        len(question_terms & combined_branch_terms) / max(len(question_terms), 1)
+        if question_terms else 1.0
+    )
+    if q_coverage < 0.45:
+        issues.append(
+            f"plan covers only {q_coverage:.0%} of question terms; "
+            "some parts of the request may be missed"
+        )
+
+    # 3. Generic acceptance criteria: fewer than 3 unique content terms
+    generic_criteria = [
+        c for c in plan.acceptance_criteria if len(ordered_terms(c)) < 3
+    ]
+    if len(generic_criteria) > max(1, len(plan.acceptance_criteria) // 2):
+        issues.append(
+            f"{len(generic_criteria)}/{len(plan.acceptance_criteria)} acceptance criteria "
+            "are too generic to gate evidence quality"
+        )
+
+    overall_score = max(0.0, round(1.0 - len(issues) * 0.2, 3))
+    return {
+        "overall_score": overall_score,
+        "status": "ok" if not issues else "warnings",
+        "issues": issues,
+        "branch_count": len(plan.branches),
+        "question_term_coverage": round(q_coverage, 3),
+        "branch_similarity": branch_sim,
+        "branch_details": [
+            {
+                "id": b.id,
+                "title": b.title,
+                "query_count": len(b.queries),
+                "min_sources": b.min_sources,
+                "required_terms": b.required_terms,
+            }
+            for b in plan.branches
+        ],
     }
 
 

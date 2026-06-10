@@ -21,9 +21,9 @@ GROQ_DEFAULT_MODEL = "groq:openai/gpt-oss-20b"
 GROQ_DEFAULT_FAST_MODEL = "groq:openai/gpt-oss-20b"
 OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
 OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
-OPENROUTER_DEFAULT_MODEL = "openrouter:openrouter/free"
-OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:openrouter/free"
-MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter"})
+OPENROUTER_DEFAULT_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GOOGLE_DEFAULT_MODEL,
     "fast": GROQ_DEFAULT_FAST_MODEL,
@@ -72,10 +72,11 @@ class Settings:
     analyst_model: str = GOOGLE_DEFAULT_FAST_MODEL
     verifier_model: str = GOOGLE_DEFAULT_FAST_MODEL
     judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    synthesis_model: str = ""
     scrape_char_limit: int = 15_000
     scrape_timeout_ms: int = 20_000
     scrape_retries: int = 1
-    max_browser_scrapes_per_query: int = 4
+    max_browser_scrapes_per_query: int = 12
     blocked_source_patterns: tuple[str, ...] = field(default_factory=tuple)
     tool_excerpt_char_limit: int = 2_500
     precollect_sources: bool = True
@@ -95,6 +96,8 @@ class Settings:
     openrouter_app_title: str = "Deep Research Agent"
     tavily_api_key: str = field(default="", repr=False)
     tavily_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    mistral_api_key: str = field(default="", repr=False)
+    mistral_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
     @classmethod
     def from_env(
@@ -131,6 +134,7 @@ class Settings:
         analyst_model: str | None = None,
         verifier_model: str | None = None,
         judge_model: str | None = None,
+        synthesis_model: str | None = None,
         scrape_char_limit: int | None = None,
         scrape_timeout_ms: int | None = None,
         scrape_retries: int | None = None,
@@ -154,9 +158,11 @@ class Settings:
         google_api_keys = _collect_numbered_env_values("GOOGLE_API_KEY")
         groq_api_keys = _collect_numbered_env_values("GROQ_API_KEY")
         openrouter_api_keys = _collect_numbered_env_values("OPENROUTER_API_KEY")
+        mistral_api_keys = _collect_numbered_env_values("MISTRAL_API_KEY")
         google_api_key = google_api_keys[0] if google_api_keys else ""
         groq_api_key = groq_api_keys[0] if groq_api_keys else ""
         openrouter_api_key = openrouter_api_keys[0] if openrouter_api_keys else ""
+        mistral_api_key = mistral_api_keys[0] if mistral_api_keys else ""
         tavily_api_keys = _collect_numbered_env_values(
             "TAVILY_API_KEY",
             extra_names=_semantic_api_key_env_names("TAVILY"),
@@ -298,6 +304,12 @@ class Settings:
                 fallback=resolved_fast_model,
                 role="judge",
             ),
+            synthesis_model=_resolve_role_model(
+                resolved_provider,
+                synthesis_model or _env_model_override("DEEP_RESEARCH_SYNTHESIS_MODEL", provider_explicit=provider_explicit),
+                fallback="",
+                role="synthesis",
+            ),
             scrape_char_limit=scrape_char_limit
             or int(os.environ.get("DEEP_RESEARCH_SCRAPE_CHAR_LIMIT") or _default_scrape_limit(resolved_provider)),
             scrape_timeout_ms=scrape_timeout_ms
@@ -308,7 +320,7 @@ class Settings:
             else int(os.environ.get("DEEP_RESEARCH_SCRAPE_RETRIES") or _default_scrape_retries(mode)),
             max_browser_scrapes_per_query=max_browser_scrapes_per_query
             if max_browser_scrapes_per_query is not None
-            else int(os.environ.get("DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY") or "4"),
+            else int(os.environ.get("DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY") or "12"),
             blocked_source_patterns=blocked_source_patterns
             if blocked_source_patterns is not None
             else _split_env_list(os.environ.get("DEEP_RESEARCH_BLOCKED_SOURCE_PATTERNS", "")),
@@ -349,6 +361,8 @@ class Settings:
             or "Deep Research Agent",
             tavily_api_key=tavily_api_key,
             tavily_api_keys=tavily_api_keys,
+            mistral_api_key=mistral_api_key,
+            mistral_api_keys=mistral_api_keys,
         )
         settings.validate()
         return settings
@@ -368,6 +382,10 @@ class Settings:
     @property
     def tavily_key_pool(self) -> tuple[str, ...]:
         return self.tavily_api_keys or ((self.tavily_api_key,) if self.tavily_api_key else ())
+
+    @property
+    def mistral_key_pool(self) -> tuple[str, ...]:
+        return self.mistral_api_keys or ((self.mistral_api_key,) if self.mistral_api_key else ())
 
     def validate(self) -> None:
         missing = []

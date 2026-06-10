@@ -1,0 +1,1314 @@
+C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\deep_research\scraper.py:256: XMLParsedAsHTMLWarning: It looks like you're using an HTML parser to parse an XML document.
+
+Assuming this really is an XML document, what you're doing might work, but you should know that using an XML parser will be more reliable. To parse this document as XML, make sure you have the Python package 'lxml' installed, and pass the keyword argument `features="xml"` into the BeautifulSoup constructor.
+
+If you want or need to use an HTML parser on this document, you can make this warning go away by filtering it. To do that, run this code before calling the BeautifulSoup constructor:
+
+    from bs4 import XMLParsedAsHTMLWarning
+    import warnings
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+  return BeautifulSoup(html, parser)
+C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\deep_research\scraper.py:297: XMLParsedAsHTMLWarning: It looks like you're using an HTML parser to parse an XML document.
+
+Assuming this really is an XML document, what you're doing might work, but you should know that using an XML parser will be more reliable. To parse this document as XML, make sure you have the Python package 'lxml' installed, and pass the keyword argument `features="xml"` into the BeautifulSoup constructor.
+
+If you want or need to use an HTML parser on this document, you can make this warning go away by filtering it. To do that, run this code before calling the BeautifulSoup constructor:
+
+    from bs4 import XMLParsedAsHTMLWarning
+    import warnings
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+  soup = BeautifulSoup(html, parser)
+C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\deep_research\scraper.py:267: XMLParsedAsHTMLWarning: It looks like you're using an HTML parser to parse an XML document.
+
+Assuming this really is an XML document, what you're doing might work, but you should know that using an XML parser will be more reliable. To parse this document as XML, make sure you have the Python package 'lxml' installed, and pass the keyword argument `features="xml"` into the BeautifulSoup constructor.
+
+If you want or need to use an HTML parser on this document, you can make this warning go away by filtering it. To do that, run this code before calling the BeautifulSoup constructor:
+
+    from bs4 import XMLParsedAsHTMLWarning
+    import warnings
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+  soup = BeautifulSoup(html, parser)
+[14:11:04] research_status: resuming from latest graph checkpoint
+[14:11:04] research_status: classified request
+[14:13:42] research_status: planned 8 research branches with LLM semantic enrichment
+[14:13:42] research_status: plan quality ok: score=1.00, branches=8
+[14:13:42] research_status: searching source candidates
+[14:13:48] research_status: search returned 20 candidate(s)
+[14:14:13] research_status: rejected source candidate
+[14:14:31] research_status: rejected source candidate
+[14:14:40] research_status: rejected source candidate
+[14:14:53] research_status: accepted source [1]
+[14:14:56] research_status: rejected source candidate
+[14:15:09] research_status: rejected source candidate
+[14:15:13] research_status: rejected source candidate
+[14:15:20] research_status: rejected source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:20] research_status: skipped source candidate
+[14:15:21] research_status: skipped source candidate
+[14:15:21] research_status: skipped source candidate
+[14:15:21] research_status: searching source candidates
+[14:15:26] research_status: search returned 20 candidate(s)
+[14:15:47] research_status: rejected source candidate
+[14:15:54] research_status: rejected source candidate
+[14:15:58] research_status: rejected source candidate
+[14:16:31] research_status: rejected source candidate
+[14:16:40] research_status: rejected source candidate
+[14:16:45] research_status: rejected source candidate
+[14:16:53] research_status: rejected source candidate
+[14:17:02] research_status: rejected source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: skipped source candidate
+[14:17:03] research_status: searching source candidates
+[14:17:09] research_status: search returned 20 candidate(s)
+[14:17:09] research_status: rejected source candidate
+[14:17:14] research_status: rejected source candidate
+[14:17:21] research_status: rejected source candidate
+[14:17:35] research_status: rejected source candidate
+[14:17:48] research_status: rejected source candidate
+[14:17:57] research_status: rejected source candidate
+[14:18:08] research_status: rejected source candidate
+[14:18:18] research_status: rejected source candidate
+[14:18:23] research_status: rejected source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:23] research_status: skipped source candidate
+[14:18:24] research_status: skipped source candidate
+[14:18:24] research_status: searching source candidates
+[14:18:27] research_status: search returned 20 candidate(s)
+[14:18:35] research_status: rejected source candidate
+[14:18:45] research_status: rejected source candidate
+[14:18:50] research_status: rejected source candidate
+[14:18:54] research_status: rejected source candidate
+[14:19:17] research_status: rejected source candidate
+[14:19:24] research_status: rejected source candidate
+[14:19:30] research_status: rejected source candidate
+[14:19:36] research_status: rejected source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: skipped source candidate
+[14:19:36] research_status: searching source candidates
+[14:19:43] research_status: search returned 20 candidate(s)
+[14:19:48] research_status: rejected source candidate
+[14:19:57] research_status: rejected source candidate
+[14:20:01] research_status: rejected source candidate
+[14:20:24] research_status: rejected source candidate
+[14:20:29] research_status: rejected source candidate
+[14:21:48] research_status: accepted source [2]
+[14:22:03] research_status: accepted source [3]
+[14:22:03] research_status: searching source candidates
+[14:22:07] research_status: search returned 20 candidate(s)
+[14:22:21] research_status: rejected source candidate
+[14:22:25] research_status: rejected source candidate
+[14:22:32] research_status: rejected source candidate
+[14:22:40] research_status: rejected source candidate
+[14:22:43] research_status: rejected source candidate
+[14:22:57] research_status: accepted source [4]
+[14:23:02] research_status: rejected source candidate
+[14:23:10] research_status: rejected source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: skipped source candidate
+[14:23:10] research_status: searching source candidates
+[14:23:14] research_status: search returned 20 candidate(s)
+[14:23:20] research_status: rejected source candidate
+[14:23:29] research_status: rejected source candidate
+[14:23:36] research_status: rejected source candidate
+[14:23:48] research_status: rejected source candidate
+[14:24:08] research_status: rejected source candidate
+[14:24:14] research_status: rejected source candidate
+[14:24:22] research_status: rejected source candidate
+[14:24:24] research_status: rejected source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: skipped source candidate
+[14:24:24] research_status: searching source candidates
+[14:24:31] research_status: search returned 20 candidate(s)
+[14:24:34] research_status: rejected source candidate
+[14:24:40] research_status: rejected source candidate
+[14:24:48] research_status: rejected source candidate
+[14:24:51] research_status: rejected source candidate
+[14:24:57] research_status: rejected source candidate
+[14:25:01] research_status: rejected source candidate
+[14:25:07] research_status: rejected source candidate
+[14:25:17] research_status: rejected source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: skipped source candidate
+[14:25:17] research_status: searching source candidates
+[14:25:23] research_status: search returned 20 candidate(s)
+[14:25:31] research_status: rejected source candidate
+[14:25:40] research_status: rejected source candidate
+[14:25:51] research_status: rejected source candidate
+[14:25:59] research_status: rejected source candidate
+[14:26:06] research_status: rejected source candidate
+[14:26:15] research_status: rejected source candidate
+[14:26:26] research_status: rejected source candidate
+[14:26:47] research_status: accepted source [5]
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: skipped source candidate
+[14:26:47] research_status: searching source candidates
+[14:26:54] research_status: search returned 20 candidate(s)
+[14:27:10] research_status: accepted source [6]
+[14:27:10] research_status: searching source candidates
+[14:27:13] research_status: search returned 20 candidate(s)
+[14:27:20] research_status: rejected source candidate
+[14:27:30] research_status: rejected source candidate
+[14:27:36] research_status: rejected source candidate
+[14:28:05] research_status: rejected source candidate
+[14:28:18] research_status: accepted source [7]
+[14:28:27] research_status: rejected source candidate
+[14:28:41] research_status: rejected source candidate
+[14:28:47] research_status: rejected source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: skipped source candidate
+[14:28:47] research_status: searching source candidates
+[14:28:52] research_status: search returned 20 candidate(s)
+[14:28:56] research_status: rejected source candidate
+[14:29:01] research_status: rejected source candidate
+[14:29:07] research_status: rejected source candidate
+[14:29:10] research_status: rejected source candidate
+[14:29:15] research_status: rejected source candidate
+[14:29:31] research_status: rejected source candidate
+[14:29:40] research_status: rejected source candidate
+[14:29:57] research_status: rejected source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: skipped source candidate
+[14:29:57] research_status: searching source candidates
+[14:30:03] research_status: search returned 20 candidate(s)
+[14:30:09] research_status: rejected source candidate
+[14:30:17] research_status: rejected source candidate
+[14:30:25] research_status: rejected source candidate
+[14:30:33] research_status: rejected source candidate
+[14:30:40] research_status: rejected source candidate
+[14:30:46] research_status: rejected source candidate
+[14:31:07] research_status: rejected source candidate
+[14:31:20] research_status: accepted source [8]
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: skipped source candidate
+[14:31:20] research_status: searching source candidates
+[14:31:23] research_status: search returned 20 candidate(s)
+[14:31:31] research_status: rejected source candidate
+[14:31:40] research_status: rejected source candidate
+[14:31:50] research_status: rejected source candidate
+[14:31:56] research_status: rejected source candidate
+[14:32:03] research_status: rejected source candidate
+[14:32:15] research_status: rejected source candidate
+[14:32:24] research_status: rejected source candidate
+[14:32:32] research_status: rejected source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: skipped source candidate
+[14:32:32] research_status: searching source candidates
+[14:32:39] research_status: search returned 20 candidate(s)
+[14:32:52] research_status: rejected source candidate
+[14:33:07] research_status: rejected source candidate
+[14:33:14] research_status: rejected source candidate
+[14:33:42] research_status: rejected source candidate
+[14:33:47] research_status: rejected source candidate
+[14:33:55] research_status: rejected source candidate
+[14:34:04] research_status: rejected source candidate
+[14:34:09] research_status: rejected source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: skipped source candidate
+[14:34:09] research_status: searching source candidates
+[14:34:12] research_status: search returned 20 candidate(s)
+[14:34:24] research_status: rejected source candidate
+[14:34:37] research_status: rejected source candidate
+[14:34:48] research_status: rejected source candidate
+[14:34:55] research_status: rejected source candidate
+[14:35:03] research_status: rejected source candidate
+[14:35:06] research_status: rejected source candidate
+[14:35:14] research_status: rejected source candidate
+[14:35:23] research_status: rejected source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:23] research_status: skipped source candidate
+[14:35:24] research_status: searching source candidates
+[14:35:26] research_status: search returned 20 candidate(s)
+[14:35:31] research_status: rejected source candidate
+[14:35:37] research_status: rejected source candidate
+[14:35:41] research_status: rejected source candidate
+[14:35:46] research_status: rejected source candidate
+[14:35:52] research_status: rejected source candidate
+[14:35:57] research_status: rejected source candidate
+[14:36:04] research_status: rejected source candidate
+[14:36:13] research_status: rejected source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: skipped source candidate
+[14:36:13] research_status: searching source candidates
+[14:36:16] research_status: search returned 20 candidate(s)
+[14:36:26] research_status: rejected source candidate
+[14:36:32] research_status: rejected source candidate
+[14:36:40] research_status: rejected source candidate
+[14:36:46] research_status: rejected source candidate
+[14:36:50] research_status: rejected source candidate
+[14:37:09] research_status: rejected source candidate
+[14:37:16] research_status: rejected source candidate
+[14:37:31] research_status: rejected source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: skipped source candidate
+[14:37:31] research_status: searching source candidates
+[14:37:36] research_status: search returned 20 candidate(s)
+[14:37:45] research_status: rejected source candidate
+[14:37:51] research_status: rejected source candidate
+[14:37:55] research_status: rejected source candidate
+[14:38:02] research_status: rejected source candidate
+[14:38:11] research_status: rejected source candidate
+[14:38:22] research_status: accepted source [9]
+[14:38:27] research_status: rejected source candidate
+[14:38:34] research_status: rejected source candidate
+[14:38:34] research_status: skipped source candidate
+[14:38:34] research_status: skipped source candidate
+[14:38:34] research_status: skipped source candidate
+[14:38:34] research_status: skipped source candidate
+[14:38:34] research_status: skipped source candidate
+[14:38:34] research_status: searching source candidates
+[14:38:38] research_status: search returned 20 candidate(s)
+[14:38:47] research_status: rejected source candidate
+[14:38:54] research_status: rejected source candidate
+[14:39:06] research_status: rejected source candidate
+[14:39:11] research_status: rejected source candidate
+[14:39:16] research_status: rejected source candidate
+[14:39:24] research_status: rejected source candidate
+[14:39:29] research_status: rejected source candidate
+[14:39:38] research_status: rejected source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: skipped source candidate
+[14:39:38] research_status: searching source candidates
+[14:39:41] research_status: search returned 20 candidate(s)
+[14:40:08] research_status: rejected source candidate
+[14:40:14] research_status: rejected source candidate
+[14:40:27] research_status: rejected source candidate
+[14:40:36] research_status: rejected source candidate
+[14:40:46] research_status: rejected source candidate
+[14:41:03] research_status: rejected source candidate
+[14:41:24] research_status: rejected source candidate
+[14:41:32] research_status: rejected source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: skipped source candidate
+[14:41:32] research_status: searching source candidates
+[14:41:36] research_status: search returned 20 candidate(s)
+[14:42:02] research_status: rejected source candidate
+[14:44:46] research_status: rejected source candidate
+[14:44:54] research_status: rejected source candidate
+[14:45:01] research_status: rejected source candidate
+[14:45:10] research_status: rejected source candidate
+[14:45:39] research_status: rejected source candidate
+[14:46:04] research_status: rejected source candidate
+[14:46:10] research_status: rejected source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: skipped source candidate
+[14:46:10] research_status: searching source candidates
+[14:46:13] research_status: search returned 20 candidate(s)
+[14:46:21] research_status: rejected source candidate
+[14:46:29] research_status: rejected source candidate
+[14:46:47] research_status: rejected source candidate
+[14:47:36] research_status: rejected source candidate
+[14:47:47] research_status: rejected source candidate
+[14:47:54] research_status: rejected source candidate
+[14:48:06] research_status: rejected source candidate
+[14:48:23] research_status: rejected source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:23] research_status: skipped source candidate
+[14:48:24] research_status: skipped source candidate
+[14:48:24] research_status: skipped source candidate
+[14:48:24] research_status: searching source candidates
+[14:48:27] research_status: search returned 20 candidate(s)
+[14:48:37] research_status: rejected source candidate
+[14:48:45] research_status: rejected source candidate
+[14:49:05] research_status: rejected source candidate
+[14:49:29] research_status: rejected source candidate
+[14:50:01] research_status: rejected source candidate
+[14:50:15] research_status: rejected source candidate
+[14:50:23] research_status: rejected source candidate
+[14:50:29] research_status: rejected source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: skipped source candidate
+[14:50:29] research_status: searching source candidates
+[14:50:33] research_status: search returned 20 candidate(s)
+[14:50:40] research_status: rejected source candidate
+[14:50:52] research_status: rejected source candidate
+[14:51:04] research_status: accepted source [10]
+[14:51:09] research_status: rejected source candidate
+[14:51:21] research_status: rejected source candidate
+[14:51:29] research_status: rejected source candidate
+[14:51:51] research_status: rejected source candidate
+[14:52:21] research_status: rejected source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:21] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: skipped source candidate
+[14:52:22] research_status: searching source candidates
+[14:52:28] research_status: search returned 20 candidate(s)
+[14:52:36] research_status: rejected source candidate
+[14:52:46] research_status: rejected source candidate
+[14:53:00] research_status: rejected source candidate
+[14:53:04] research_status: rejected source candidate
+[14:53:28] research_status: accepted source [11]
+[14:53:35] research_status: rejected source candidate
+[14:53:43] research_status: rejected source candidate
+[14:53:51] research_status: rejected source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: skipped source candidate
+[14:53:52] research_status: searching source candidates
+[14:53:56] research_status: search returned 20 candidate(s)
+[14:54:42] research_status: rejected source candidate
+[14:54:47] research_status: rejected source candidate
+[14:54:57] research_status: rejected source candidate
+[14:55:12] research_status: rejected source candidate
+[14:55:17] research_status: rejected source candidate
+[14:55:26] research_status: rejected source candidate
+[14:55:32] research_status: rejected source candidate
+[14:55:38] research_status: rejected source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: skipped source candidate
+[14:55:38] research_status: searching source candidates
+[14:55:41] research_status: search returned 20 candidate(s)
+[14:55:46] research_status: rejected source candidate
+[14:56:16] research_status: rejected source candidate
+[14:56:20] research_status: rejected source candidate
+[14:56:25] research_status: rejected source candidate
+[14:56:31] research_status: rejected source candidate
+[14:56:37] research_status: rejected source candidate
+[14:56:37] research_status: rejected source candidate
+[14:56:45] research_status: rejected source candidate
+[14:56:51] research_status: rejected source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: skipped source candidate
+[14:56:51] research_status: searching source candidates
+[14:56:56] research_status: search returned 20 candidate(s)
+[14:57:02] research_status: rejected source candidate
+[14:57:32] research_status: accepted source [12]
+[14:57:32] research_status: searching source candidates
+[14:57:36] research_status: search returned 20 candidate(s)
+[14:57:43] research_status: rejected source candidate
+[14:57:55] research_status: rejected source candidate
+[14:58:09] research_status: rejected source candidate
+[14:58:27] research_status: rejected source candidate
+[14:58:38] research_status: rejected source candidate
+[14:58:47] research_status: rejected source candidate
+[14:58:54] research_status: rejected source candidate
+[14:59:06] research_status: rejected source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: skipped source candidate
+[14:59:06] research_status: searching source candidates
+[14:59:09] research_status: search returned 20 candidate(s)
+[14:59:27] research_status: rejected source candidate
+[14:59:38] research_status: rejected source candidate
+[14:59:49] research_status: rejected source candidate
+[14:59:55] research_status: accepted source [13]
+[15:00:02] research_status: rejected source candidate
+[15:00:10] research_status: rejected source candidate
+[15:00:15] research_status: rejected source candidate
+[15:00:23] research_status: rejected source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: skipped source candidate
+[15:00:23] research_status: searching source candidates
+[15:00:27] research_status: search returned 20 candidate(s)
+[15:01:14] research_status: rejected source candidate
+[15:01:26] research_status: rejected source candidate
+[15:01:37] research_status: rejected source candidate
+[15:01:49] research_status: rejected source candidate
+[15:01:57] research_status: rejected source candidate
+[15:02:08] research_status: rejected source candidate
+[15:02:17] research_status: rejected source candidate
+[15:02:24] research_status: accepted source [14]
+[15:02:24] research_status: searching source candidates
+[15:02:28] research_status: search returned 20 candidate(s)
+[15:02:48] research_status: rejected source candidate
+[15:02:55] research_status: accepted source [15]
+[15:02:55] research_status: searching source candidates
+[15:03:01] research_status: search returned 20 candidate(s)
+[15:03:05] research_status: accepted source [16]
+[15:03:05] research_status: searching source candidates
+[15:03:09] research_status: search returned 20 candidate(s)
+[15:03:25] research_status: rejected source candidate
+[15:03:33] research_status: rejected source candidate
+[15:03:41] research_status: rejected source candidate
+[15:03:50] research_status: accepted source [17]
+[15:03:57] research_status: rejected source candidate
+[15:04:05] research_status: rejected source candidate
+[15:04:11] research_status: rejected source candidate
+[15:04:19] research_status: rejected source candidate
+[15:04:19] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: skipped source candidate
+[15:04:20] research_status: searching source candidates
+[15:04:25] research_status: search returned 20 candidate(s)
+[15:04:37] research_status: rejected source candidate
+[15:04:42] research_status: rejected source candidate
+[15:04:48] research_status: rejected source candidate
+[15:04:54] research_status: rejected source candidate
+[15:05:00] research_status: rejected source candidate
+[15:05:04] research_status: rejected source candidate
+[15:05:11] research_status: rejected source candidate
+[15:05:14] research_status: rejected source candidate
+[15:05:14] research_status: skipped source candidate
+[15:05:14] research_status: skipped source candidate
+[15:05:14] research_status: skipped source candidate
+[15:05:14] research_status: skipped source candidate
+[15:05:14] research_status: skipped source candidate
+[15:05:15] research_status: skipped source candidate
+[15:05:15] research_status: skipped source candidate
+[15:05:15] research_status: skipped source candidate
+[15:05:15] research_status: skipped source candidate
+[15:05:15] research_status: skipped source candidate
+[15:05:15] research_status: searching source candidates
+[15:05:22] research_status: search returned 20 candidate(s)
+[15:05:29] research_status: rejected source candidate
+[15:05:38] research_status: rejected source candidate
+[15:05:43] research_status: rejected source candidate
+[15:05:50] research_status: rejected source candidate
+[15:05:54] research_status: rejected source candidate
+[15:06:11] research_status: rejected source candidate
+[15:06:21] research_status: rejected source candidate
+[15:06:27] research_status: rejected source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:27] research_status: skipped source candidate
+[15:06:28] research_status: skipped source candidate
+[15:06:28] research_status: skipped source candidate
+[15:06:28] research_status: skipped source candidate
+[15:06:28] research_status: searching source candidates
+[15:06:33] research_status: search returned 20 candidate(s)
+[15:06:40] research_status: rejected source candidate
+[15:06:55] research_status: rejected source candidate
+[15:07:01] research_status: rejected source candidate
+[15:07:08] research_status: rejected source candidate
+[15:07:13] research_status: rejected source candidate
+[15:07:21] research_status: rejected source candidate
+[15:07:31] research_status: rejected source candidate
+[15:07:41] research_status: rejected source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: skipped source candidate
+[15:07:41] research_status: searching source candidates
+[15:07:46] research_status: search returned 20 candidate(s)
+[15:07:53] research_status: rejected source candidate
+[15:08:04] research_status: rejected source candidate
+[15:08:10] research_status: rejected source candidate
+[15:08:13] research_status: rejected source candidate
+[15:08:20] research_status: rejected source candidate
+[15:08:20] research_status: collected 17 usable sources from 284 candidates
+[15:08:22] research_status: read 17 source documents
+[15:08:54] research_status: built 51 raw evidence cards
+[15:08:54] research_status: kept 51 evidence cards; rejected 0
+[15:12:34] research_status: semantic evidence gate kept 51 cards; rejected 0
+[15:12:35] research_status: coverage 0.65; missing: branch_3, branch_4, branch_5, branch_8
+[15:12:35] research_status: searching source candidates
+[15:12:42] research_status: search returned 20 candidate(s)
+[15:12:51] research_status: accepted source [18]
+[15:12:51] research_status: searching source candidates
+[15:12:57] research_status: search returned 20 candidate(s)
+[15:13:03] research_status: rejected source candidate
+[15:13:08] research_status: rejected source candidate
+[15:13:15] research_status: rejected source candidate
+[15:13:23] research_status: rejected source candidate
+[15:13:29] research_status: rejected source candidate
+[15:13:37] research_status: rejected source candidate
+[15:13:47] research_status: rejected source candidate
+[15:13:56] research_status: rejected source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: skipped source candidate
+[15:13:56] research_status: searching source candidates
+[15:13:58] research_status: search returned 20 candidate(s)
+[15:14:31] research_status: accepted source [19]
+[15:14:31] research_status: searching source candidates
+[15:14:39] research_status: search returned 20 candidate(s)
+[15:14:48] research_status: rejected source candidate
+[15:14:54] research_status: rejected source candidate
+[15:15:02] research_status: rejected source candidate
+[15:15:07] research_status: rejected source candidate
+[15:15:21] research_status: rejected source candidate
+[15:15:34] research_status: rejected source candidate
+[15:16:02] research_status: rejected source candidate
+[15:16:21] research_status: rejected source candidate
+[15:16:21] research_status: skipped source candidate
+[15:16:21] research_status: skipped source candidate
+[15:16:21] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: skipped source candidate
+[15:16:22] research_status: searching source candidates
+[15:16:24] research_status: search returned 20 candidate(s)
+[15:16:29] research_status: rejected source candidate
+[15:16:58] research_status: rejected source candidate
+[15:17:05] research_status: rejected source candidate
+[15:17:13] research_status: rejected source candidate
+[15:17:29] research_status: rejected source candidate
+Ignoring wrong pointing object 8 0 (offset 0)
+Ignoring wrong pointing object 10 0 (offset 0)
+Ignoring wrong pointing object 14 0 (offset 0)
+Ignoring wrong pointing object 38 0 (offset 0)
+Ignoring wrong pointing object 52 0 (offset 0)
+Ignoring wrong pointing object 66 0 (offset 0)
+Ignoring wrong pointing object 75 0 (offset 0)
+Ignoring wrong pointing object 185 0 (offset 0)
+Ignoring wrong pointing object 187 0 (offset 0)
+Ignoring wrong pointing object 225 0 (offset 0)
+Ignoring wrong pointing object 227 0 (offset 0)
+Ignoring wrong pointing object 270 0 (offset 0)
+Ignoring wrong pointing object 272 0 (offset 0)
+[15:18:36] research_status: rejected source candidate
+[15:18:40] research_status: rejected source candidate
+[15:18:50] research_status: rejected source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: skipped source candidate
+[15:18:50] research_status: searching source candidates
+[15:18:52] research_status: search returned 20 candidate(s)
+[15:19:03] research_status: rejected source candidate
+[15:19:10] research_status: rejected source candidate
+[15:19:17] research_status: rejected source candidate
+[15:19:24] research_status: accepted source [20]
+[15:19:24] research_status: searching source candidates
+[15:19:28] research_status: search returned 20 candidate(s)
+[15:20:28] research_status: accepted source [21]
+[15:20:28] research_status: searching source candidates
+[15:20:36] research_status: search returned 20 candidate(s)
+[15:20:43] research_status: rejected source candidate
+[15:20:53] research_status: rejected source candidate
+[15:20:58] research_status: rejected source candidate
+[15:21:04] research_status: rejected source candidate
+[15:21:21] research_status: rejected source candidate
+[15:21:28] research_status: rejected source candidate
+[15:21:43] research_status: rejected source candidate
+[15:21:47] research_status: rejected source candidate
+[15:21:47] research_status: skipped source candidate
+[15:21:47] research_status: skipped source candidate
+[15:21:47] research_status: skipped source candidate
+[15:21:47] research_status: skipped source candidate
+[15:21:47] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: skipped source candidate
+[15:21:48] research_status: searching source candidates
+[15:21:52] research_status: search returned 20 candidate(s)
+[15:23:24] research_status: rejected source candidate
+[15:23:32] research_status: rejected source candidate
+[15:23:41] research_status: rejected source candidate
+[15:23:45] research_status: rejected source candidate
+[15:23:53] research_status: rejected source candidate
+[15:24:04] research_status: rejected source candidate
+[15:24:12] research_status: rejected source candidate
+[15:24:20] research_status: rejected source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: skipped source candidate
+[15:24:20] research_status: searching source candidates
+[15:24:24] research_status: search returned 20 candidate(s)
+[15:24:32] research_status: rejected source candidate
+[15:24:39] research_status: rejected source candidate
+[15:24:48] research_status: rejected source candidate
+[15:24:54] research_status: rejected source candidate
+[15:25:03] research_status: rejected source candidate
+[15:25:12] research_status: rejected source candidate
+[15:25:26] research_status: accepted source [22]
+[15:25:26] research_status: searching source candidates
+[15:25:31] research_status: search returned 20 candidate(s)
+[15:25:51] research_status: rejected source candidate
+[15:25:57] research_status: rejected source candidate
+[15:26:03] research_status: rejected source candidate
+[15:26:07] research_status: rejected source candidate
+[15:26:33] research_status: rejected source candidate
+[15:26:42] research_status: rejected source candidate
+[15:26:50] research_status: rejected source candidate
+[15:27:23] research_status: accepted source [23]
+[15:27:23] research_status: searching source candidates
+[15:27:29] research_status: search returned 20 candidate(s)
+[15:27:41] research_status: rejected source candidate
+[15:28:01] research_status: accepted source [24]
+[15:28:01] research_status: searching source candidates
+[15:28:05] research_status: search returned 20 candidate(s)
+[15:28:13] research_status: rejected source candidate
+[15:28:28] research_status: rejected source candidate
+[15:28:42] research_status: rejected source candidate
+[15:28:50] research_status: rejected source candidate
+[15:29:01] research_status: rejected source candidate
+[15:29:15] research_status: rejected source candidate
+[15:29:58] research_status: rejected source candidate
+[15:30:06] research_status: rejected source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: skipped source candidate
+[15:30:06] research_status: searching source candidates
+[15:30:11] research_status: search returned 20 candidate(s)
+[15:30:20] research_status: rejected source candidate
+[15:30:29] research_status: rejected source candidate
+[15:30:36] research_status: rejected source candidate
+[15:30:42] research_status: rejected source candidate
+[15:30:50] research_status: rejected source candidate
+[15:30:57] research_status: rejected source candidate
+[15:31:02] research_status: rejected source candidate
+[15:31:10] research_status: rejected source candidate
+[15:31:10] research_status: skipped source candidate
+[15:31:10] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: skipped source candidate
+[15:31:11] research_status: searching source candidates
+[15:31:14] research_status: search returned 20 candidate(s)
+[15:31:58] research_status: rejected source candidate
+[15:32:22] research_status: rejected source candidate
+[15:32:31] research_status: rejected source candidate
+[15:32:43] research_status: rejected source candidate
+[15:33:06] research_status: rejected source candidate
+[15:33:14] research_status: rejected source candidate
+[15:33:26] research_status: rejected source candidate
+[15:33:35] research_status: rejected source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: skipped source candidate
+[15:33:35] research_status: searching source candidates
+[15:33:38] research_status: search returned 20 candidate(s)
+[15:33:46] research_status: rejected source candidate
+[15:33:57] research_status: rejected source candidate
+[15:34:06] research_status: rejected source candidate
+[15:34:18] research_status: rejected source candidate
+[15:34:23] research_status: rejected source candidate
+[15:34:35] research_status: rejected source candidate
+[15:34:43] research_status: rejected source candidate
+[15:34:55] research_status: rejected source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: skipped source candidate
+[15:34:55] research_status: searching source candidates
+[15:35:03] research_status: search returned 20 candidate(s)
+[15:35:39] research_status: rejected source candidate
+[15:35:55] research_status: rejected source candidate
+[15:36:04] research_status: rejected source candidate
+[15:36:11] research_status: rejected source candidate
+[15:36:18] research_status: rejected source candidate
+[15:36:24] research_status: rejected source candidate
+[15:36:28] research_status: rejected source candidate
+[15:36:54] research_status: rejected source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: skipped source candidate
+[15:36:54] research_status: searching source candidates
+[15:36:59] research_status: search returned 20 candidate(s)
+[15:37:06] research_status: rejected source candidate
+[15:37:15] research_status: rejected source candidate
+[15:37:28] research_status: rejected source candidate
+[15:37:37] research_status: accepted source [25]
+[15:37:37] research_status: searching source candidates
+[15:37:40] research_status: search returned 20 candidate(s)
+[15:37:59] research_status: rejected source candidate
+[15:38:05] research_status: rejected source candidate
+[15:38:12] research_status: rejected source candidate
+[15:38:24] research_status: rejected source candidate
+[15:38:37] research_status: rejected source candidate
+[15:38:50] research_status: rejected source candidate
+[15:39:01] research_status: rejected source candidate
+[15:39:37] research_status: rejected source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: skipped source candidate
+[15:39:37] research_status: searching source candidates
+[15:39:39] research_status: search returned 20 candidate(s)
+[15:39:57] research_status: rejected source candidate
+[15:40:17] research_status: rejected source candidate
+[15:40:46] research_status: accepted source [26]
+[15:41:01] research_status: rejected source candidate
+[15:41:08] research_status: rejected source candidate
+[15:41:19] research_status: rejected source candidate
+[15:41:27] research_status: rejected source candidate
+[15:41:38] research_status: rejected source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: skipped source candidate
+[15:41:38] research_status: searching source candidates
+[15:41:41] research_status: search returned 20 candidate(s)
+[15:42:41] research_status: rejected source candidate
+[15:42:51] research_status: rejected source candidate
+[15:42:55] research_status: rejected source candidate
+[15:43:39] research_status: accepted source [27]
+[15:43:39] research_status: searching source candidates
+[15:43:44] research_status: search returned 20 candidate(s)
+[15:44:06] research_status: accepted source [28]
+[15:44:06] research_status: searching source candidates
+[15:44:09] research_status: search returned 20 candidate(s)
+[15:44:18] research_status: rejected source candidate
+[15:44:29] research_status: rejected source candidate
+[15:44:44] research_status: accepted source [29]
+[15:44:44] research_status: searching source candidates
+[15:44:52] research_status: search returned 20 candidate(s)
+[15:45:00] research_status: rejected source candidate
+[15:45:09] research_status: rejected source candidate
+[15:45:13] research_status: rejected source candidate
+[15:45:29] research_status: rejected source candidate
+[15:45:50] research_status: rejected source candidate
+[15:46:02] research_status: rejected source candidate
+[15:46:16] research_status: rejected source candidate
+[15:46:26] research_status: rejected source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:26] research_status: skipped source candidate
+[15:46:27] research_status: skipped source candidate
+[15:46:27] research_status: skipped source candidate
+[15:46:27] research_status: skipped source candidate
+[15:46:27] research_status: searching source candidates
+[15:46:33] research_status: search returned 20 candidate(s)
+[15:46:46] research_status: rejected source candidate
+[15:47:00] research_status: rejected source candidate
+[15:47:10] research_status: rejected source candidate
+[15:47:17] research_status: rejected source candidate
+[15:47:27] research_status: accepted source [30]
+[15:47:27] research_status: searching source candidates
+[15:47:33] research_status: search returned 20 candidate(s)
+[15:47:53] research_status: rejected source candidate
+[15:48:24] research_status: rejected source candidate
+[15:48:33] research_status: rejected source candidate
+[15:48:45] research_status: rejected source candidate
+[15:48:54] research_status: rejected source candidate
+[15:49:38] research_status: accepted source [31]
+[15:49:38] research_status: searching source candidates
+[15:49:42] research_status: search returned 20 candidate(s)
+[15:49:50] research_status: rejected source candidate
+[15:49:55] research_status: rejected source candidate
+[15:50:04] research_status: rejected source candidate
+[15:50:10] research_status: rejected source candidate
+[15:50:42] research_status: accepted source [32]
+[15:50:42] research_status: searching source candidates
+[15:50:48] research_status: search returned 20 candidate(s)
+[15:51:08] research_status: rejected source candidate
+[15:51:29] research_status: rejected source candidate
+[15:51:36] research_status: rejected source candidate
+[15:51:42] research_status: rejected source candidate
+[15:51:49] research_status: rejected source candidate
+[15:51:54] research_status: rejected source candidate
+[15:51:59] research_status: rejected source candidate
+Error: Research verification failed after resume; inspect verification.json and failure.json.
+Failure category: verification_failed
+Suggested action: Inspect verification.json, evidence_rejections.jsonl, coverage.json, and failed_report.md; rerun or resume after fixing synthesis/verification failures.
+Run directory: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260609T114215Z-from-2020-to-2050-how-many-elderly-people-will-there-be-in-japan
+Verification: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260609T114215Z-from-2020-to-2050-how-many-elderly-people-will-there-be-in-japan\verification.json
+Metrics: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260609T114215Z-from-2020-to-2050-how-many-elderly-people-will-there-be-in-japan\metrics.json
+[15:52:09] research_status: rejected source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: skipped source candidate
+[15:52:09] research_status: searching source candidates
+[15:52:16] research_status: search returned 20 candidate(s)
+[15:52:29] research_status: rejected source candidate
+[15:52:44] research_status: rejected source candidate
+[15:52:48] research_status: rejected source candidate
+[15:53:05] research_status: rejected source candidate
+[15:53:12] research_status: rejected source candidate
+[15:53:16] research_status: accepted source [33]
+[15:53:16] research_status: searching source candidates
+[15:53:20] research_status: search returned 20 candidate(s)
+[15:53:29] research_status: rejected source candidate
+[15:53:35] research_status: rejected source candidate
+[15:54:09] research_status: accepted source [34]
+[15:54:09] research_status: searching source candidates
+[15:54:10] research_status: search returned 20 candidate(s)
+[15:54:23] research_status: rejected source candidate
+[15:54:32] research_status: rejected source candidate
+[15:54:53] research_status: rejected source candidate
+[15:55:02] research_status: rejected source candidate
+[15:55:22] research_status: rejected source candidate
+[15:55:22] research_status: rejected source candidate
+[15:55:40] research_status: rejected source candidate
+[15:55:47] research_status: rejected source candidate
+[15:55:54] research_status: rejected source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: skipped source candidate
+[15:55:54] research_status: searching source candidates
+[15:55:57] research_status: search returned 20 candidate(s)
+[15:56:09] research_status: rejected source candidate
+[15:57:23] research_status: rejected source candidate
+[15:57:32] research_status: rejected source candidate
+[15:58:45] research_status: accepted source [35]
+[15:58:52] research_status: rejected source candidate
+[15:59:00] research_status: rejected source candidate
+[15:59:14] research_status: rejected source candidate
+[15:59:19] research_status: rejected source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: skipped source candidate
+[15:59:19] research_status: searching source candidates
+[15:59:20] research_status: search returned 20 candidate(s)
+[15:59:26] research_status: rejected source candidate
+[15:59:33] research_status: rejected source candidate
+[15:59:55] research_status: rejected source candidate
+[16:00:13] research_status: accepted source [36]
+[16:00:13] research_status: searching source candidates
+[16:00:17] research_status: search returned 20 candidate(s)
+[16:00:28] research_status: rejected source candidate
+[16:00:33] research_status: rejected source candidate
+[16:00:40] research_status: rejected source candidate
+[16:00:46] research_status: rejected source candidate
+[16:00:49] research_status: rejected source candidate
+[16:01:34] research_status: rejected source candidate
+[16:01:39] research_status: rejected source candidate
+[16:01:46] research_status: rejected source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: skipped source candidate
+[16:01:46] research_status: searching source candidates
+[16:01:50] research_status: search returned 20 candidate(s)
+[16:01:56] research_status: rejected source candidate
+[16:02:14] research_status: rejected source candidate
+[16:02:19] research_status: rejected source candidate
+[16:02:26] research_status: rejected source candidate
+[16:02:39] research_status: accepted source [37]
+[16:02:39] research_status: searching source candidates
+[16:02:47] research_status: search returned 20 candidate(s)
+[16:02:56] research_status: rejected source candidate
+[16:03:06] research_status: rejected source candidate
+[16:03:12] research_status: rejected source candidate
+[16:03:42] research_status: rejected source candidate
+[16:03:51] research_status: rejected source candidate
+[16:04:04] research_status: rejected source candidate
+[16:04:15] research_status: rejected source candidate
+[16:04:22] research_status: rejected source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:22] research_status: skipped source candidate
+[16:04:23] research_status: skipped source candidate
+[16:04:23] research_status: skipped source candidate
+[16:04:23] research_status: skipped source candidate
+[16:04:23] research_status: searching source candidates
+[16:04:26] research_status: search returned 20 candidate(s)
+[16:04:51] research_status: rejected source candidate
+[16:04:59] research_status: rejected source candidate
+[16:05:07] research_status: rejected source candidate
+[16:05:14] research_status: rejected source candidate
+[16:05:23] research_status: rejected source candidate
+[16:05:30] research_status: accepted source [38]
+[16:05:30] research_status: searching source candidates
+[16:05:35] research_status: search returned 20 candidate(s)
+[16:05:43] research_status: accepted source [39]
+[16:05:43] research_status: searching source candidates
+[16:05:49] research_status: search returned 20 candidate(s)
+[16:05:55] research_status: rejected source candidate
+[16:06:04] research_status: rejected source candidate
+[16:06:15] research_status: rejected source candidate
+[16:06:23] research_status: rejected source candidate
+[16:06:29] research_status: rejected source candidate
+[16:07:26] research_status: accepted source [40]
+[16:07:26] research_status: searching source candidates
+[16:07:30] research_status: search returned 20 candidate(s)
+[16:07:39] research_status: rejected source candidate
+[16:07:56] research_status: rejected source candidate
+[16:08:43] research_status: rejected source candidate
+[16:08:52] research_status: rejected source candidate
+[16:09:05] research_status: rejected source candidate
+[16:09:13] research_status: rejected source candidate
+[16:09:23] research_status: rejected source candidate
+[16:09:30] research_status: rejected source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: skipped source candidate
+[16:09:30] research_status: searching source candidates
+[16:09:33] research_status: search returned 20 candidate(s)
+[16:09:43] research_status: rejected source candidate
+[16:09:56] research_status: rejected source candidate
+[16:10:05] research_status: rejected source candidate
+[16:10:11] research_status: rejected source candidate
+[16:10:17] research_status: rejected source candidate
+[16:10:46] research_status: rejected source candidate
+[16:10:55] research_status: rejected source candidate
+[16:11:05] research_status: rejected source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: skipped source candidate
+[16:11:05] research_status: searching source candidates
+[16:11:11] research_status: search returned 20 candidate(s)
+[16:11:24] research_status: rejected source candidate
+[16:11:29] research_status: rejected source candidate
+[16:11:45] research_status: rejected source candidate
+[16:12:34] research_status: rejected source candidate
+[16:12:47] research_status: rejected source candidate
+[16:12:53] research_status: rejected source candidate
+[16:13:00] research_status: rejected source candidate
+[16:13:09] research_status: rejected source candidate
+[16:13:09] research_status: skipped source candidate
+[16:13:09] research_status: skipped source candidate
+[16:13:09] research_status: skipped source candidate
+[16:13:09] research_status: skipped source candidate
+[16:13:09] research_status: skipped source candidate
+[16:13:09] research_status: searching source candidates
+[16:13:13] research_status: search returned 20 candidate(s)
+[16:13:23] research_status: rejected source candidate
+[16:13:31] research_status: rejected source candidate
+[16:13:39] research_status: rejected source candidate
+[16:13:49] research_status: accepted source [41]
+[16:13:49] research_status: collected 41 usable sources from 540 candidates
+[16:13:51] research_status: read 41 source documents
+[16:16:06] research_status: built 120 raw evidence cards
+[16:16:07] research_status: kept 115 evidence cards; rejected 5
+[16:19:08] research_status: semantic evidence gate kept 112 cards; rejected 3
+[16:19:09] research_status: coverage 1.00; missing: none
+[16:19:29] research_status: wrote draft_report.md
+[16:20:39] research_status: verification failed with 16 issue(s)
+[16:20:54] research_status: wrote draft_report.md
+[16:23:37] research_status: verification failed with 11 issue(s)
+[16:23:52] research_status: wrote draft_report.md
+[16:27:11] research_status: verification failed with 1 issue(s)
+[16:27:30] research_status: wrote draft_report.md
+[16:29:46] research_status: verification failed with 1 issue(s)
+[16:30:07] research_status: wrote draft_report.md
+[16:33:08] research_status: verification failed with 1 issue(s)
+[16:33:22] research_status: wrote draft_report.md
+[16:36:11] research_status: verification failed with 1 issue(s)
+[16:36:11] research_status: local LangGraph run complete
+[16:36:11] error: verification_failed: resumed report did not pass quality gates

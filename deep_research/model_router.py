@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, TypeAlias
@@ -11,6 +12,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
+from langchain_mistralai import ChatMistralAI
 import httpx
 
 from deep_research.errors import classify_exception
@@ -25,6 +27,7 @@ FALLBACK_ERROR_CATEGORIES = {
     "provider_timeout",
     "token_budget_exceeded",
     "tool_call_parse_error",
+    "network_error",
 }
 
 _ROLE_KEY_INDEX = {
@@ -35,6 +38,7 @@ _ROLE_KEY_INDEX = {
     "analyst": 4,
     "judge": 5,
     "fast": 6,
+    "synthesis": 0,
 }
 
 _ROLE_MODEL_ATTRS = {
@@ -45,13 +49,46 @@ _ROLE_MODEL_ATTRS = {
     "verifier": "verifier_model",
     "judge": "judge_model",
     "fast": "fast_model",
+    "synthesis": "model",
 }
+
+_usage_lock = threading.Lock()
+_run_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0}
+
+
+def get_and_reset_token_usage() -> dict[str, int]:
+    """Return accumulated token usage for the current run and reset to zero."""
+    with _usage_lock:
+        snapshot = dict(_run_usage)
+        _run_usage.update({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0})
+    return snapshot
+
+
+def _accumulate_usage(result: Any) -> None:
+    usage: dict | None = None
+    if hasattr(result, "llm_output") and isinstance(result.llm_output, dict):
+        usage = result.llm_output.get("usage") or result.llm_output.get("usage_metadata")
+    if usage is None and hasattr(result, "generations"):
+        for gen in result.generations or []:
+            msg = getattr(gen, "message", None)
+            if msg and getattr(msg, "usage_metadata", None):
+                usage = msg.usage_metadata
+                break
+    if not isinstance(usage, dict):
+        return
+    with _usage_lock:
+        _run_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0))
+        _run_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or usage.get("output_tokens", 0))
+        _run_usage["total_tokens"] += int(usage.get("total_tokens", 0))
+        _run_usage["llm_calls"] += 1
+
 
 _KEY_ENV_BASE = {
     "groq": "GROQ_API_KEY",
     "google_genai": "GOOGLE_API_KEY",
     "ollama": "OLLAMA_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "mistral_ai": "MISTRAL_API_KEY",
 }
 
 
@@ -319,6 +356,7 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
         "google_key_count": len(settings.google_key_pool),
         "groq_key_count": len(settings.groq_key_pool),
         "openrouter_key_count": len(settings.openrouter_key_pool),
+        "mistral_key_count": len(settings.mistral_key_pool),
         "roles": [route.to_dict() for route in routes],
     }
 
@@ -371,6 +409,8 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.google_key_pool
     if provider == "openrouter":
         return settings.openrouter_key_pool
+    if provider == "mistral_ai":
+        return settings.mistral_key_pool
     if provider == "ollama":
         return ("ollama-local",)
     return ()
@@ -450,6 +490,16 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
             timeout_seconds=timeout_seconds,
             max_tokens=max_output_tokens if max_output_tokens > 0 else None,
         )
+    if provider == "mistral_ai":
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatMistralAI(**kwargs)
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(model=model_name)
@@ -507,7 +557,7 @@ def _fallback_routes(
         routes.append(
             {
                 "provider": "openrouter",
-                "model": "openrouter/free",
+                "model": "meta-llama/llama-3.3-70b-instruct:free",
                 "api_key": settings.openrouter_key_pool[openrouter_slot],
                 "key_slot": openrouter_slot,
                 "key_label": _key_label("openrouter", openrouter_slot),
@@ -558,7 +608,9 @@ def _call_with_classified_fallbacks(
         failures = []
         for index, candidate in enumerate(candidates):
             try:
-                return call(candidate)
+                result = call(candidate)
+                _accumulate_usage(result)
+                return result
             except Exception as exc:
                 last_error = exc
                 failures.append(classify_exception(exc))
@@ -568,7 +620,11 @@ def _call_with_classified_fallbacks(
                     raise
                 _emit_fallback(on_fallback, route_label, exc, index + 1)
 
-        wait_seconds = _retry_wait_seconds(failures, retry_max_wait_seconds)
+        wait_seconds = _retry_wait_seconds(
+            failures,
+            retry_index=retry_index + 1,
+            retry_max_wait_seconds=retry_max_wait_seconds,
+        )
         if retry_index < retry_attempts and wait_seconds is not None:
             _emit_retry(on_retry, route_label, wait_seconds, retry_index + 1, retry_attempts)
             time.sleep(wait_seconds)
@@ -596,7 +652,9 @@ async def _acall_with_classified_fallbacks(
         failures = []
         for index, candidate in enumerate(candidates):
             try:
-                return await call(candidate)
+                result = await call(candidate)
+                _accumulate_usage(result)
+                return result
             except Exception as exc:
                 last_error = exc
                 failures.append(classify_exception(exc))
@@ -606,7 +664,11 @@ async def _acall_with_classified_fallbacks(
                     raise
                 _emit_fallback(on_fallback, route_label, exc, index + 1)
 
-        wait_seconds = _retry_wait_seconds(failures, retry_max_wait_seconds)
+        wait_seconds = _retry_wait_seconds(
+            failures,
+            retry_index=retry_index + 1,
+            retry_max_wait_seconds=retry_max_wait_seconds,
+        )
         if retry_index < retry_attempts and wait_seconds is not None:
             _emit_retry(on_retry, route_label, wait_seconds, retry_index + 1, retry_attempts)
             await asyncio.sleep(wait_seconds)
@@ -637,18 +699,33 @@ def _emit_fallback(
 
 def _retry_wait_seconds(
     failures: list[Any],
+    *,
+    retry_index: int,
     retry_max_wait_seconds: int,
 ) -> int | None:
     if retry_max_wait_seconds <= 0 or not failures:
         return None
     if any(failure.category not in FALLBACK_ERROR_CATEGORIES for failure in failures):
         return None
-    if any(not failure.retryable or failure.retry_after_seconds is None for failure in failures):
+    retryable_failures = [failure for failure in failures if failure.retryable]
+    if not retryable_failures:
         return None
-    wait_seconds = min(int(failure.retry_after_seconds or 0) for failure in failures)
-    if wait_seconds <= 0 or wait_seconds > retry_max_wait_seconds:
-        return None
-    return wait_seconds
+    wait_seconds = None
+    explicit_waits: list[int] = []
+    for failure in retryable_failures:
+        if failure.retry_after_seconds is not None:
+            explicit_waits.append(int(failure.retry_after_seconds))
+    if explicit_waits:
+        wait_seconds = min(explicit_waits)
+        if wait_seconds <= 0:
+            return None
+        if wait_seconds > retry_max_wait_seconds:
+            wait_seconds = retry_max_wait_seconds
+    else:
+        wait_seconds = min(2**retry_index, retry_max_wait_seconds)
+        if wait_seconds <= 0:
+            return None
+    return min(int(wait_seconds), retry_max_wait_seconds)
 
 
 def _emit_retry(

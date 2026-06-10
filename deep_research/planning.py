@@ -9,10 +9,6 @@ from deep_research.text_terms import cjk_content_chunks, contains_cjk, ordered_t
 
 MAX_DYNAMIC_BRANCHES = 14
 MAX_BRANCH_QUERIES = 4
-SEGMENT_TRIGGER_RE = re.compile(
-    r"\b(?:address|analyze|assess|compare|cover|describe|evaluate|explain|explore|find|include|investigate|research|review|summarize)\b",
-    flags=re.I,
-)
 
 def build_research_plan(question: str, *, audience: str = "technical generalist") -> ResearchPlan:
     intent: ResearchIntent = "general"
@@ -156,6 +152,52 @@ def _target_branch_count(question: str, explicit_segments: list[str]) -> int:
     return min(MAX_DYNAMIC_BRANCHES, 4 + min(8, term_count // 12))
 
 
+def _task_verb_trigger(sentence: str) -> tuple[bool, int]:
+    """Return (found, end_offset) if the sentence opens with an imperative task verb.
+
+    Uses NLTK WordNet to check if the first word is primarily used as a verb across
+    its lexical synsets — no hardcoded word list required. Falls back silently if
+    NLTK data is unavailable. Auto-downloads required NLTK corpora on first call.
+    """
+    try:
+        import nltk
+        try:
+            words = nltk.word_tokenize(sentence[:160])
+        except LookupError:
+            nltk.download("punkt_tab", quiet=True)
+            words = nltk.word_tokenize(sentence[:160])
+        if not words:
+            return False, 0
+        if _wordnet_is_primarily_verb(words[0].lower()):
+            pos = sentence.find(words[0])
+            if pos >= 0:
+                return True, pos + len(words[0])
+    except Exception:
+        pass
+    return False, 0
+
+
+def _wordnet_is_primarily_verb(word: str) -> bool:
+    """Return True if WordNet records more verb than noun synsets for the word,
+    or if ≥40% of its synsets are verbs — catching all task verbs without a fixed list."""
+    try:
+        import nltk
+        from nltk.corpus import wordnet
+        try:
+            synsets = wordnet.synsets(word)
+        except LookupError:
+            nltk.download("wordnet", quiet=True)
+            synsets = wordnet.synsets(word)
+        if not synsets:
+            return False
+        verb_count = sum(1 for s in synsets if s.pos() == "v")
+        noun_count = sum(1 for s in synsets if s.pos() == "n")
+        total = len(synsets)
+        return verb_count > noun_count or (total > 0 and verb_count / total >= 0.40)
+    except Exception:
+        return False
+
+
 def _explicit_request_segments(question: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", question.strip())
     sentence_parts = re.split(r"(?<=[.!?。！？])\s*|[;；\n]+", normalized)
@@ -168,9 +210,9 @@ def _explicit_request_segments(question: str) -> list[str]:
             segments.extend(_cjk_request_segments(sentence))
             continue
         candidate = sentence
-        trigger = SEGMENT_TRIGGER_RE.search(sentence)
-        if trigger:
-            candidate = sentence[trigger.end() :].strip(" :,")
+        found, end_offset = _task_verb_trigger(sentence)
+        if found:
+            candidate = sentence[end_offset:].strip(" :,")
         if "," in candidate or re.search(r"\band\b", candidate, flags=re.I):
             for part in re.split(r",|\band\b", candidate, flags=re.I):
                 cleaned = part.strip(" ,.:")

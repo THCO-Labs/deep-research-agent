@@ -86,6 +86,17 @@ def classify_exception(exc: BaseException) -> FailureClassification:
             error_type=type(exc).__name__,
             message=message,
         )
+    if _is_network_error(exc, lower):
+        return FailureClassification(
+            category="network_error",
+            retryable=True,
+            retry_after_seconds=retry_after,
+            suggested_action=(
+                "Transient network failure (DNS/connection). The fallback chain will try other keys/providers."
+            ),
+            error_type=type(exc).__name__,
+            message=message,
+        )
     return FailureClassification(
         category="unknown",
         retryable=False,
@@ -156,6 +167,44 @@ def _is_tool_call_error(lower_message: str) -> bool:
         "tool call",
     )
     return any(token in lower_message for token in tokens)
+
+
+def _is_network_error(exc: BaseException, lower_message: str) -> bool:
+    """Detect transient network/DNS/connection failures that should trigger fallback.
+
+    Catches: DNS resolution (getaddrinfo, gaierror, NXDOMAIN), connection reset/refused,
+    SSL handshake failures, socket errors, httpx ConnectError, and Windows error 11001
+    (DNS) / 10054 (reset) / 10061 (refused).
+    """
+    tokens = (
+        "getaddrinfo failed",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "no address associated with hostname",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "connection error",
+        "connecterror",
+        "remote end closed connection",
+        "ssl handshake",
+        "ssl: certificate",
+        "certificate verify failed",
+        "max retries exceeded",
+        "errno 11001",
+        "errno 10054",
+        "errno 10061",
+        "winerror 11001",
+        "[errno -2]",  # POSIX gaierror
+        "[errno -3]",
+    )
+    if any(token in lower_message for token in tokens):
+        return True
+    # Type-based detection as backup (covers cases where the str() repr is opaque).
+    exc_type_name = type(exc).__name__.lower()
+    type_tokens = ("gaierror", "connecterror", "connectionerror", "sslerror", "remotedisconnected")
+    return any(token in exc_type_name for token in type_tokens)
 
 
 def _is_auth_error(lower_message: str) -> bool:
