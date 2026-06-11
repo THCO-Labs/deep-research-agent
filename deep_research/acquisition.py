@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -609,34 +610,83 @@ def _duckduckgo_available() -> bool:
     return DDGS is not None
 
 
+_DDG_QUERY_TIMEOUT_SECONDS = 30.0  # hard wall-clock per DDG query
+
+
+class _DuckDuckGoTimeoutError(RuntimeError):
+    """Raised when a DDG query exceeds the wall-clock budget."""
+
+
+def _ddg_query_with_timeout(query: str, *, max_results: int) -> list[dict[str, Any]]:
+    """Run DDGS().text() in a daemon thread with a hard wall-clock timeout.
+
+    The duckduckgo-search library has no timeout parameter and can block on
+    a hung TCP socket indefinitely. We wrap it the same way we wrap Playwright
+    and synthesis: daemon thread + thread.join(timeout). On timeout the thread
+    is abandoned (dies with the process); main thread raises and the caller
+    treats it like any DDG failure.
+    """
+    if DDGS is None:
+        return []
+    result_holder: list[list[dict[str, Any]]] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        rows: list[dict[str, Any]] = []
+        try:
+            with DDGS() as ddgs:
+                for rank, row in enumerate(ddgs.text(query, max_results=max_results)):
+                    url = str((row or {}).get("href") or "")
+                    if not url:
+                        continue
+                    title = str((row or {}).get("title") or url)
+                    snippet = str((row or {}).get("body") or (row or {}).get("snippet") or "")
+                    if not snippet:
+                        snippet = title
+                    # Position-decay score so search_score is informative even
+                    # without Tavily relevance data.
+                    positional_score = round(0.9 * (0.95 ** rank), 4)
+                    rows.append(
+                        {
+                            "url": url,
+                            "title": title,
+                            "content": snippet,
+                            "score": positional_score,
+                        }
+                    )
+            result_holder.append(rows)
+        except BaseException as exc:  # noqa: BLE001
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=_DDG_QUERY_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        raise _DuckDuckGoTimeoutError(
+            f"DuckDuckGo query did not return within {_DDG_QUERY_TIMEOUT_SECONDS:.0f}s; "
+            f"abandoning thread."
+        )
+    if error_holder:
+        raise error_holder[0]
+    return result_holder[0] if result_holder else []
+
+
 def _search_with_duckduckgo(query: str, *, max_results: int) -> list[dict[str, Any]]:
     if DDGS is None:
         return []
-    results: list[dict[str, Any]] = []
     try:
-        with DDGS() as ddgs:
-            for rank, row in enumerate(ddgs.text(query, max_results=max_results)):
-                url = str((row or {}).get("href") or "")
-                if not url:
-                    continue
-                title = str((row or {}).get("title") or url)
-                snippet = str((row or {}).get("body") or (row or {}).get("snippet") or "")
-                if not snippet:
-                    snippet = title
-                # Assign a position-decay score (rank 0 → 0.9, rank 9 → 0.45) so
-                # search_score is informative even without Tavily relevance data.
-                positional_score = round(0.9 * (0.95 ** rank), 4)
-                results.append(
-                    {
-                        "url": url,
-                        "title": title,
-                        "content": snippet,
-                        "score": positional_score,
-                    }
-                )
+        return _ddg_query_with_timeout(query, max_results=max_results)
+    except _DuckDuckGoTimeoutError as exc:
+        # Re-raise as a regular exception so the caller's failure counter
+        # treats this as a hard failure (5 consecutive → DDG marked dead).
+        # Otherwise we wait 10 empty results which is twice as slow.
+        logging.getLogger(__name__).warning(
+            "DuckDuckGo query timed out (%s); counting as hard failure.", exc,
+        )
+        raise RuntimeError(str(exc)) from exc
     except Exception:
         return []
-    return results
 
 
 def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: str) -> list[str]:

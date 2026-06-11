@@ -4,6 +4,7 @@ import json
 import re
 import hashlib
 import ast
+import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -214,8 +215,46 @@ def _judge_model(settings: Settings) -> Any:
     return model
 
 
+class JudgeTimeoutError(RuntimeError):
+    """Raised when a semantic judge call exceeds the wall-clock budget."""
+
+
+def _judge_wall_clock_timeout(model: Any) -> float:
+    """Wall-clock cap for any one judge call. Pulled from the model's own
+    timeout attribute if it exposes one; otherwise 300s, with a hard ceiling
+    of 600s. Matches the same logic the synthesis watchdog uses."""
+    inner = getattr(model, "primary", model)  # unwrap FallbackChatModel
+    candidate = getattr(inner, "timeout", None) or getattr(inner, "request_timeout", None)
+    base = float(candidate) if candidate else 300.0
+    return min(600.0, max(180.0, base * 1.5))
+
+
 def _invoke_json(model: Any, prompt: str) -> dict[str, Any]:
-    response = model.invoke([HumanMessage(content=prompt)])
+    timeout_s = _judge_wall_clock_timeout(model)
+    result_holder: list[Any] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result_holder.append(model.invoke([HumanMessage(content=prompt)]))
+        except BaseException as exc:  # noqa: BLE001
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+
+    if thread.is_alive():
+        raise JudgeTimeoutError(
+            f"semantic judge did not return within {timeout_s:.0f}s wall-clock budget; "
+            f"abandoning thread and propagating as a soft failure."
+        )
+    if error_holder:
+        raise error_holder[0]
+    if not result_holder:
+        raise ValueError("empty response")
+
+    response = result_holder[0]
     text = str(getattr(response, "content", response)).strip()
     if not text:
         raise ValueError("empty response")

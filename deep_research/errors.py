@@ -155,6 +155,11 @@ def _is_provider_timeout_error(lower_message: str) -> bool:
         "503",
         "service unavailable",
         "temporarily unavailable",
+        # Our own wall-clock watchdogs (semantic.JudgeTimeoutError,
+        # synthesis.SynthesisTimeoutError) raise messages containing these.
+        "did not return within",
+        "wall-clock budget",
+        "abandoning thread",
     )
     return any(token in lower_message for token in tokens)
 
@@ -224,6 +229,11 @@ def _extract_retry_after_seconds(message: str) -> int | None:
         r"try again in\s+(\d+(?:\.\d+)?)s",
         r"retry in\s+(\d+(?:\.\d+)?)s",
         r"retry after\s+(\d+(?:\.\d+)?)\s*seconds?",
+        # OpenRouter and other providers return retry_after_seconds in JSON error bodies.
+        r'"retry_after_seconds"\s*:\s*(\d+(?:\.\d+)?)',
+        r'"retry_after_seconds_raw"\s*:\s*(\d+(?:\.\d+)?)',
+        r'"retry-after"\s*:\s*"?(\d+(?:\.\d+)?)"?',
+        r'"Retry-After"\s*:\s*"?(\d+(?:\.\d+)?)"?',
     )
     for pattern in patterns:
         match = re.search(pattern, message, flags=re.IGNORECASE)

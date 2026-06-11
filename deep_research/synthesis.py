@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date
 import json
 import re
+import threading
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -17,9 +18,21 @@ from deep_research.text_terms import cjk_char_count, preferred_output_language
 
 MAX_SYNTHESIS_CARDS_PER_BRANCH = 8
 MAX_SYNTHESIS_CARDS_TOTAL = 20
-MAX_SYNTHESIS_EXCERPT_CHARS = 160
+# Bumped from 160 → 280 (default) and 320 → 480 (top-cards) so Mistral has
+# enough verbatim source text to quote from when stating specific facts.
+# Citation accuracy improves when the report's phrasing matches what the URL
+# literally says, which only works if the writer has access to the actual
+# excerpts rather than truncated fragments.
+MAX_SYNTHESIS_EXCERPT_CHARS = 280
+MAX_SYNTHESIS_TOP_EXCERPT_CHARS = 480
 MAX_DEPTH_EXPANSION_ROUNDS = 2
-INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.22
+# Tightened from 0.22 → 0.30: a citation must show meaningful term overlap with
+# the claim being cited. Lower values were letting through "loosely related"
+# citations that the FACT pipeline judges then reject when they scrape the URL.
+INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.30
+# When a sentence contains specific facts (numbers, dollar amounts, dates,
+# percentages, proper names), require stronger support than a generic claim.
+SPECIFIC_FACT_REPAIR_THRESHOLD = 0.40
 LOW_TPM_PROVIDER_BUDGET_TOKENS = 7_600
 MIN_SYNTHESIS_COMPLETION_TOKENS = 768
 REPORT_STYLE_EXAMPLES = (
@@ -276,6 +289,21 @@ def synthesize_report_with_model(
         return synthesize_report(plan=plan, evidence_cards=synthesis_cards, coverage=coverage, sources=evidence_sources)
     normalized = _normalize_report_markdown(text, evidence_sources)
     citation_repaired = _repair_weak_citation_support(normalized, synthesis_cards, evidence_sources)
+    # Strip citations attached to specific facts (numbers, %, $, years) when no
+    # cited card actually contains that fact — the FACT pipeline catches this
+    # as "unsupported" and rejects the citation. Better to drop the false
+    # attribution than keep a misleading citation.
+    citation_repaired = _strip_hallucinated_specific_citations(citation_repaired, synthesis_cards, evidence_sources)
+    # NEW: ask the model to rewrite low-overlap cited sentences using the
+    # cited card's verbatim excerpt language. Single batched LLM call.
+    citation_repaired = _rewrite_low_overlap_cited_sentences(
+        citation_repaired,
+        synthesis_cards,
+        evidence_sources,
+        model=model,
+        settings=settings,
+        model_spec=model_spec,
+    )
     coverage_repaired = _append_evidence_coverage_if_needed(citation_repaired, plan, synthesis_cards)
     normalized_report = _normalize_report_markdown(coverage_repaired, evidence_sources)
     expanded_report = _expand_report_depth_if_needed(
@@ -319,6 +347,10 @@ def _synthesis_model_spec(settings: Settings, plan: ResearchPlan, writing_guidan
     return settings.model
 
 
+class SynthesisTimeoutError(RuntimeError):
+    """Raised when a synthesis LLM call exceeds the wall-clock budget."""
+
+
 def _invoke_with_synthesis_budget(
     model: BaseChatModel,
     *,
@@ -327,12 +359,67 @@ def _invoke_with_synthesis_budget(
     model_spec: str,
 ) -> Any:
     kwargs = _synthesis_request_kwargs(settings=settings, prompt=prompt, model_spec=model_spec)
-    try:
-        return model.invoke([HumanMessage(content=prompt)], **kwargs)
-    except TypeError as exc:
-        if kwargs and "unexpected" in str(exc).lower() and "keyword" in str(exc).lower():
-            return model.invoke([HumanMessage(content=prompt)])
-        raise
+    timeout_s = _synthesis_wall_clock_timeout(settings)
+
+    def _invoke() -> Any:
+        try:
+            return model.invoke([HumanMessage(content=prompt)], **kwargs)
+        except TypeError as exc:
+            if kwargs and "unexpected" in str(exc).lower() and "keyword" in str(exc).lower():
+                return model.invoke([HumanMessage(content=prompt)])
+            raise
+
+    return _call_with_wall_clock_timeout(_invoke, timeout_s=timeout_s, label=f"synthesis ({model_spec})")
+
+
+def _synthesis_wall_clock_timeout(settings: Settings) -> float:
+    """Wall-clock timeout for a single synthesis LLM call.
+
+    Library-level timeouts (httpx, langchain) are not always honoured for
+    streaming responses or hung TCP sockets. This independent wall clock
+    guarantees that a frozen call surfaces as an exception, which the
+    synthesize() node catches and degrades to deterministic synthesis.
+    """
+    base = float(getattr(settings, "model_request_timeout_seconds", 120) or 120)
+    # Give synthesis 1.5x the per-call timeout — large reports legitimately
+    # take 2-5 minutes on Mistral Large. Hard cap at 15 minutes regardless.
+    return min(900.0, max(180.0, base * 1.5))
+
+
+def _call_with_wall_clock_timeout(
+    fn: Any,
+    *,
+    timeout_s: float,
+    label: str,
+) -> Any:
+    """Run fn() in a daemon thread; raise SynthesisTimeoutError if it doesn't
+    return within timeout_s. The hung thread is abandoned — it dies with the
+    process. This is correct for HTTP calls: the worst case is one leaked
+    socket per timeout, recovered when the process exits.
+    """
+    result_holder: list[Any] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result_holder.append(fn())
+        except BaseException as exc:
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+
+    if thread.is_alive():
+        raise SynthesisTimeoutError(
+            f"{label} did not return within {timeout_s:.0f}s wall-clock budget; "
+            f"abandoning thread and falling back."
+        )
+    if error_holder:
+        raise error_holder[0]
+    if result_holder:
+        return result_holder[0]
+    raise SynthesisTimeoutError(f"{label} returned no result and no error.")
 
 
 def _synthesis_request_kwargs(*, settings: Settings, prompt: str, model_spec: str) -> dict[str, int]:
@@ -379,13 +466,19 @@ def _synthesis_prompt(
         if source is None:
             continue
         branch_card_count[card.branch_id] = branch_card_count.get(card.branch_id, 0) + 1
-        # Top 2 cards per branch get the full excerpt (up to 320 chars) so the writer
-        # can quote or paraphrase from real language rather than just matching terms.
-        excerpt_limit = 320 if branch_card_count[card.branch_id] <= 2 else MAX_SYNTHESIS_EXCERPT_CHARS
+        # Top 2 cards per branch get the full excerpt so the writer can quote
+        # verbatim from real source language rather than paraphrasing — which
+        # is the single most effective way to improve FACT citation accuracy.
+        excerpt_limit = (
+            MAX_SYNTHESIS_TOP_EXCERPT_CHARS
+            if branch_card_count[card.branch_id] <= 2
+            else MAX_SYNTHESIS_EXCERPT_CHARS
+        )
         evidence_lines.append(
             (
                 f"- card {card.id}; branch {card.branch_id}; source [{card.source_id}] {source.title}; "
-                f"claim: {card.claim}; excerpt: {card.supporting_excerpt[:excerpt_limit]}; "
+                f"claim: {card.claim}; excerpt (VERBATIM source text — quote from here for specific facts): "
+                f"{card.supporting_excerpt[:excerpt_limit]}; "
                 f"limits: {', '.join(card.limitations[:2]) or 'none'}"
             )
         )
@@ -491,6 +584,19 @@ Hard requirements:
 - Do not include raw URLs, markdown links/media, page chrome, scrape metadata, branch IDs, evidence-card IDs, or verification diagnostics outside Sources.
 - Include images only when listed as evidence-backed visual assets and useful for inspection.
 - End with exactly one ## Sources section. Each entry must be exactly: [N] Title: https://url
+
+CITATION GROUNDING — STRICT RULES (each violation makes the report fail verification):
+- Cite [N] only when an evidence card from source N contains the specific claim being cited. Do NOT cite [N] for general topic relevance, related background, or "this source talks about X" — only when the card's claim or excerpt literally supports the sentence being cited.
+- If a sentence states a fact (number, name, date, quote, mechanism, comparison), it must cite a source whose card actually contains that fact. If no card states the fact, rewrite the sentence to remove the unsupported claim, OR drop the citation rather than misattribute.
+- Synthesis sentences that combine facts from multiple cards should cite each contributing source separately, e.g. "Buffett evolved from Graham [3] to incorporating Munger's quality focus [12]" — not "[3] [12]" stacked at the end without tying each citation to its claim.
+- Never cite a source for a claim that is more specific than what its card's excerpt or claim field actually says. If the card says "AI investment is significant" and you write "Accenture invested $3 billion in AI", do NOT cite that card for the $3 billion figure.
+- When a sentence has no card that directly supports it, write it without a citation (mark as "synthesis" or general framing) rather than padding with a loosely related citation.
+
+VERBATIM SOURCE GROUNDING — for specific facts:
+- When you state a specific fact (any number, dollar amount, percentage, year, count, named-entity attribute like "Accenture's headcount", or a notable quote), DRAW THE PHRASING FROM THE EVIDENCE CARD'S EXCERPT FIELD, which is verbatim text from the source URL. Use the same key tokens — names, numbers, percentages, units — exactly as they appear in the excerpt.
+- This does NOT mean copy-paste long passages. It means: if the excerpt says "Square reported revenue of $19.7 billion in 2023", and you want to cite this, write "Square reported $19.7 billion in 2023 revenue [3]" — not "Square earned billions in recent years [3]" (too vague), and not "Square's 2023 revenue was approximately $20 billion [3]" (you rounded — the URL says $19.7 billion).
+- If an excerpt's phrasing is ambiguous or only partly answers your sentence, either (a) use the excerpt's exact wording and adjust your sentence around it, or (b) skip the citation and rephrase to a softer general claim.
+- This rule directly improves FACT-pipeline citation accuracy because a fresh scrape of the URL will find your phrasing in it.
 """
 
 
@@ -530,6 +636,11 @@ def _expand_report_depth_if_needed(
         expanded = _insert_before_sources(expanded, addition)
         expanded = _normalize_report_markdown(expanded, sources)
         expanded = _repair_weak_citation_support(expanded, evidence_cards, sources)
+        expanded = _strip_hallucinated_specific_citations(expanded, evidence_cards, sources)
+        expanded = _rewrite_low_overlap_cited_sentences(
+            expanded, evidence_cards, sources,
+            model=model, settings=settings, model_spec=model_spec,
+        )
         expanded = _append_evidence_coverage_if_needed(expanded, plan, evidence_cards)
     return expanded
 
@@ -1102,6 +1213,26 @@ def _repair_uncited_body_paragraphs(report: str, sources: list[SourceRecordV2]) 
     return "".join(repaired) + (separator + source_tail if separator else "")
 
 
+_SPECIFIC_FACT_RE = re.compile(
+    r"("
+    r"\d{1,3}(?:[,.]\d{3})+"                                  # 1,000 / 1.000.000
+    r"|\d+\.\d+"                                              # 3.14
+    r"|\d+\s?%"                                               # 25% or 25 %
+    r"|\$\s?\d+"                                              # $1000 / $ 1000
+    r"|[€£¥]\s?\d+"                                           # €1000
+    r"|\b\d{4}\b"                                             # 1999 / 2024 (4-digit years)
+    r"|\b\d+\s?(?:billion|million|trillion|bn|mn|tn)\b"       # 3 billion
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_specific_facts(text: str) -> bool:
+    """True if the sentence contains a number, money, year, or percentage —
+    the kinds of claims that need precise citation backing, not just topical."""
+    return bool(_SPECIFIC_FACT_RE.search(text))
+
+
 def _repair_weak_citation_support(
     report: str,
     evidence_cards: list[EvidenceCard],
@@ -1124,32 +1255,375 @@ def _repair_weak_citation_support(
             repaired.append(paragraph)
             continue
         claim_terms = content_terms(_strip_numeric_citations(text))
-        if len(claim_terms) < 6:
+        # Lowered from 6 → 4 so shorter sentences with specific facts also get checked.
+        if len(claim_terms) < 4:
             repaired.append(paragraph)
             continue
         cited_ids = {source_id for source_id in _numeric_citation_ids(text) if source_id in source_ids}
         if not cited_ids:
             repaired.append(paragraph)
             continue
+        # Apply stricter threshold for paragraphs with specific facts (numbers,
+        # money, percentages, years) — these need precise citation grounding.
+        has_facts = _has_specific_facts(_strip_numeric_citations(text))
+        individual_threshold = SPECIFIC_FACT_REPAIR_THRESHOLD if has_facts else INDIVIDUAL_CITATION_REPAIR_THRESHOLD
+        paragraph_threshold = max(threshold, 0.45) if has_facts else threshold
         individual_scores = _individual_source_support_scores(claim_terms, terms_by_source, cited_ids)
         weak_ids = {
             source_id
             for source_id, score in individual_scores.items()
-            if score < INDIVIDUAL_CITATION_REPAIR_THRESHOLD
+            if score < individual_threshold
         }
         strong_ids = cited_ids - weak_ids
         support_terms = set().union(*(terms_by_source.get(source_id, set()) for source_id in cited_ids))
         support_score = len(claim_terms & support_terms) / max(len(claim_terms), 1)
-        if support_score >= threshold and not weak_ids:
+        if support_score >= paragraph_threshold and not weak_ids:
             repaired.append(paragraph)
             continue
-        additions = _best_supporting_source_ids(claim_terms, terms_by_source, cited_ids, threshold)
+        additions = _best_supporting_source_ids(claim_terms, terms_by_source, cited_ids, paragraph_threshold)
         if weak_ids and (strong_ids or additions):
             paragraph = _remove_numeric_citation_ids(paragraph, weak_ids)
         if additions:
             paragraph = paragraph.rstrip() + " " + " ".join(f"[{source_id}]" for source_id in additions)
         repaired.append(paragraph)
     return "".join(repaired) + (separator + source_tail if separator else "")
+
+
+# Pattern matches specific facts: numbers, percentages, money, years, units.
+# Captures the whole token so we can search for it in cited cards.
+_SPECIFIC_FACT_TOKEN_RE = re.compile(
+    r"("
+    r"\$\s?\d+(?:[.,]\d+)*\s?(?:billion|million|trillion|bn|mn|tn|k|m|b)?"
+    r"|[€£¥]\s?\d+(?:[.,]\d+)*"
+    r"|\d{1,3}(?:[,.]\d{3})+(?:\.\d+)?"
+    r"|\d+\.\d+\s?%?"
+    r"|\d+\s?%"
+    r"|\b\d{4}\b"
+    r"|\b\d+\s?(?:billion|million|trillion|bn|mn|tn)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _normalize_fact_token(token: str) -> str:
+    """Reduce a specific-fact token to a comparable form so '3.5 billion'
+    matches '3.5 bn' and '$ 1,000' matches '$1000'. Lowercase, no spaces,
+    money symbols dropped, commas dropped, common unit abbreviations expanded."""
+    t = token.strip().lower()
+    t = t.replace("$", "").replace("€", "").replace("£", "").replace("¥", "")
+    t = t.replace(",", "").replace(" ", "")
+    # Unit abbreviation harmonisation.
+    replacements = (
+        ("billion", "bn"),
+        ("million", "mn"),
+        ("trillion", "tn"),
+    )
+    for full, short in replacements:
+        t = t.replace(full, short)
+    return t
+
+
+def _strip_hallucinated_specific_citations(
+    report: str,
+    evidence_cards: list[EvidenceCard],
+    sources: list[SourceRecordV2],
+) -> str:
+    """Post-synthesis fact-check.
+
+    Strip a [N] citation ONLY when both conditions hold:
+      (a) the sentence's specific facts (numbers, $, %, years) do not appear
+          in source N's evidence cards, AND
+      (b) the cited card from source N also does NOT meaningfully support the
+          general claim of the sentence (term overlap < SUPPORT_FLOOR).
+
+    Earlier we stripped on (a) alone, which was too aggressive: a sentence
+    like "Square offers a tablet POS in 2020 [3]" was losing [3] because the
+    card didn't say "2020", even though the card fully supported "Square
+    offers a tablet POS". The conjunction with (b) makes the heuristic safe:
+    we only strip when the source supports NEITHER the general claim NOR
+    the specific fact.
+    """
+    SUPPORT_FLOOR = 0.20  # term overlap below this counts as 'not supporting general claim'
+
+    source_ids = {source.id for source in sources}
+    if not source_ids:
+        return report
+
+    # Per-source pool of normalised fact tokens from card claims/excerpts.
+    tokens_by_source: dict[int, set[str]] = defaultdict(set)
+    # Per-source pool of content terms for general-claim overlap check.
+    terms_by_source = _evidence_terms_by_source(evidence_cards, source_ids)
+    for card in evidence_cards:
+        if card.source_id not in source_ids:
+            continue
+        blob = f"{card.claim} {card.supporting_excerpt}"
+        for match in _SPECIFIC_FACT_TOKEN_RE.finditer(blob):
+            tokens_by_source[card.source_id].add(_normalize_fact_token(match.group(1)))
+
+    body, separator, source_tail = _split_sources(report)
+
+    def _scrub_sentence(sentence: str) -> str:
+        cited_ids = [int(m) for m in re.findall(r"\[(\d+)\]", sentence) if int(m) in source_ids]
+        if not cited_ids:
+            return sentence
+        text_no_cites = re.sub(r"\s*\[\d+\]", "", sentence)
+        fact_tokens = [
+            _normalize_fact_token(m.group(1))
+            for m in _SPECIFIC_FACT_TOKEN_RE.finditer(text_no_cites)
+        ]
+        fact_tokens = [t for t in fact_tokens if len(t) >= 2 and t not in {"100", "10", "0", "1"}]
+        if not fact_tokens:
+            return sentence
+        claim_terms = content_terms(text_no_cites)
+        if len(claim_terms) < 4:
+            return sentence
+        for source_id in set(cited_ids):
+            supporting_tokens = tokens_by_source.get(source_id, set())
+            specific_matched = any(token in supporting_tokens for token in fact_tokens)
+            if specific_matched:
+                continue  # cited source contains the specific fact — keep citation
+            # No specific match. Check if the source supports the general claim.
+            source_terms = terms_by_source.get(source_id, set())
+            general_overlap = (
+                len(claim_terms & source_terms) / max(len(claim_terms), 1)
+                if source_terms
+                else 0.0
+            )
+            if general_overlap < SUPPORT_FLOOR:
+                # Neither specific facts nor general claim are supported —
+                # safe to strip this misleading citation.
+                sentence = re.sub(rf"\s*\[{source_id}\]", "", sentence)
+        return sentence
+
+    repaired_parts: list[str] = []
+    for paragraph in re.split(r"(\n\s*\n)", body):
+        if not paragraph.strip() or re.fullmatch(r"\n\s*\n", paragraph):
+            repaired_parts.append(paragraph)
+            continue
+        sentences = re.split(r"(?<=[.!?])(\s+)", paragraph)
+        rebuilt: list[str] = []
+        for i, chunk in enumerate(sentences):
+            if i % 2 == 0:
+                rebuilt.append(_scrub_sentence(chunk))
+            else:
+                rebuilt.append(chunk)
+        repaired_parts.append("".join(rebuilt))
+    return "".join(repaired_parts) + (separator + source_tail if separator else "")
+
+
+_REWRITE_OVERLAP_THRESHOLD = 0.35  # below this, sentence needs rewrite or strip
+_REWRITE_MAX_SENTENCES = 30        # cap to keep prompt size reasonable
+_REWRITE_MIN_CARDS_PER_SOURCE = 1  # need at least one card with excerpt
+
+
+def _rewrite_low_overlap_cited_sentences(
+    report: str,
+    evidence_cards: list[EvidenceCard],
+    sources: list[SourceRecordV2],
+    *,
+    model: BaseChatModel,
+    settings: Settings,
+    model_spec: str,
+) -> str:
+    """For every cited sentence whose content terms overlap weakly with the
+    cited card's verbatim excerpt, ask the model to rewrite that sentence
+    using the excerpt's exact phrasing.
+
+    This directly attacks the FACT-pipeline "claim not in URL" rejection by
+    aligning the report's wording to what the URL literally contains. One
+    batched LLM call per repair pass, not one per sentence — keeps overhead
+    bounded.
+    """
+    source_ids = {source.id for source in sources}
+    if not source_ids:
+        return report
+    cards_by_source: dict[int, list[EvidenceCard]] = defaultdict(list)
+    for card in evidence_cards:
+        if card.source_id in source_ids:
+            cards_by_source[card.source_id].append(card)
+    if not cards_by_source:
+        return report
+
+    body, separator, source_tail = _split_sources(report)
+
+    # Walk sentences, find weak ones, queue them up for batched rewrite.
+    paragraphs = re.split(r"(\n\s*\n)", body)
+    rewrite_targets: list[dict[str, Any]] = []
+    sentence_index: list[tuple[int, int, str]] = []  # (para_idx, sent_idx, original_text)
+    para_sentences: dict[int, list[str]] = {}
+
+    for p_idx, paragraph in enumerate(paragraphs):
+        if not paragraph.strip() or re.fullmatch(r"\n\s*\n", paragraph):
+            para_sentences[p_idx] = [paragraph]
+            continue
+        # Split into sentence + trailing whitespace pairs to preserve formatting.
+        chunks = re.split(r"(?<=[.!?])(\s+)", paragraph)
+        para_sentences[p_idx] = chunks
+        for s_idx, chunk in enumerate(chunks):
+            if s_idx % 2 != 0:
+                continue  # whitespace token
+            sentence_text = chunk
+            cited_ids = [
+                int(m) for m in re.findall(r"\[(\d+)\]", sentence_text)
+                if int(m) in source_ids
+            ]
+            if not cited_ids:
+                continue
+            # Only attempt rewrite when the sentence makes a substantive claim
+            # — same gating as _repair_weak_citation_support.
+            if not _paragraph_can_receive_support_repair(sentence_text):
+                continue
+            claim_text = _strip_numeric_citations(sentence_text)
+            claim_terms = content_terms(claim_text)
+            if len(claim_terms) < 6:
+                continue
+            # Pick the FIRST cited source as the rewrite target (others can
+            # stay as supplementary citations).
+            target_source_id = cited_ids[0]
+            target_cards = cards_by_source.get(target_source_id, [])
+            if len(target_cards) < _REWRITE_MIN_CARDS_PER_SOURCE:
+                continue
+            # Pick the card whose excerpt has the most overlap with this claim.
+            best_card = None
+            best_overlap = 0.0
+            for card in target_cards:
+                excerpt_terms = content_terms(card.supporting_excerpt or card.claim or "")
+                if not excerpt_terms:
+                    continue
+                overlap = (
+                    len(claim_terms & excerpt_terms) / max(len(claim_terms), 1)
+                )
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_card = card
+            if best_card is None:
+                continue
+            if best_overlap >= _REWRITE_OVERLAP_THRESHOLD:
+                continue  # claim is well-anchored — leave it alone
+            excerpt = (best_card.supporting_excerpt or "").strip()
+            if len(excerpt) < 40:
+                continue
+            rewrite_targets.append(
+                {
+                    "para_idx": p_idx,
+                    "sent_idx": s_idx,
+                    "original": sentence_text.strip(),
+                    "source_id": target_source_id,
+                    "excerpt": excerpt[:520],
+                    "overlap": round(best_overlap, 3),
+                }
+            )
+            if len(rewrite_targets) >= _REWRITE_MAX_SENTENCES:
+                break
+        if len(rewrite_targets) >= _REWRITE_MAX_SENTENCES:
+            break
+
+    if not rewrite_targets:
+        return report
+
+    rewrites = _batch_rewrite_sentences(
+        targets=rewrite_targets,
+        model=model,
+        settings=settings,
+        model_spec=model_spec,
+    )
+    if not rewrites:
+        return report
+
+    # Splice rewrites back into the paragraph chunks.
+    rewritten_by_position: dict[tuple[int, int], str] = {}
+    for target, rewritten in zip(rewrite_targets, rewrites):
+        if not rewritten:
+            continue
+        rewritten_by_position[(target["para_idx"], target["sent_idx"])] = rewritten
+
+    out_paragraphs: list[str] = []
+    for p_idx, chunks in para_sentences.items():
+        if len(chunks) == 1:
+            out_paragraphs.append(chunks[0])
+            continue
+        new_chunks: list[str] = []
+        for s_idx, chunk in enumerate(chunks):
+            replacement = rewritten_by_position.get((p_idx, s_idx))
+            if replacement is not None:
+                # Preserve any leading whitespace at the start of the original
+                # sentence (typical when it begins a new line in markdown).
+                leading_ws = re.match(r"^\s*", chunk).group(0)
+                new_chunks.append(leading_ws + replacement.strip())
+            else:
+                new_chunks.append(chunk)
+        out_paragraphs.append("".join(new_chunks))
+    return "".join(out_paragraphs) + (separator + source_tail if separator else "")
+
+
+def _batch_rewrite_sentences(
+    *,
+    targets: list[dict[str, Any]],
+    model: BaseChatModel,
+    settings: Settings,
+    model_spec: str,
+) -> list[str]:
+    """One LLM call that rewrites up to N sentences to match their cited
+    excerpts. Returns a list of rewritten sentences indexed to `targets`.
+    On any failure, returns an empty list so the caller leaves the report
+    untouched."""
+    if not targets:
+        return []
+    entries_text = []
+    for i, target in enumerate(targets, start=1):
+        entries_text.append(
+            f"ENTRY {i}:\n"
+            f"SOURCE_ID: {target['source_id']}\n"
+            f"ORIGINAL_SENTENCE: {target['original']}\n"
+            f"VERBATIM_EXCERPT_FROM_SOURCE: {target['excerpt']}\n"
+        )
+    prompt = (
+        "You are a citation alignment editor. For each ENTRY below, rewrite "
+        "the ORIGINAL_SENTENCE so its phrasing reuses the key tokens (names, "
+        "numbers, percentages, dates, technical terms) from the "
+        "VERBATIM_EXCERPT_FROM_SOURCE. Keep the citation marker (e.g. "
+        f"[{targets[0]['source_id']}]) at the end of the rewritten sentence. "
+        "Do NOT invent facts that aren't in the excerpt — if the excerpt is "
+        "vague, write a softer sentence rather than fabricating specifics. "
+        "Keep the sentence single-line, professional prose, similar length.\n\n"
+        "Return STRICT JSON: {\"rewrites\": [{\"entry\": 1, \"sentence\": \"...\"}, ...]} "
+        "with one entry per input. No commentary, no fences.\n\n"
+        + "\n".join(entries_text)
+    )
+    try:
+        response = _invoke_with_synthesis_budget(
+            model, prompt=prompt, settings=settings, model_spec=model_spec
+        )
+        text = str(getattr(response, "content", response)).strip()
+    except Exception:
+        return []
+    if not text:
+        return []
+    # Strip code fences if present
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    items = parsed.get("rewrites") if isinstance(parsed, dict) else None
+    if not isinstance(items, list):
+        return []
+    by_index: dict[int, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            entry_n = int(item.get("entry"))
+        except (TypeError, ValueError):
+            continue
+        sentence = item.get("sentence")
+        if not isinstance(sentence, str) or not sentence.strip():
+            continue
+        by_index[entry_n - 1] = sentence
+    result: list[str] = []
+    for i in range(len(targets)):
+        result.append(by_index.get(i, ""))
+    return result
 
 
 def _append_evidence_coverage_if_needed(

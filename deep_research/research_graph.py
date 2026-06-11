@@ -435,6 +435,8 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         coverage = _coverage_from_dict(state.get("coverage_matrix", {}))
         blueprint = build_report_blueprint(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
         runtime.artifacts.write_json("report_blueprint.json", blueprint)
+        previous_draft = str(state.get("draft_report") or "")
+        used_deterministic_fallback = False
         if runtime.settings.llm_synthesis:
             try:
                 report = synthesize_report_with_model(
@@ -443,7 +445,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
                     coverage=coverage,
                     sources=sources,
                     settings=runtime.settings,
-                    previous_report=str(state.get("draft_report") or ""),
+                    previous_report=previous_draft,
                     verification_failures=_synthesis_repair_guidance_from_state(state),
                     blueprint=blueprint,
                     writing_guidance=str(state.get("request", {}).get("writing_guidance") or ""),
@@ -461,8 +463,19 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
                     f"{type(exc).__name__}: {exc}\n",
                 )
                 report = synthesize_report(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
+                used_deterministic_fallback = True
         else:
             report = synthesize_report(plan=plan_obj, evidence_cards=cards, coverage=coverage, sources=sources)
+        # If we fell back to deterministic and the previous draft was meaningfully
+        # longer (i.e. an LLM had already produced a real report), keep the previous
+        # draft instead of regressing to a worse template-based one. This prevents
+        # the loop we saw where an OpenRouter 429 silently replaces a good draft.
+        if used_deterministic_fallback and previous_draft and len(previous_draft) > len(report) * 1.5:
+            runtime.emit_status(
+                "synthesize",
+                f"deterministic fallback ({len(report)} chars) shorter than previous LLM draft ({len(previous_draft)} chars); keeping previous draft",
+            )
+            report = previous_draft
         # Keep a numbered history of every draft so we can compare across
         # repair cycles. draft_report.md always points at the latest.
         draft_index = _next_draft_index(runtime.artifacts)
@@ -517,6 +530,11 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         metrics["verification_rounds"] = int(metrics.get("verification_rounds", 0)) + 1
         metrics["verification_valid"] = result.valid
         metrics["verification_failures"] = len(result.failures)
+        # Track failure count over time so _verification_route can detect when
+        # repair cycles are no longer making net progress.
+        history = list(metrics.get("verification_failure_history", []))
+        history.append(len(result.failures))
+        metrics["verification_failure_history"] = history
         runtime.emit_status(
             "verify",
             "verification passed" if result.valid else f"verification failed with {len(result.failures)} issue(s)",
@@ -714,6 +732,17 @@ def _verification_route(state: ResearchState) -> str:
     max_rounds = int(metrics.get("max_rounds", 4) or 4)
     if rounds >= max_rounds:
         return "finish"
+    # Anti-thrashing: if the last 3 verification cycles produced no net
+    # improvement in failure count, stop repairing. We're stuck in a loop
+    # where the LLM trades one set of issues for another, like we saw with
+    # the Mistral/OpenRouter cycle: 14→27→16→27 issues.
+    failure_history = list(metrics.get("verification_failure_history", []))
+    failure_history.append(len(verification.get("failures", [])))
+    if len(failure_history) >= 3:
+        recent = failure_history[-3:]
+        # No strict improvement across three rounds.
+        if min(recent) >= recent[0] * 0.9:
+            return "finish"
     failures = [str(failure).lower() for failure in verification.get("failures", [])]
     # If every failure is purely a judge availability problem, finish with what we
     # have — re-synthesising cannot fix a quota error, and discarding the draft
