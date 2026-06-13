@@ -192,8 +192,28 @@ def test_generate_raw_submission_records_internal_failure(tmp_path: Path) -> Non
 
     row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
     assert row["id"] == 2
+    assert "# Best Rejected Draft" in row["article"]
+    assert "# Failed Draft" not in row["article"]
+    assert "Benchmark Run Failure" not in row["article"]
+    assert "verification_failed" not in row["article"]
+
+
+def test_generate_raw_submission_records_failure_note_when_no_draft_exists(tmp_path: Path) -> None:
+    bench = _bench_dir(tmp_path)
+    settings = Settings(project_root=tmp_path, out_dir=tmp_path / "runs")
+
+    output = generate_raw_submission(
+        benchmark_dir=bench,
+        model_name="local-total-failure",
+        settings=settings,
+        ids=[2],
+        runner=_total_failing_runner,
+    )
+
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    assert row["id"] == 2
     assert "Benchmark Run Failure" in row["article"]
-    assert "verification_failed" in row["article"]
+    assert "quota_or_rate_limit" in row["article"]
 
 
 def test_generate_raw_submission_can_enrich_agent_prompt_with_criteria(tmp_path: Path) -> None:
@@ -581,7 +601,20 @@ def _fake_runner(question: str, settings: Settings) -> ResearchRunResult:
 def _failing_runner(question: str, settings: Settings) -> ResearchRunResult:
     artifacts = ResearchArtifactsV2.create(settings.out_dir, question)
     artifacts.write_text("report.md", "# Failed Draft\n")
+    artifacts.write_text("best_draft.md", "# Best Rejected Draft\n\nUseful answer body. [1]\n")
     artifacts.write_json("failure.json", {"category": "verification_failed"})
+    result = ResearchRunResult(
+        run_dir=artifacts.run_dir,
+        report_path=artifacts.resolve_path("report.md"),
+        verification_path=artifacts.resolve_path("verification.json"),
+        metrics_path=artifacts.resolve_path("metrics.json"),
+    )
+    raise ResearchRunError("failed", result)
+
+
+def _total_failing_runner(question: str, settings: Settings) -> ResearchRunResult:
+    artifacts = ResearchArtifactsV2.create(settings.out_dir, question)
+    artifacts.write_json("failure.json", {"category": "quota_or_rate_limit"})
     result = ResearchRunResult(
         run_dir=artifacts.run_dir,
         report_path=artifacts.resolve_path("report.md"),

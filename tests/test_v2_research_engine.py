@@ -11,7 +11,7 @@ from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
 from deep_research.coverage import build_coverage_matrix
 from deep_research.guidance import format_criteria_guidance_block
-from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2, VerificationResultV2
+from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, ResearchState, SourceRecordV2, VerificationResultV2
 from deep_research.semantic import (
     _load_json_object,
     apply_semantic_report_result,
@@ -37,7 +37,17 @@ from deep_research.synthesis import (
     synthesize_report_with_model,
 )
 from deep_research.verifier_v2 import _report_depth_score, _report_level_criteria, verify_report_v2
-from deep_research.research_graph import _acquire_route, _coverage_route, _focus_terms_from_state, _verification_route
+from deep_research.research_graph import (
+    _acquire_route,
+    _coverage_route,
+    _focus_terms_from_state,
+    _publish_best_draft,
+    _select_best_draft,
+    _selected_failed_draft,
+    _semantic_gate_collapsed_coverage,
+    _verification_route,
+    _write_run_health,
+)
 
 
 def test_generic_plan_handles_paragraph_length_medical_question() -> None:
@@ -104,6 +114,73 @@ def test_acquisition_trims_overlong_search_queries() -> None:
 
     assert len(trimmed) <= 380
     assert trimmed.split()[-1] in {"criterion", "coverage", "phrase"}
+
+
+def test_best_draft_selection_prefers_valid_then_fewest_failures() -> None:
+    history = [
+        {"draft_index": 1, "draft_path": "draft_report_1.md", "valid": False, "failure_count": 17, "quality_score": 0.61},
+        {"draft_index": 2, "draft_path": "draft_report_2.md", "valid": False, "failure_count": 11, "quality_score": 0.72},
+        {"draft_index": 3, "draft_path": "draft_report_3.md", "valid": False, "failure_count": 33, "quality_score": 0.55},
+    ]
+
+    assert _select_best_draft(history)["draft_index"] == 2
+
+    history.append({"draft_index": 4, "draft_path": "draft_report_4.md", "valid": True, "failure_count": 2, "quality_score": 0.5})
+
+    assert _select_best_draft(history)["draft_index"] == 4
+
+
+def test_best_draft_selection_prefers_grounded_quality_over_issue_count_only() -> None:
+    history = [
+        {"draft_index": 2, "draft_path": "draft_report_2.md", "valid": False, "failure_count": 12, "quality_score": 0.72},
+        {"draft_index": 3, "draft_path": "draft_report_3.md", "valid": False, "failure_count": 10, "quality_score": 0.68},
+    ]
+
+    assert _select_best_draft(history)["draft_index"] == 2
+
+
+def test_research_state_tracks_current_draft_for_best_draft_history() -> None:
+    assert "current_draft" in ResearchState.__annotations__
+
+
+def test_best_failed_draft_is_published_for_final_artifacts(tmp_path: Path) -> None:
+    artifacts = ResearchArtifactsV2.create(tmp_path, "best draft")
+    artifacts.write_text("draft_report_1.md", "better draft\n")
+    artifacts.write_text("draft_report_2.md", "regressed draft\n")
+    artifacts.write_json("verification_1.json", {"valid": False, "failures": ["a"]})
+    artifacts.write_json("verification_2.json", {"valid": False, "failures": ["a", "b", "c"]})
+    metrics = {
+        "verification_rounds": 2,
+        "verification_failure_history": [1, 3],
+        "draft_history": [
+            {
+                "draft_index": 1,
+                "draft_path": "draft_report_1.md",
+                "verification_path": "verification_1.json",
+                "valid": False,
+                "failure_count": 1,
+            },
+            {
+                "draft_index": 2,
+                "draft_path": "draft_report_2.md",
+                "verification_path": "verification_2.json",
+                "valid": False,
+                "failure_count": 3,
+            },
+        ],
+    }
+
+    _publish_best_draft(artifacts, metrics)
+    selected = _selected_failed_draft(artifacts, "regressed draft\n")
+    _write_run_health(artifacts, metrics, {"valid": False, "failures": ["a", "b", "c"]})
+
+    assert selected == "better draft\n"
+    assert (artifacts.run_dir / "best_draft.md").read_text(encoding="utf-8") == "better draft\n"
+    assert json.loads((artifacts.run_dir / "best_verification.json").read_text(encoding="utf-8"))["failures"] == ["a"]
+    health = json.loads((artifacts.run_dir / "run_health.json").read_text(encoding="utf-8"))
+    assert health["best_draft_index"] == 1
+    assert health["best_draft_failure_count"] == 1
+    assert health["verification_failures"] == 3
 
 
 def test_acquisition_followup_queries_stay_evidence_neutral() -> None:
@@ -219,6 +296,63 @@ def test_acquisition_uses_configured_scrape_timeout_and_emits_progress(tmp_path:
     assert len(result.sources) == 1
     assert any(message == "searching source candidates" for message, _ in progress_events)
     assert any(message.startswith("accepted source") for message, _ in progress_events)
+
+
+def test_acquisition_implicit_source_cap_does_not_use_candidate_budget(tmp_path: Path) -> None:
+    class UnexpectedSearchClient:
+        def search(self, query: str, **kwargs):  # pragma: no cover - cap should stop before search.
+            raise AssertionError(f"unexpected search for {query}")
+
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Need for closure and misinformation acceptance",
+        objective="Explain how need for closure shapes misinformation acceptance.",
+        queries=["need for closure misinformation acceptance evidence"],
+        min_sources=1,
+        required_terms=["need for closure", "misinformation acceptance"],
+    )
+    existing_sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id="branch_1",
+            title=f"Existing source {index}",
+            url=f"https://example.com/existing-{index}",
+            canonical_url=f"https://example.com/existing-{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=100,
+            quality_score=0.8,
+            quality_label="strong",
+            quality_type="general_web",
+            relevance_score=0.8,
+        )
+        for index in range(1, 18)
+    ]
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=50,
+        max_sources=0,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+    )
+
+    result = acquire_sources(
+        question="What is the role of need for closure on misinformation acceptance?",
+        branches=[branch],
+        artifacts=ResearchArtifactsV2.create(tmp_path, "implicit source cap"),
+        settings=settings,
+        search_client=UnexpectedSearchClient(),
+        existing_sources=existing_sources,
+        existing_source_texts={source.id: "existing source text" for source in existing_sources},
+        active_branch_ids={"branch_1"},
+    )
+
+    assert len(result.sources) == 17
+    assert result.metrics.search_count == 0
 
 
 def test_acquisition_skips_configured_blocked_source_patterns(tmp_path: Path) -> None:
@@ -3815,6 +3949,72 @@ def test_model_synthesis_preserves_previous_report_when_repair_response_is_empty
     assert "[1] Urban Heat Evidence: https://example.com/urban-heat" in report
 
 
+def test_repair_prompt_tells_writer_to_preserve_stable_previous_content() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Urban heat health effects",
+        objective="Explain how urban heat affects public health.",
+        queries=["urban heat health effects"],
+        required_terms=["urban heat", "public health"],
+    )
+    plan = ResearchPlan(
+        question="How does urban heat affect public health?",
+        intent="general",
+        audience="general",
+        report_outline=[branch.title],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Urban Heat Evidence",
+        url="https://example.com/urban-heat",
+        canonical_url="https://example.com/urban-heat",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=120,
+        quality_score=0.9,
+        quality_label="high",
+        quality_type="official_docs",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        supporting_excerpt="Urban heat increases public health risks by raising local temperatures and heat exposure.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    previous = (
+        "# Urban Heat\n\n"
+        "Urban heat increases public health risks by raising local temperatures and heat exposure. [1]\n\n"
+        "A different paragraph overstates an unsupported implementation claim. [1]\n\n"
+        "## Sources\n\n"
+        "[1] Urban Heat Evidence: https://example.com/urban-heat\n"
+    )
+
+    prompt = _synthesis_prompt(
+        plan=plan,
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        sources=[source],
+        previous_report=previous,
+        verification_failures=["Weakly supported cited paragraph: A different paragraph overstates an unsupported implementation claim."],
+    )
+
+    assert "Repair preservation contract" in prompt
+    assert "Treat this as an incremental repair, not a fresh report." in prompt
+    assert "Preserve the previous draft's title, section order" in prompt
+    assert "Urban heat increases public health risks" in prompt
+
+
 def test_model_synthesis_excludes_sources_failed_by_alignment_verification(tmp_path: Path, monkeypatch) -> None:
     captured_prompts: list[str] = []
 
@@ -4671,6 +4871,112 @@ def test_repair_focus_strips_internal_coverage_labels() -> None:
     assert all(">=" not in term for term in focus["branch_2"])
 
 
+def test_verification_route_stops_when_repair_regresses_issue_count() -> None:
+    state = {
+        "verification": {"valid": False, "failures": ["weakly supported cited paragraph"] * 47},
+        "metrics": {
+            "verification_rounds": 2,
+            "max_rounds": 4,
+            "verification_failure_history": [8, 47],
+        },
+    }
+
+    assert _verification_route(state) == "finish"
+
+
+def test_verification_route_allows_repair_when_issue_count_improves() -> None:
+    state = {
+        "verification": {"valid": False, "failures": ["weakly supported cited paragraph"] * 11},
+        "metrics": {
+            "verification_rounds": 2,
+            "max_rounds": 4,
+            "verification_failure_history": [17, 11],
+        },
+    }
+
+    assert _verification_route(state) == "rewrite"
+
+
+def _quality_history_entry(
+    index: int,
+    failures: int,
+    source_support: float,
+    request_alignment: float,
+) -> dict[str, object]:
+    quality_scores = {
+        "source_support_score": source_support,
+        "evidence_linkage_score": 0.90,
+        "citation_validity_score": 0.95,
+        "request_alignment_score": request_alignment,
+        "criteria_coverage_score": 0.82,
+        "answer_coverage_score": 0.88,
+        "branch_coverage_score": 0.90,
+        "report_depth_score": 0.86,
+        "semantic_verification_score": 0.84,
+    }
+    return {
+        "draft_index": index,
+        "draft_path": f"draft_report_{index}.md",
+        "valid": False,
+        "failure_count": failures,
+        "quality_score": round(source_support + request_alignment - failures * 0.001, 6),
+        "quality_scores": quality_scores,
+    }
+
+
+def test_verification_route_continues_past_soft_round_limit_while_improving() -> None:
+    state = {
+        "verification": {"valid": False, "failures": ["weakly supported cited paragraph"] * 10},
+        "metrics": {
+            "verification_rounds": 3,
+            "max_rounds": 3,
+            "verification_failure_history": [20, 12, 10],
+            "draft_history": [
+                _quality_history_entry(1, 20, 0.70, 0.80),
+                _quality_history_entry(2, 12, 0.72, 0.82),
+                _quality_history_entry(3, 10, 0.73, 0.83),
+            ],
+        },
+    }
+
+    assert _verification_route(state) == "rewrite"
+
+
+def test_verification_route_stops_when_source_support_regresses_despite_fewer_issues() -> None:
+    state = {
+        "verification": {"valid": False, "failures": ["weakly supported cited paragraph"] * 10},
+        "metrics": {
+            "verification_rounds": 3,
+            "max_rounds": 3,
+            "verification_failure_history": [20, 12, 10],
+            "draft_history": [
+                _quality_history_entry(1, 20, 0.71, 0.80),
+                _quality_history_entry(2, 12, 0.732, 0.82),
+                _quality_history_entry(3, 10, 0.704, 0.84),
+            ],
+        },
+    }
+
+    assert _verification_route(state) == "finish"
+
+
+def test_verification_route_stops_at_hard_cap_even_when_improving() -> None:
+    state = {
+        "verification": {"valid": False, "failures": ["weakly supported cited paragraph"] * 5},
+        "metrics": {
+            "verification_rounds": 8,
+            "max_rounds": 3,
+            "verification_failure_history": [20, 12, 10, 9, 8, 7, 6, 5],
+            "draft_history": [
+                _quality_history_entry(index, failures, 0.70 + index / 100, 0.80)
+                for index, failures in enumerate([20, 12, 10, 9, 8, 7, 6, 5], start=1)
+            ],
+        },
+    }
+
+    assert _verification_route(state) == "finish"
+
+
 def test_acquire_route_reuses_existing_evidence_when_no_new_sources_or_candidates() -> None:
     no_progress_state = {
         "metrics": {
@@ -4766,9 +5072,9 @@ def test_verification_route_rewrites_writing_and_support_failures_without_more_s
     assert _verification_route(state) == "rewrite"
 
 
-def test_coverage_route_synthesizes_after_zero_progress_followup() -> None:
+def test_coverage_route_finishes_low_coverage_after_zero_progress_followup() -> None:
     state = {
-        "coverage_matrix": {"complete": False, "missing_branches": ["branch_1"]},
+        "coverage_matrix": {"complete": False, "coverage_score": 0.60, "missing_branches": ["branch_1"]},
         "evidence_cards": [{"id": 1}],
         "metrics": {
             "coverage_rounds": 2,
@@ -4783,7 +5089,88 @@ def test_coverage_route_synthesizes_after_zero_progress_followup() -> None:
         },
     }
 
+    assert _coverage_route(state) == "finish"
+
+
+def test_coverage_route_synthesizes_strong_partial_coverage_after_zero_progress_followup() -> None:
+    state = {
+        "coverage_matrix": {"complete": False, "coverage_score": 0.90, "missing_branches": ["branch_5"]},
+        "evidence_cards": [{"id": index} for index in range(12)],
+        "metrics": {
+            "coverage_rounds": 2,
+            "max_rounds": 8,
+            "search_count": 31,
+            "max_search_queries": 80,
+            "candidate_count_total": 132,
+            "max_candidates": 750,
+            "last_acquire_added_sources": 0,
+            "last_acquire_added_candidates": 0,
+            "last_acquire_searches": 0,
+        },
+    }
+
     assert _coverage_route(state) == "synthesize"
+
+
+def test_semantic_gate_collapse_detection_prefers_pre_gate_evidence() -> None:
+    branches = [
+        ResearchBranch(
+            id=f"branch_{index}",
+            title=f"Branch {index}",
+            objective=f"Cover branch {index} evidence.",
+            queries=[f"branch {index} evidence"],
+            required_terms=[f"term{index}"],
+        )
+        for index in range(1, 6)
+    ]
+    plan = ResearchPlan(
+        question="Benchmark question",
+        intent="market_analysis",
+        audience="analyst",
+        report_outline=[],
+        branches=branches,
+    )
+    sources = [
+        SourceRecordV2(
+            id=index,
+            branch_id=branch.id,
+            title=f"Source {index}",
+            url=f"https://example.com/{index}",
+            canonical_url=f"https://example.com/{index}",
+            provenance="web",
+            content_path=f"source_docs/source_{index}.md",
+            content_hash=f"hash-{index}",
+            extraction_method="test",
+            word_count=500,
+            quality_score=0.9,
+            quality_label="high",
+            quality_type="academic",
+            relevance_score=0.9,
+        )
+        for index, branch in enumerate(branches, start=1)
+    ]
+    before_cards = [
+        EvidenceCard(
+            id=index,
+            source_id=((index - 1) % 5) + 1,
+            branch_id=f"branch_{((index - 1) % 5) + 1}",
+            claim=f"term{((index - 1) % 5) + 1} evidence claim {index}",
+            supporting_excerpt=f"term{((index - 1) % 5) + 1} evidence excerpt {index}",
+            source_url=f"https://example.com/{((index - 1) % 5) + 1}",
+            source_title=f"Source {((index - 1) % 5) + 1}",
+            quality_score=0.9,
+            relevance_score=0.9,
+            confidence=0.9,
+        )
+        for index in range(1, 16)
+    ]
+
+    assert _semantic_gate_collapsed_coverage(
+        plan,
+        sources,
+        before_cards=before_cards,
+        after_cards=[card for card in before_cards if card.branch_id == "branch_1"],
+    )
 
 
 def test_verification_route_rewrites_instead_of_researching_after_source_plateau() -> None:

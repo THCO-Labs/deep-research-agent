@@ -226,6 +226,48 @@ def test_run_research_treats_failed_verification_as_failed_run(tmp_path: Path, m
     assert "No cited evidence" in failed_report
 
 
+def test_failed_run_archives_best_draft_instead_of_latest_regression(tmp_path: Path, monkeypatch) -> None:
+    def invalid_graph(**kwargs):
+        artifacts = kwargs["artifacts"]
+        artifacts.write_text("draft_report.md", "# Latest Draft\n\nRegressed.\n")
+        artifacts.write_text("best_draft.md", "# Best Draft\n\nLower issue count.\n")
+        artifacts.write_json("verification.json", {"schema_version": 2, "valid": False, "failures": ["latest regressed"]})
+        artifacts.write_json(
+            "run_health.json",
+            {
+                "schema_version": 1,
+                "status": "failed_verification",
+                "best_draft_path": "best_draft.md",
+                "best_draft_index": 1,
+                "best_draft_failure_count": 2,
+            },
+        )
+        return {
+            "metrics": {
+                "engine": "local_langgraph",
+                "verification_valid": False,
+                "verification_rounds": 2,
+                "best_draft_index": 1,
+                "best_draft_failure_count": 2,
+            },
+            "verification": {"valid": False, "failures": ["latest regressed"]},
+        }
+
+    monkeypatch.setattr(agent_module, "run_local_research_graph", invalid_graph)
+    settings = _settings(tmp_path)
+
+    with pytest.raises(ResearchRunError) as raised:
+        run_research("invalid verification", settings, progress_mode="quiet")
+
+    failed_report = (raised.value.result.run_dir / "failed_report.md").read_text(encoding="utf-8")
+    draft_report = (raised.value.result.run_dir / "draft_report.md").read_text(encoding="utf-8")
+    health = json.loads((raised.value.result.run_dir / "run_health.json").read_text(encoding="utf-8"))
+    assert "Best Draft" in failed_report
+    assert "Latest Draft" in draft_report
+    assert health["best_draft_index"] == 1
+    assert health["failed_report_path"] == "failed_report.md"
+
+
 def test_run_research_stops_without_draft_when_acquisition_returns_no_evidence(
     tmp_path: Path,
     monkeypatch,

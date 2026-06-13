@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             result = resume_research(
                 args.run_id,
                 settings,
-                on_update=None if args.progress == "quiet" else print,
+                on_update=None if args.progress == "quiet" else _print_progress,
                 progress_mode=args.progress,
             )
         elif args.command == "managed":
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             result = run_research(
                 " ".join(args.question).strip(),
                 settings,
-                on_update=None if args.progress == "quiet" else print,
+                on_update=None if args.progress == "quiet" else _print_progress,
                 progress_mode=args.progress,
                 writing_guidance=args.writing_guidance or "",
             )
@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             result = run_research(
                 " ".join(args.question).strip(),
                 settings,
-                on_update=None if args.progress == "quiet" else print,
+                on_update=None if args.progress == "quiet" else _print_progress,
                 progress_mode=args.progress,
                 writing_guidance=args.writing_guidance or "",
             )
@@ -191,6 +191,10 @@ def _enabled_unless_disabled(flag_value: bool | None) -> bool | None:
 def _resolve_out(out_dir: str) -> Path:
     path = Path(out_dir)
     return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+
+
+def _print_progress(line: str) -> None:
+    print(line, flush=True)
 
 
 def _print_run_error(exc: ResearchRunError) -> None:

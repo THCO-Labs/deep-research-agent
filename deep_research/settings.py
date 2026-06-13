@@ -476,17 +476,21 @@ class Settings:
 
 
 def _mode_defaults(mode: Mode, provider: ResolvedProvider) -> tuple[int, int]:
+    # Tightened max_quality rounds from 6 → 3. Beyond 3 acquisition rounds,
+    # additional searches return diminishing relevance AND state size grows
+    # super-linearly (each checkpoint serializes a larger state file).
+    # Three rounds × ~30 candidates ≈ 90 candidates, plenty for synthesis.
     if provider in {"groq", "hybrid", "ollama", "openrouter"}:
         if mode == "fast":
             return 24, 2
         if mode == "max_quality":
-            return 0, 6
-        return 40, 4
+            return 0, 3
+        return 40, 3
     if mode == "fast":
         return 24, 2
     if mode == "max_quality":
-        return 0, 6
-    return 40, 4
+        return 0, 3
+    return 40, 3
 
 
 def _depth_defaults(mode: Mode) -> dict[str, int]:
@@ -498,10 +502,14 @@ def _depth_defaults(mode: Mode) -> dict[str, int]:
             "min_source_words": 180,
         }
     if mode == "max_quality":
+        # Tightened from {60, 192, 5000} to {40, 80, 250}. Beyond 40 sources
+        # we hit diminishing returns on coverage; 5000 candidates ballooned
+        # acquisition state to 8+MB and killed the run via OOM. New caps
+        # finish in <15min instead of 35+min while preserving quality.
         return {
-            "min_usable_sources": 60,
-            "max_search_queries": 192,
-            "max_candidates": 5000,
+            "min_usable_sources": 40,
+            "max_search_queries": 80,
+            "max_candidates": 250,
             "min_source_words": 350,
         }
     return {

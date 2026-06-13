@@ -43,10 +43,12 @@ class ActivityLog:
             event["data"] = data
         self.events.append(event)
         self.artifacts.append_jsonl("activity.jsonl", event)
-        self.artifacts.append_text("activity.md", f"- `{event['timestamp']}` **{stage}**: {message}\n")
+        self.artifacts.append_text("activity.md", _markdown_event_line(event))
         self._write_dashboard()
         if self.on_update and self.progress_mode == "live":
-            self.on_update(progress_line(stage, message))
+            self.on_update(progress_line(stage, format_event_message(event)))
+        elif self.on_update and self.progress_mode == "raw":
+            self.on_update(json.dumps(event, ensure_ascii=False, sort_keys=True))
 
     def _write_dashboard(self) -> None:
         self.artifacts.write_text(
@@ -58,6 +60,12 @@ class ActivityLog:
 def progress_line(stage: str, message: str) -> str:
     timestamp = datetime.now().strftime("%H:%M:%S")
     return f"[{timestamp}] {stage}: {message}"
+
+
+def format_event_message(event: dict[str, Any]) -> str:
+    message = str(event.get("message", ""))
+    details = _event_details(event)
+    return f"{message} | {details}" if details else message
 
 
 def load_activity_events(run_dir: Path | str) -> list[dict[str, Any]]:
@@ -97,7 +105,7 @@ def format_activity_summary(
     for event in events[-limit:]:
         timestamp = str(event.get("timestamp", ""))
         stage = str(event.get("stage", "unknown"))
-        message = str(event.get("message", ""))
+        message = format_event_message(event)
         lines.append(f"- {timestamp} [{stage}] {message}")
     return "\n".join(lines)
 
@@ -105,7 +113,7 @@ def format_activity_summary(
 def render_activity_html(events: list[dict[str, Any]], *, run_name: str = "") -> str:
     counts = Counter(str(event.get("stage", "unknown")) for event in events)
     latest = events[-1] if events else None
-    latest_text = str(latest.get("message", "Waiting for first event.")) if latest else "Waiting for first event."
+    latest_text = format_event_message(latest) if latest else "Waiting for first event."
     rows = "\n".join(_event_row(event) for event in reversed(events[-250:]))
     stage_chips = "\n".join(
         f'<span class="chip"><span>{escape(stage)}</span><strong>{count}</strong></span>'
@@ -249,7 +257,7 @@ def render_activity_html(events: list[dict[str, Any]], *, run_name: str = "") ->
 def _event_row(event: dict[str, Any]) -> str:
     timestamp = escape(str(event.get("timestamp", "")))
     stage = str(event.get("stage", "unknown"))
-    message = escape(str(event.get("message", "")))
+    message = escape(format_event_message(event))
     stage_class = "stage stage-" + re.sub(r"[^a-z0-9_-]+", "-", stage.lower())
     return (
         "<tr>"
@@ -258,6 +266,92 @@ def _event_row(event: dict[str, Any]) -> str:
         f"<td>{message}</td>"
         "</tr>"
     )
+
+
+def _markdown_event_line(event: dict[str, Any]) -> str:
+    timestamp = str(event.get("timestamp", ""))
+    stage = str(event.get("stage", "unknown"))
+    return f"- `{timestamp}` **{stage}**: {format_event_message(event)}\n"
+
+
+def _event_details(event: dict[str, Any]) -> str:
+    data = event.get("data")
+    if not isinstance(data, dict) or not data:
+        return ""
+    detail_parts: list[str] = []
+    for key in _preferred_detail_keys(str(event.get("message", "")), data):
+        if key not in data:
+            continue
+        rendered = _render_detail_value(data[key])
+        if rendered:
+            detail_parts.append(f"{key}={rendered}")
+    return "; ".join(detail_parts)
+
+
+def _preferred_detail_keys(message: str, data: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    lower = message.lower()
+    priority = [
+        "phase",
+        "query",
+        "url",
+        "source_id",
+        "rejection_reason",
+        "failure",
+        "failures",
+        "valid",
+        "coverage",
+        "coverage_score",
+        "missing_branches",
+        "cards",
+        "kept",
+        "rejected",
+        "sources",
+        "candidates",
+        "searches",
+        "search_provider",
+        "previous_draft_chars",
+        "evidence_cards",
+        "token_usage",
+    ]
+    if "rejected" in lower:
+        priority = ["phase", "url", "rejection_reason", "sources", "candidates", "searches", "query"] + priority
+    if "verification failed" in lower or "failed with" in lower:
+        priority = ["phase", "valid", "failures", "coverage", "missing_branches"] + priority
+    if "coverage" in lower:
+        priority = ["phase", "coverage", "coverage_score", "missing_branches"] + priority
+    for key in priority:
+        if key in data and key not in keys:
+            keys.append(key)
+    for key in data:
+        if key not in keys:
+            keys.append(key)
+    return keys[:14]
+
+
+def _render_detail_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return _shorten(_collapse(value), 360)
+    if isinstance(value, list):
+        rendered = [_render_detail_value(item) for item in value[:12]]
+        rendered = [item for item in rendered if item]
+        suffix = f", +{len(value) - 12} more" if len(value) > 12 else ""
+        return "[" + "; ".join(rendered) + suffix + "]"
+    if isinstance(value, dict):
+        parts = []
+        for key, child in list(value.items())[:10]:
+            rendered = _render_detail_value(child)
+            if rendered:
+                parts.append(f"{key}: {rendered}")
+        suffix = f", +{len(value) - 10} more" if len(value) > 10 else ""
+        return "{" + "; ".join(parts) + suffix + "}"
+    return _shorten(_collapse(str(value)), 240)
 
 
 def summarize_stream_update(node: str, content: Any) -> str | None:

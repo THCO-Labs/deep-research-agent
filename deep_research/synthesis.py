@@ -444,6 +444,75 @@ def _rough_token_count(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+def _previous_report_excerpt(previous_report: str, *, limit: int = 2200) -> str:
+    if not previous_report.strip():
+        return "None"
+    body, _separator, _source_tail = _split_sources(previous_report)
+    excerpt = body.strip()
+    if len(excerpt) <= limit:
+        return excerpt
+    head = excerpt[: int(limit * 0.6)].rstrip()
+    tail = excerpt[-int(limit * 0.4) :].lstrip()
+    return f"{head}\n\n...[middle of previous draft omitted]...\n\n{tail}"
+
+
+def _repair_preservation_contract(previous_report: str, verification_failures: list[str]) -> str:
+    if not previous_report.strip():
+        return "None; this is the first synthesis pass."
+    stable_map = _stable_previous_draft_map(previous_report, verification_failures)
+    lines = [
+        "- Treat this as an incremental repair, not a fresh report.",
+        "- Preserve the previous draft's title, section order, useful citations, and non-failing analysis unless a verification failure directly names that text.",
+        "- Rewrite only paragraphs implicated by the failures, plus narrowly required connective text around them.",
+        "- If a failure says a paragraph is weakly supported, either make that paragraph match the cited evidence card exactly or remove only the unsupported sentence.",
+        "- Do not add new broad claims, new source IDs, or new sections just to compensate for a localized failure.",
+        "- Preserve stable previous-draft material:",
+        stable_map,
+    ]
+    return "\n".join(lines)
+
+
+def _stable_previous_draft_map(previous_report: str, verification_failures: list[str], *, limit: int = 12) -> str:
+    body, _separator, _source_tail = _split_sources(previous_report)
+    failure_keys = _failure_match_keys(verification_failures)
+    stable_lines: list[str] = []
+    for block in re.split(r"\n{2,}", body):
+        text = re.sub(r"\s+", " ", block).strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            stable_lines.append(f"  - keep heading: {text[:140]}")
+        elif "[" in text and "]" in text and not _text_matches_failure(text, failure_keys):
+            stable_lines.append(f"  - keep cited paragraph unless adjacent repair requires edits: {text[:220]}")
+        if len(stable_lines) >= limit:
+            break
+    return "\n".join(stable_lines) if stable_lines else "  - No stable cited paragraphs identified from the previous draft excerpt."
+
+
+def _failure_match_keys(verification_failures: list[str]) -> list[str]:
+    keys: list[str] = []
+    for failure in verification_failures:
+        cleaned = re.sub(r"[^a-z0-9]+", " ", str(failure).lower()).strip()
+        words = [word for word in cleaned.split() if len(word) > 3]
+        if len(words) >= 6:
+            keys.append(" ".join(words[-12:]))
+    return keys
+
+
+def _text_matches_failure(text: str, failure_keys: list[str]) -> bool:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    if not cleaned:
+        return False
+    text_words = set(cleaned.split())
+    for key in failure_keys:
+        if key and (key in cleaned or cleaned[:120] in key):
+            return True
+        key_words = set(key.split())
+        if key_words and len(key_words.intersection(text_words)) >= min(6, len(key_words)):
+            return True
+    return False
+
+
 def _synthesis_prompt(
     *,
     plan: ResearchPlan,
@@ -489,7 +558,8 @@ def _synthesis_prompt(
     )
     acceptance_criteria_lines = "\n".join(f"- {criterion}" for criterion in plan.acceptance_criteria[:8]) or "None"
     repair_text = "\n".join(f"- {failure}" for failure in verification_failures[:8]) or "None"
-    previous_text = previous_report[:800] if previous_report else "None"
+    previous_text = _previous_report_excerpt(previous_report)
+    repair_contract = _repair_preservation_contract(previous_report, verification_failures)
     report_blueprint = blueprint or build_report_blueprint(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
     visual_assets = report_blueprint.get("visual_assets", [])
     visual_text = "\n".join(
@@ -540,6 +610,9 @@ Coverage status:
 
 Prior verification failures to repair:
 {repair_text}
+
+Repair preservation contract:
+{repair_contract}
 
 Additional report-writing guidance:
 {writing_guidance.strip()[:2500] if writing_guidance.strip() else 'None'}

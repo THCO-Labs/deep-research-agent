@@ -143,7 +143,7 @@ def _write_verification_failure(
             "category": "verification_failed",
             "retryable": True,
             "retry_after_seconds": None,
-            "suggested_action": "Inspect verification.json, evidence_rejections.jsonl, coverage.json, and failed_report.md; rerun or resume after fixing synthesis/verification failures.",
+            "suggested_action": "Inspect run_health.json, best_draft.md, best_verification.json, verification.json, evidence_rejections.jsonl, and coverage.json; rerun or resume after fixing synthesis/verification failures.",
             "error_type": "VerificationFailed",
             "message": message,
         },
@@ -152,26 +152,35 @@ def _write_verification_failure(
     metrics["error_category"] = "verification_failed"
     metrics["verification_valid"] = False
     artifacts.write_json("metrics.json", _public_metrics(metrics))
+    _write_run_health(artifacts, metrics, verification)
     artifacts.write_text("error.txt", message + "\n")
 
 
 def _archive_unaccepted_report(artifacts: ResearchArtifactsV2, verification: dict[str, Any]) -> None:
     report_path = artifacts.resolve_path("report.md")
+    best_path = artifacts.resolve_path("best_draft.md")
     draft_path = artifacts.resolve_path("draft_report.md")
     failed_path = artifacts.resolve_path("failed_report.md")
+    existing_report = ""
+    if report_path.exists():
+        existing_report = report_path.read_text(encoding="utf-8", errors="replace")
     draft = ""
-    if draft_path.exists():
-        draft = draft_path.read_text(encoding="utf-8", errors="replace")
-    elif report_path.exists():
-        existing = report_path.read_text(encoding="utf-8", errors="replace")
-        if "Research Run Failed Verification" not in existing[:200]:
-            draft = existing
-    if draft.strip():
-        artifacts.write_text("failed_report.md", draft.rstrip() + "\n")
-        if not draft_path.exists():
-            artifacts.write_text("draft_report.md", draft.rstrip() + "\n")
+    if best_path.exists():
+        draft = best_path.read_text(encoding="utf-8", errors="replace")
     elif failed_path.exists():
         draft = failed_path.read_text(encoding="utf-8", errors="replace")
+    elif draft_path.exists():
+        draft = draft_path.read_text(encoding="utf-8", errors="replace")
+    elif existing_report and "Research Run Failed Verification" not in existing_report[:200]:
+        draft = existing_report
+    if draft.strip():
+        artifacts.write_text("failed_report.md", draft.rstrip() + "\n")
+        if not best_path.exists():
+            artifacts.write_text("best_draft.md", draft.rstrip() + "\n")
+        if not draft_path.exists():
+            artifacts.write_text("draft_report.md", draft.rstrip() + "\n")
+    elif "Research Run Failed Verification" in existing_report[:200]:
+        return
     artifacts.write_text("report.md", _failed_report_notice(verification))
 
 
@@ -180,7 +189,7 @@ def _failed_report_notice(verification: dict[str, Any]) -> str:
     lines = [
         "# Research Run Failed Verification",
         "",
-        "This run did not produce an accepted final report. The rejected draft is stored in `failed_report.md` and `draft_report.md` for debugging.",
+        "This run did not produce an accepted final report. The best rejected draft is stored in `failed_report.md` and `best_draft.md`; the latest draft remains in `draft_report.md`.",
         "",
         "## Verification Failures",
         "",
@@ -190,6 +199,37 @@ def _failed_report_notice(verification: dict[str, Any]) -> str:
     else:
         lines.append("- Verification did not mark the draft as valid.")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_run_health(
+    artifacts: ResearchArtifactsV2,
+    metrics: dict[str, Any],
+    verification: dict[str, Any],
+) -> None:
+    existing = artifacts.read_json("run_health.json")
+    payload = dict(existing)
+    payload.update(
+        {
+            "schema_version": 1,
+            "status": "failed_verification",
+            "error_category": "verification_failed",
+            "verification_valid": False,
+            "verification_failures": len(list(verification.get("failures", []))),
+            "verification_rounds": int(metrics.get("verification_rounds", payload.get("verification_rounds", 0)) or 0),
+            "failure_history": list(metrics.get("verification_failure_history", payload.get("failure_history", []))),
+            "latest_draft_path": "draft_report.md" if artifacts.resolve_path("draft_report.md").exists() else None,
+            "best_draft_path": "best_draft.md" if artifacts.resolve_path("best_draft.md").exists() else payload.get("best_draft_path"),
+            "failed_report_path": "failed_report.md" if artifacts.resolve_path("failed_report.md").exists() else None,
+            "source_count": metrics.get("source_count", payload.get("source_count")),
+            "evidence_card_count": metrics.get("evidence_card_count", payload.get("evidence_card_count")),
+            "elapsed_seconds": metrics.get("elapsed_seconds", payload.get("elapsed_seconds")),
+            "elapsed_seconds_total": metrics.get("elapsed_seconds_total", payload.get("elapsed_seconds_total")),
+        }
+    )
+    for key in ("best_draft_index", "best_draft_failure_count", "best_draft_valid", "best_verification_path"):
+        if key in metrics:
+            payload[key] = metrics[key]
+    artifacts.write_json("run_health.json", payload)
 
 
 def resume_research(

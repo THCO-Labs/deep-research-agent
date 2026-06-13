@@ -30,7 +30,7 @@ def test_settings_loads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert settings.provider == "google"
     assert settings.mode == "max_quality"
     assert settings.max_sources == 0
-    assert settings.min_usable_sources == 60
+    assert settings.min_usable_sources == 40
 
 
 def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
@@ -64,8 +64,8 @@ def test_settings_auto_uses_hybrid_when_google_and_groq_are_present(
     assert settings.scrape_char_limit == 6000
     assert settings.tool_excerpt_char_limit == 900
     assert settings.max_sources == 0
-    assert settings.min_usable_sources == 60
-    assert settings.max_rounds == 6
+    assert settings.min_usable_sources == 40
+    assert settings.max_rounds == 3
     assert settings.google_key_pool == ("google-test", "google-test-1")
     assert settings.groq_key_pool == ("groq-test", "groq-test-1")
 

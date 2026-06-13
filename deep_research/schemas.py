@@ -193,6 +193,7 @@ class ResearchState(TypedDict, total=False):
     semantic_judgments: dict[str, Any]
     coverage_matrix: dict[str, Any]
     draft_report: str
+    current_draft: dict[str, Any]
     verification: dict[str, Any]
     metrics: dict[str, Any]
     failures: list[str]

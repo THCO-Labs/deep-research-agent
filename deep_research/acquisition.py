@@ -163,11 +163,14 @@ def acquire_sources(
     max_candidates = int(getattr(settings, "max_candidates", 80))
     required_branch_sources = sum(branch.min_sources for branch in branches)
     explicit_max_sources = int(getattr(settings, "max_sources", MINIMUM_SOURCE_TARGET) or 0)
+    min_source_target = source_floor(
+        int(getattr(settings, "min_usable_sources", MINIMUM_SOURCE_TARGET) or MINIMUM_SOURCE_TARGET)
+    )
     if explicit_max_sources <= 0:
-        max_sources = max(max_candidates, required_branch_sources, int(getattr(settings, "min_usable_sources", MINIMUM_SOURCE_TARGET)))
+        max_sources = max(min_source_target, required_branch_sources)
     else:
         max_sources = max(
-            source_floor(int(getattr(settings, "min_usable_sources", MINIMUM_SOURCE_TARGET) or MINIMUM_SOURCE_TARGET)),
+            min_source_target,
             source_floor(explicit_max_sources),
             required_branch_sources,
         )

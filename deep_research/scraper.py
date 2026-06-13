@@ -131,16 +131,48 @@ class PlaywrightScraper:
         self.retries = max(1, retries)
 
     def fetch(self, url: str) -> ScrapeResult:
-        errors: list[str] = []
-        try:
-            return self._fetch_with_httpx(url)
-        except Exception as exc:
-            errors.append(f"httpx: {exc}")
-        try:
-            return self._fetch_with_playwright(url)
-        except Exception as exc:
-            errors.append(f"playwright: {exc}")
-        raise ScrapeQualityError("; ".join(errors) or f"Could not fetch usable content from {url}")
+        # Top-level watchdog: even httpx scrape can hang in pure-Python markdown
+        # conversion (markdownify on malformed HTML). Cap the entire fetch
+        # operation at a hard wall-clock budget so no single URL can freeze
+        # acquisition. Budget = scrape timeout + 25s grace, matching Playwright.
+        hard_timeout_s = (self.timeout_ms + 25_000) / 1000
+
+        result_holder: list[ScrapeResult] = []
+        error_holder: list[BaseException] = []
+
+        def _runner() -> None:
+            errors: list[str] = []
+            try:
+                result_holder.append(self._fetch_with_httpx(url))
+                return
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"httpx: {exc}")
+            try:
+                result_holder.append(self._fetch_with_playwright(url))
+                return
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"playwright: {exc}")
+            error_holder.append(ScrapeQualityError(
+                "; ".join(errors) or f"Could not fetch usable content from {url}"
+            ))
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join(timeout=hard_timeout_s)
+
+        if thread.is_alive():
+            # Abandoned thread dies with the process (Python GIL releases on
+            # blocking I/O so abandoning is safe). Raise so caller treats as
+            # a normal scrape failure and moves to the next candidate.
+            raise ScrapeQualityError(
+                f"Scrape hard timeout ({hard_timeout_s:.0f}s) exceeded for {url}"
+            )
+
+        if error_holder:
+            raise error_holder[0]
+        if result_holder:
+            return result_holder[0]
+        raise ScrapeQualityError(f"Scrape returned no result for {url}")
 
     def _fetch_with_playwright(self, url: str) -> ScrapeResult:
         """Run the browser fetch in a daemon thread so we can enforce a hard wall-clock

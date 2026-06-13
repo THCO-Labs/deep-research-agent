@@ -1737,9 +1737,9 @@ def _completed_ids(output_path: Path) -> set[int]:
 
 
 def _failed_article(task: DeepResearchBenchTask, exc: ResearchRunError) -> str:
-    report = ""
-    if exc.result.report_path.exists():
-        report = exc.result.report_path.read_text(encoding="utf-8", errors="replace")
+    report = _best_available_benchmark_article(exc.result)
+    if report.strip():
+        return report.strip()
     failure_path = exc.result.run_dir / "failure.json"
     failure = {}
     if failure_path.exists():
@@ -1749,7 +1749,21 @@ def _failed_article(task: DeepResearchBenchTask, exc: ResearchRunError) -> str:
         f"Task {task.id} did not pass this agent's internal verification. "
         f"Failure category: {failure.get('category', 'unknown')}.\n"
     )
-    return (report.strip() + note).strip() if report.strip() else note.strip()
+    return note.strip()
+
+
+def _best_available_benchmark_article(result: ResearchRunResult) -> str:
+    for name in ("best_draft.md", "failed_report.md", "draft_report.md"):
+        path = result.run_dir / name
+        if path.exists():
+            article = path.read_text(encoding="utf-8", errors="replace")
+            if article.strip():
+                return article
+    if result.report_path.exists():
+        article = result.report_path.read_text(encoding="utf-8", errors="replace")
+        if article.strip():
+            return article
+    return ""
 
 
 def _run_task(

@@ -37,6 +37,14 @@ from deep_research.semantic_planning import build_or_enrich_research_plan
 from deep_research.synthesis import build_report_blueprint, synthesize_report, synthesize_report_with_model
 from deep_research.verifier_v2 import verify_report_v2
 
+MAX_IMPROVING_VERIFICATION_ROUNDS = 8
+QUALITY_SCORE_REGRESSION_TOLERANCE = 0.015
+GROUNDING_SCORE_REGRESSION_TOLERANCE = 0.01
+MIN_PARTIAL_SYNTHESIS_COVERAGE_SCORE = 0.85
+MIN_PARTIAL_SYNTHESIS_EVIDENCE_CARDS = 12
+MIN_SEMANTIC_GATE_COVERAGE_SCORE = 0.75
+MIN_SEMANTIC_GATE_EVIDENCE_CARDS = 12
+
 
 @dataclass
 class ResearchGraphRuntime:
@@ -323,6 +331,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
     def semantic_enrichment(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
+        sources = [_source_from_dict(row) for row in state.get("source_records", [])]
         prior_judgments = list(dict(state.get("semantic_judgments", {})).get("judgments", []))
 
         def _semantic_mid_checkpoint(judgments: list) -> None:
@@ -350,15 +359,29 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         }
         runtime.artifacts.write_json("semantic_judgments.json", semantic_payload)
         runtime.artifacts.write_jsonl("semantic_evidence_rejections.jsonl", result.rejected)
-        runtime.artifacts.write_jsonl("evidence_cards.jsonl", [card.to_dict() for card in result.cards])
+        selected_cards = result.cards
         metrics = _merge_metrics(state.get("metrics", {}), result.metrics)
-        metrics["evidence_card_count"] = len(result.cards)
+        if _semantic_gate_collapsed_coverage(plan_obj, sources, before_cards=cards, after_cards=result.cards):
+            selected_cards = cards
+            metrics["semantic_evidence_gate_fallback_coverage_collapse"] = True
+            metrics["semantic_evidence_gate_original_kept_count"] = len(result.cards)
+            metrics["semantic_evidence_gate_fallback_card_count"] = len(selected_cards)
+            runtime.emit_status(
+                "semantic_enrichment",
+                "semantic evidence gate fallback: restored pre-gate cards after coverage collapse",
+                enabled=runtime.settings.semantic_verification,
+                kept=len(result.cards),
+                restored=len(selected_cards),
+                rejected=len(result.rejected),
+            )
+        runtime.artifacts.write_jsonl("evidence_cards.jsonl", [card.to_dict() for card in selected_cards])
+        metrics["evidence_card_count"] = len(selected_cards)
         failures = list(state.get("failures", [])) + result.failures
         runtime.emit_status(
             "semantic_enrichment",
-            f"semantic evidence gate kept {len(result.cards)} cards; rejected {len(result.rejected)}",
+            f"semantic evidence gate kept {len(selected_cards)} cards; rejected {len(result.rejected)}",
             enabled=runtime.settings.semantic_verification,
-            kept=len(result.cards),
+            kept=len(selected_cards),
             rejected=len(result.rejected),
             failures=result.failures[:5],
         )
@@ -367,7 +390,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             "semantic_enrichment",
             state,
             {
-                "evidence_cards": [card.to_dict() for card in result.cards],
+                "evidence_cards": [card.to_dict() for card in selected_cards],
                 "semantic_judgments": semantic_payload,
                 "metrics": metrics,
                 "failures": failures,
@@ -385,7 +408,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         metrics["coverage_score"] = coverage.coverage_score
         metrics["coverage_rounds"] = int(metrics.get("coverage_rounds", 0)) + 1
         no_evidence_failures: list[str] = []
-        if not cards and _source_acquisition_plateaued(metrics):
+        if not cards and _no_evidence_acquisition_stalled(metrics):
             no_evidence_failures = [
                 "No evidence cards were retrieved; synthesis was skipped because source acquisition made no progress.",
             ]
@@ -439,6 +462,13 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         used_deterministic_fallback = False
         if runtime.settings.llm_synthesis:
             try:
+                runtime.emit_status(
+                    "synthesize",
+                    "starting LLM repair synthesis" if previous_draft.strip() else "starting LLM synthesis",
+                    evidence_cards=len(cards),
+                    sources=len(sources),
+                    previous_draft_chars=len(previous_draft),
+                )
                 report = synthesize_report_with_model(
                     plan=plan_obj,
                     evidence_cards=cards,
@@ -488,7 +518,12 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             "Inspect draft_report.md for the current unaccepted draft.\n",
         )
         runtime.emit_status("synthesize", f"wrote draft_report_{draft_index}.md (and draft_report.md)")
-        return _with_checkpoint(runtime, "synthesize", state, {"draft_report": report})
+        current_draft = {
+            "index": draft_index,
+            "path": f"draft_report_{draft_index}.md",
+            "chars": len(report),
+        }
+        return _with_checkpoint(runtime, "synthesize", state, {"draft_report": report, "current_draft": current_draft})
 
     def verify(state: ResearchState) -> ResearchState:
         plan_obj = _plan_from_state(state)
@@ -497,6 +532,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         cards = [_card_from_dict(row) for row in state.get("evidence_cards", [])]
         coverage = _coverage_from_dict(state.get("coverage_matrix", {}))
         report = str(state.get("draft_report") or runtime.artifacts.read_text("report.md"))
+        runtime.emit_status("verify", "running deterministic verification", evidence_cards=len(cards), sources=len(sources))
         result = verify_report_v2(
             report_markdown=report,
             plan=plan_obj,
@@ -506,6 +542,7 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
             source_texts=runtime.source_texts,
         )
         if runtime.settings.semantic_verification:
+            runtime.emit_status("verify", "running semantic verification", evidence_cards=len(cards))
             semantic = verify_report_with_semantics(
                 report_markdown=report,
                 plan=plan_obj,
@@ -535,6 +572,18 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         history = list(metrics.get("verification_failure_history", []))
         history.append(len(result.failures))
         metrics["verification_failure_history"] = history
+        current_draft = dict(state.get("current_draft", {}) or {})
+        draft_entry = _draft_history_entry(
+            current_draft=current_draft,
+            draft=report,
+            verification_index=verify_index,
+            verification=result.to_dict(),
+        )
+        if draft_entry is not None:
+            draft_history = list(metrics.get("draft_history", []))
+            draft_history.append(draft_entry)
+            metrics["draft_history"] = draft_history
+            _publish_best_draft(runtime.artifacts, metrics)
         runtime.emit_status(
             "verify",
             "verification passed" if result.valid else f"verification failed with {len(result.failures)} issue(s)",
@@ -556,6 +605,22 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         if token_usage.get("llm_calls", 0) > 0:
             metrics["token_usage"] = token_usage
         verification = dict(state.get("verification", {}))
+        if not verification and state.get("coverage_matrix", {}).get("complete") is False:
+            coverage = state.get("coverage_matrix", {})
+            evidence_count = len(state.get("evidence_cards", []) or [])
+            missing = list(coverage.get("missing_branches", []) or [])
+            verification = {
+                "schema_version": 2,
+                "valid": False,
+                "failures": [
+                    (
+                        "Coverage incomplete before synthesis: "
+                        f"coverage={float(coverage.get('coverage_score', 0.0) or 0.0):.2f}, "
+                        f"evidence_cards={evidence_count}, missing_branches={missing}"
+                    )
+                ],
+            }
+            runtime.artifacts.write_json("verification.json", verification)
         draft = str(state.get("draft_report") or "")
         failures = [str(f).lower() for f in verification.get("failures", [])]
         judge_unavailable = failures and all(
@@ -564,10 +629,12 @@ def build_research_graph(runtime: ResearchGraphRuntime, *, entry_point: str = "c
         if verification.get("valid") or runtime.settings.allow_failed_verification or judge_unavailable:
             runtime.artifacts.write_text("report.md", draft)
         elif draft:
-            runtime.artifacts.write_text("failed_report.md", draft)
+            selected_draft = _selected_failed_draft(runtime.artifacts, draft)
+            runtime.artifacts.write_text("failed_report.md", selected_draft)
             runtime.artifacts.write_text("report.md", _failed_report_notice(verification))
         else:
             runtime.artifacts.write_text("report.md", _failed_report_notice(verification))
+        _write_run_health(runtime.artifacts, metrics, verification)
         runtime.artifacts.write_json("metrics.json", _public_metrics(metrics))
         runtime.emit_status("finish", "local LangGraph run complete", valid=state.get("verification", {}).get("valid"))
         return _with_checkpoint(runtime, "finish", state, {"metrics": metrics})
@@ -629,6 +696,182 @@ def _next_draft_index(artifacts: ResearchArtifactsV2) -> int:
     return _next_indexed_file(artifacts, "draft_report_*.md")
 
 
+def _draft_history_entry(
+    *,
+    current_draft: dict[str, Any],
+    draft: str,
+    verification_index: int,
+    verification: dict[str, Any],
+) -> dict[str, Any] | None:
+    draft_index = current_draft.get("index")
+    draft_path = str(current_draft.get("path") or "").strip()
+    if not isinstance(draft_index, int) or not draft_path:
+        return None
+    failures = list(verification.get("failures", []))
+    scores = _draft_quality_scores(verification)
+    return {
+        "draft_index": draft_index,
+        "draft_path": draft_path,
+        "draft_chars": int(current_draft.get("chars") or len(draft)),
+        "verification_index": verification_index,
+        "verification_path": f"verification_{verification_index}.json",
+        "valid": bool(verification.get("valid")),
+        "failure_count": len(failures),
+        "quality_score": _draft_quality_score(scores, len(failures), bool(verification.get("valid"))),
+        "quality_scores": scores,
+    }
+
+
+def _publish_best_draft(artifacts: ResearchArtifactsV2, metrics: dict[str, Any]) -> None:
+    best = _select_best_draft(metrics.get("draft_history", []))
+    if best is None:
+        return
+    best_path = str(best.get("draft_path") or "")
+    source_path = artifacts.resolve_path(best_path)
+    if not source_path.exists():
+        return
+    draft = source_path.read_text(encoding="utf-8", errors="replace").rstrip() + "\n"
+    artifacts.write_text("best_draft.md", draft)
+    verification_path = str(best.get("verification_path") or "")
+    source_verification = artifacts.resolve_path(verification_path)
+    if source_verification.exists():
+        artifacts.write_text(
+            "best_verification.json",
+            source_verification.read_text(encoding="utf-8", errors="replace").rstrip() + "\n",
+        )
+    metrics["best_draft_index"] = best.get("draft_index")
+    metrics["best_draft_path"] = best_path
+    metrics["best_draft_valid"] = bool(best.get("valid"))
+    metrics["best_draft_failure_count"] = int(best.get("failure_count", 0) or 0)
+    metrics["best_verification_path"] = verification_path
+    metrics["best_draft_quality_score"] = best.get("quality_score")
+    metrics["best_draft_quality_scores"] = best.get("quality_scores")
+
+
+def _select_best_draft(history: Any) -> dict[str, Any] | None:
+    if not isinstance(history, list):
+        return None
+    candidates = [entry for entry in history if isinstance(entry, dict) and entry.get("draft_path")]
+    if not candidates:
+        return None
+
+    def rank(entry: dict[str, Any]) -> tuple[int, float, int, int]:
+        valid_rank = 0 if entry.get("valid") else 1
+        failure_count = int(entry.get("failure_count", 10_000) or 0)
+        quality_score = float(entry.get("quality_score", 0.0) or 0.0)
+        draft_index = int(entry.get("draft_index", 0) or 0)
+        return (valid_rank, -quality_score, failure_count, -draft_index)
+
+    return min(candidates, key=rank)
+
+
+def _draft_quality_scores(verification: dict[str, Any]) -> dict[str, float]:
+    keys = (
+        "source_support_score",
+        "evidence_linkage_score",
+        "citation_validity_score",
+        "request_alignment_score",
+        "criteria_coverage_score",
+        "answer_coverage_score",
+        "branch_coverage_score",
+        "report_depth_score",
+        "semantic_verification_score",
+    )
+    scores: dict[str, float] = {}
+    for key in keys:
+        try:
+            scores[key] = float(verification.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            scores[key] = 0.0
+    return scores
+
+
+def _draft_quality_score(scores: dict[str, float], failure_count: int, valid: bool) -> float:
+    weighted = (
+        0.60 * scores.get("source_support_score", 0.0)
+        + 0.10 * scores.get("evidence_linkage_score", 0.0)
+        + 0.08 * scores.get("request_alignment_score", 0.0)
+        + 0.08 * scores.get("criteria_coverage_score", 0.0)
+        + 0.06 * scores.get("answer_coverage_score", 0.0)
+        + 0.04 * scores.get("report_depth_score", 0.0)
+        + 0.04 * scores.get("semantic_verification_score", 0.0)
+    )
+    failure_penalty = min(max(failure_count, 0), 50) * 0.008
+    valid_bonus = 0.25 if valid else 0.0
+    return round(weighted + valid_bonus - failure_penalty, 6)
+
+
+def _draft_quality_improved(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    previous_scores = dict(previous.get("quality_scores", {}) or {})
+    current_scores = dict(current.get("quality_scores", {}) or {})
+    if not previous_scores or not current_scores:
+        return int(current.get("failure_count", 10_000) or 10_000) < int(previous.get("failure_count", 10_000) or 10_000)
+
+    grounding_keys = ("source_support_score", "evidence_linkage_score", "citation_validity_score")
+    for key in grounding_keys:
+        if float(current_scores.get(key, 0.0) or 0.0) + GROUNDING_SCORE_REGRESSION_TOLERANCE < float(previous_scores.get(key, 0.0) or 0.0):
+            return False
+
+    quality_keys = (
+        "request_alignment_score",
+        "criteria_coverage_score",
+        "answer_coverage_score",
+        "branch_coverage_score",
+        "report_depth_score",
+        "semantic_verification_score",
+    )
+    for key in quality_keys:
+        if float(current_scores.get(key, 0.0) or 0.0) + QUALITY_SCORE_REGRESSION_TOLERANCE < float(previous_scores.get(key, 0.0) or 0.0):
+            return False
+
+    current_quality = float(current.get("quality_score", 0.0) or 0.0)
+    previous_quality = float(previous.get("quality_score", 0.0) or 0.0)
+    current_failures = int(current.get("failure_count", 10_000) or 10_000)
+    previous_failures = int(previous.get("failure_count", 10_000) or 10_000)
+    return current_quality >= previous_quality or current_failures < previous_failures
+
+
+def _selected_failed_draft(artifacts: ResearchArtifactsV2, fallback_draft: str) -> str:
+    for file_name in ("best_draft.md", "failed_report.md"):
+        path = artifacts.resolve_path(file_name)
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                return text.rstrip() + "\n"
+    return fallback_draft.rstrip() + "\n"
+
+
+def _write_run_health(
+    artifacts: ResearchArtifactsV2,
+    metrics: dict[str, Any],
+    verification: dict[str, Any],
+) -> None:
+    draft_history = [entry for entry in metrics.get("draft_history", []) if isinstance(entry, dict)]
+    payload = {
+        "schema_version": 1,
+        "status": "passed" if verification.get("valid") else "failed_verification",
+        "verification_valid": bool(verification.get("valid")),
+        "verification_failures": len(list(verification.get("failures", []))),
+        "verification_rounds": int(metrics.get("verification_rounds", 0) or 0),
+        "failure_history": list(metrics.get("verification_failure_history", [])),
+        "draft_count": len(draft_history),
+        "latest_draft_path": "draft_report.md" if artifacts.resolve_path("draft_report.md").exists() else None,
+        "best_draft_path": metrics.get("best_draft_path"),
+        "best_draft_index": metrics.get("best_draft_index"),
+        "best_draft_failure_count": metrics.get("best_draft_failure_count"),
+        "best_draft_valid": metrics.get("best_draft_valid"),
+        "best_draft_quality_score": metrics.get("best_draft_quality_score"),
+        "best_draft_quality_scores": metrics.get("best_draft_quality_scores"),
+        "draft_history": draft_history,
+        "source_count": metrics.get("source_count"),
+        "candidate_count": metrics.get("candidate_count_total", metrics.get("candidate_count")),
+        "evidence_card_count": metrics.get("evidence_card_count"),
+        "elapsed_seconds": metrics.get("elapsed_seconds"),
+        "token_usage": metrics.get("token_usage"),
+    }
+    artifacts.write_json("run_health.json", payload)
+
+
 def _next_verification_index(artifacts: ResearchArtifactsV2) -> int:
     """Return 1, 2, 3... — the next available verification_N.json number."""
     return _next_indexed_file(artifacts, "verification_*.json")
@@ -652,23 +895,61 @@ def _coverage_route(state: ResearchState) -> str:
     metrics = state.get("metrics", {})
     if coverage.get("complete"):
         return "synthesize"
+    if not state.get("evidence_cards") and _no_evidence_acquisition_stalled(metrics):
+        return "finish"
     if not state.get("evidence_cards") and _source_acquisition_plateaued(metrics):
         return "finish"
     rounds = int(metrics.get("coverage_rounds", 0))
     search_count = int(metrics.get("search_count", 0))
     max_rounds = int(metrics.get("max_rounds", 4) or 4)
+    partial_ready = _partial_coverage_ready_for_synthesis(state)
     # Pipeline wall-clock budget: if we've already spent more than 25 minutes
-    # acquiring/processing, stop looping for more sources and synthesize with what we have.
+    # acquiring/processing, stop looping for more sources. Only synthesize a
+    # partial report when evidence coverage is still strong enough to score.
     started = metrics.get("started_at_monotonic")
     if started is not None and (time.perf_counter() - float(started)) > 1500:
-        return "synthesize"
+        return "synthesize" if partial_ready else "finish"
     if _source_acquisition_plateaued(metrics):
-        return "synthesize"
+        return "synthesize" if partial_ready else "finish"
     if rounds <= max_rounds and search_count < int(metrics.get("max_search_queries", 10_000) or 10_000):
         return "more_sources"
     if rounds <= max_rounds and _has_unsearched_branch_queries(state):
         return "more_sources"
-    return "synthesize"
+    if search_count >= int(metrics.get("max_search_queries", 10_000) or 10_000):
+        return "synthesize" if partial_ready else "finish"
+    return "synthesize" if partial_ready else "finish"
+
+
+def _partial_coverage_ready_for_synthesis(state: ResearchState) -> bool:
+    coverage = state.get("coverage_matrix", {})
+    try:
+        coverage_score = float(coverage.get("coverage_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        coverage_score = 0.0
+    evidence_count = len(state.get("evidence_cards", []) or [])
+    return (
+        coverage_score >= MIN_PARTIAL_SYNTHESIS_COVERAGE_SCORE
+        and evidence_count >= MIN_PARTIAL_SYNTHESIS_EVIDENCE_CARDS
+    )
+
+
+def _semantic_gate_collapsed_coverage(
+    plan: ResearchPlan,
+    sources: list[SourceRecordV2],
+    *,
+    before_cards: list[EvidenceCard],
+    after_cards: list[EvidenceCard],
+) -> bool:
+    if len(after_cards) >= MIN_SEMANTIC_GATE_EVIDENCE_CARDS:
+        return False
+    if len(before_cards) < MIN_SEMANTIC_GATE_EVIDENCE_CARDS:
+        return False
+    before = build_coverage_matrix(branches=plan.branches, evidence_cards=before_cards, sources=sources)
+    after = build_coverage_matrix(branches=plan.branches, evidence_cards=after_cards, sources=sources)
+    return (
+        before.coverage_score >= MIN_SEMANTIC_GATE_COVERAGE_SCORE
+        and after.coverage_score < MIN_SEMANTIC_GATE_COVERAGE_SCORE
+    )
 
 
 def _resume_entry_point(state: ResearchState) -> str:
@@ -723,6 +1004,13 @@ def _source_acquisition_plateaued(metrics: dict[str, Any]) -> bool:
     )
 
 
+def _no_evidence_acquisition_stalled(metrics: dict[str, Any]) -> bool:
+    return (
+        int(metrics.get("last_acquire_added_sources", 1)) <= 0
+        and int(metrics.get("last_acquire_added_candidates", 1)) <= 0
+    )
+
+
 def _verification_route(state: ResearchState) -> str:
     verification = state.get("verification", {})
     if verification.get("valid"):
@@ -730,14 +1018,27 @@ def _verification_route(state: ResearchState) -> str:
     metrics = state.get("metrics", {})
     rounds = int(metrics.get("verification_rounds", 0))
     max_rounds = int(metrics.get("max_rounds", 4) or 4)
-    if rounds >= max_rounds:
-        return "finish"
-    # Anti-thrashing: if the last 3 verification cycles produced no net
-    # improvement in failure count, stop repairing. We're stuck in a loop
+    # Anti-thrashing: stop after a worse repair or after 3 verification cycles
+    # with no net improvement. We're stuck in a loop
     # where the LLM trades one set of issues for another, like we saw with
     # the Mistral/OpenRouter cycle: 14→27→16→27 issues.
     failure_history = list(metrics.get("verification_failure_history", []))
-    failure_history.append(len(verification.get("failures", [])))
+    if len(failure_history) >= 2 and failure_history[-1] > failure_history[-2]:
+        return "finish"
+    draft_history = [entry for entry in metrics.get("draft_history", []) if isinstance(entry, dict)]
+    if len(draft_history) >= 2 and not _draft_quality_improved(draft_history[-2], draft_history[-1]):
+        return "finish"
+    improving = (
+        len(draft_history) >= 2
+        and _draft_quality_improved(draft_history[-2], draft_history[-1])
+        and len(failure_history) >= 2
+        and failure_history[-1] < failure_history[-2]
+    )
+    hard_round_cap = max(max_rounds, MAX_IMPROVING_VERIFICATION_ROUNDS)
+    if rounds >= hard_round_cap:
+        return "finish"
+    if rounds >= max_rounds and not improving:
+        return "finish"
     if len(failure_history) >= 3:
         recent = failure_history[-3:]
         # No strict improvement across three rounds.
@@ -1171,7 +1472,7 @@ def _failed_report_notice(verification: dict[str, Any]) -> str:
     lines = [
         "# Research Run Failed Verification",
         "",
-        "This run did not produce an accepted final report. The unaccepted draft is stored in `failed_report.md` and `draft_report.md` for debugging.",
+        "This run did not produce an accepted final report. The best rejected draft is stored in `failed_report.md` and `best_draft.md`; the latest draft remains in `draft_report.md`.",
         "",
         "## Verification Failures",
         "",
