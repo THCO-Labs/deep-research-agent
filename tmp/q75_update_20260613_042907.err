@@ -1,0 +1,6 @@
+Error: Research verification failed; inspect verification.json and failure.json.
+Failure category: verification_failed
+Suggested action: Inspect run_health.json, best_draft.md, best_verification.json, verification.json, evidence_rejections.jsonl, and coverage.json; rerun or resume after fixing synthesis/verification failures.
+Run directory: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260613T032952Z-could-the-rapeutic-interventions-aimed-at-modulating-plasma-meta
+Verification: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260613T032952Z-could-the-rapeutic-interventions-aimed-at-modulating-plasma-meta\verification.json
+Metrics: C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\runs\20260613T032952Z-could-the-rapeutic-interventions-aimed-at-modulating-plasma-meta\metrics.json

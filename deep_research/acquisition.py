@@ -4,6 +4,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -36,6 +37,8 @@ class AcquisitionMetrics:
     scrape_count: int = 0
     usable_source_count: int = 0
     rejected_source_count: int = 0
+    time_budget_exhausted: bool = False
+    elapsed_seconds: float = 0.0
     failures: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,6 +48,8 @@ class AcquisitionMetrics:
             "scrape_count": self.scrape_count,
             "usable_source_count": self.usable_source_count,
             "rejected_source_count": self.rejected_source_count,
+            "acquisition_time_budget_exhausted": self.time_budget_exhausted,
+            "acquisition_elapsed_seconds": round(self.elapsed_seconds, 3),
             "failures": self.failures,
         }
 
@@ -154,10 +159,17 @@ def acquire_sources(
 ) -> AcquisitionResult:
     metrics = AcquisitionMetrics()
     client = search_client or TavilySearchClientPool(settings)
+    scrape_timeout_ms = int(getattr(settings, "scrape_timeout_ms", 20_000))
     page_scraper = scraper or PlaywrightScraper(
-        timeout_ms=int(getattr(settings, "scrape_timeout_ms", 20_000)),
+        timeout_ms=scrape_timeout_ms,
         retries=int(getattr(settings, "scrape_retries", 1)),
     )
+    candidate_scrape_timeout_s = float(
+        getattr(settings, "candidate_scrape_timeout_seconds", (scrape_timeout_ms + 35_000) / 1000)
+        or 0
+    )
+    acquisition_started = time.perf_counter()
+    acquisition_timeout_s = float(getattr(settings, "acquisition_timeout_seconds", 1500) or 0)
     min_words = int(getattr(settings, "min_source_words", 250))
     min_chunks = int(getattr(settings, "min_relevant_chunks", 1))
     max_candidates = int(getattr(settings, "max_candidates", 80))
@@ -198,7 +210,32 @@ def acquire_sources(
 
     next_candidate_id = max((candidate.id for candidate in candidates), default=0) + 1
     focus_terms_by_branch = focus_terms_by_branch or {}
+
+    def _time_budget_exhausted() -> bool:
+        metrics.elapsed_seconds = time.perf_counter() - acquisition_started
+        if acquisition_timeout_s <= 0 or metrics.elapsed_seconds <= acquisition_timeout_s:
+            return False
+        if not metrics.time_budget_exhausted:
+            metrics.time_budget_exhausted = True
+            reason = (
+                f"Acquisition time budget exhausted after {metrics.elapsed_seconds:.1f}s "
+                f"(limit {acquisition_timeout_s:.1f}s)"
+            )
+            metrics.failures.append(reason)
+            _emit_progress(
+                progress_callback,
+                "acquisition time budget exhausted",
+                elapsed_seconds=round(metrics.elapsed_seconds, 3),
+                limit_seconds=round(acquisition_timeout_s, 3),
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
+        return True
+
     for branch in branches:
+        if _time_budget_exhausted():
+            break
         if active_branch_ids is not None and branch.id not in active_branch_ids:
             continue
         if len(sources) >= max_sources:
@@ -216,6 +253,8 @@ def acquire_sources(
         branch_query_limit = int(getattr(settings, "max_followup_queries_per_branch", 12) or 12)
         searched_for_branch = 0
         for query in branch_queries:
+            if _time_budget_exhausted():
+                break
             if coverage_followup and searched_for_branch >= branch_query_limit:
                 break
             if len(candidates) >= max_candidates or len(sources) >= max_sources:
@@ -265,6 +304,8 @@ def acquire_sources(
             browser_scrapes_for_query = 0
             browser_scrape_limit = int(getattr(settings, "max_browser_scrapes_per_query", 4) or 0)
             for item in search_results:
+                if _time_budget_exhausted():
+                    break
                 url = str(item.get("url") or "")
                 if not url:
                     continue
@@ -341,6 +382,7 @@ def acquire_sources(
                     metrics=metrics,
                     question=question,
                     source_id=len(sources) + 1,
+                    scrape_hard_timeout_s=candidate_scrape_timeout_s,
                 )
                 if record is None:
                     # Surface the rejection reason from the metrics failures log so
@@ -386,6 +428,7 @@ def acquire_sources(
                 if sum(1 for source in sources if source.branch_id == branch.id) >= branch.min_sources:
                     break
 
+    metrics.elapsed_seconds = time.perf_counter() - acquisition_started
     artifacts.write_jsonl("sources.jsonl", [source.to_dict() for source in sources])
     return AcquisitionResult(
         candidates=candidates,
@@ -471,9 +514,10 @@ def _candidate_to_source(
     metrics: AcquisitionMetrics,
     question: str,
     source_id: int,
+    scrape_hard_timeout_s: float,
 ) -> _RecordedSource | None:
     try:
-        scraped = _scrape_candidate(candidate, scraper, metrics)
+        scraped = _scrape_candidate(candidate, scraper, metrics, hard_timeout_s=scrape_hard_timeout_s)
     except Exception as exc:
         metrics.rejected_source_count += 1
         metrics.failures.append(f"Rejected {candidate.url}: {exc}")
@@ -525,7 +569,13 @@ def _candidate_to_source(
     return _RecordedSource(source=source, text=scraped.markdown)
 
 
-def _scrape_candidate(candidate: SourceCandidate, scraper: Any, metrics: AcquisitionMetrics) -> ScrapeResult:
+def _scrape_candidate(
+    candidate: SourceCandidate,
+    scraper: Any,
+    metrics: AcquisitionMetrics,
+    *,
+    hard_timeout_s: float,
+) -> ScrapeResult:
     if candidate.raw_content and len(candidate.raw_content.split()) >= 80:
         return ScrapeResult(
             url=candidate.url,
@@ -534,10 +584,36 @@ def _scrape_candidate(candidate: SourceCandidate, scraper: Any, metrics: Acquisi
             extraction_method="tavily_raw_content",
         )
     metrics.scrape_count += 1
-    try:
-        return scraper.fetch(candidate.url)
-    except ScrapeQualityError:
-        raise
+    if hard_timeout_s <= 0 or isinstance(scraper, PlaywrightScraper):
+        try:
+            return scraper.fetch(candidate.url)
+        except ScrapeQualityError:
+            raise
+
+    result_holder: list[ScrapeResult] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result_holder.append(scraper.fetch(candidate.url))
+        except Exception as exc:  # noqa: BLE001
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=hard_timeout_s)
+    if thread.is_alive():
+        raise ScrapeQualityError(
+            f"Candidate scrape hard timeout ({hard_timeout_s:.0f}s) exceeded for {candidate.url}"
+        )
+    if error_holder:
+        error = error_holder[0]
+        if isinstance(error, ScrapeQualityError):
+            raise error
+        raise error
+    if not result_holder:
+        raise ScrapeQualityError(f"Candidate scrape returned no result for {candidate.url}")
+    return result_holder[0]
 
 
 def _write_source(

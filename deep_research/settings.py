@@ -76,6 +76,7 @@ class Settings:
     scrape_char_limit: int = 15_000
     scrape_timeout_ms: int = 20_000
     scrape_retries: int = 1
+    acquisition_timeout_seconds: int = 1500
     max_browser_scrapes_per_query: int = 12
     blocked_source_patterns: tuple[str, ...] = field(default_factory=tuple)
     tool_excerpt_char_limit: int = 2_500
@@ -138,6 +139,7 @@ class Settings:
         scrape_char_limit: int | None = None,
         scrape_timeout_ms: int | None = None,
         scrape_retries: int | None = None,
+        acquisition_timeout_seconds: int | None = None,
         max_browser_scrapes_per_query: int | None = None,
         blocked_source_patterns: tuple[str, ...] | None = None,
         precollect_sources: bool | None = None,
@@ -318,6 +320,9 @@ class Settings:
             scrape_retries=scrape_retries
             if scrape_retries is not None
             else int(os.environ.get("DEEP_RESEARCH_SCRAPE_RETRIES") or _default_scrape_retries(mode)),
+            acquisition_timeout_seconds=acquisition_timeout_seconds
+            if acquisition_timeout_seconds is not None
+            else int(os.environ.get("DEEP_RESEARCH_ACQUISITION_TIMEOUT_SECONDS") or "1500"),
             max_browser_scrapes_per_query=max_browser_scrapes_per_query
             if max_browser_scrapes_per_query is not None
             else int(os.environ.get("DEEP_RESEARCH_MAX_BROWSER_SCRAPES_PER_QUERY") or "12"),
@@ -430,6 +435,8 @@ class Settings:
             raise ConfigError("scrape_timeout_ms must be at least 1000.")
         if self.scrape_retries < 1:
             raise ConfigError("scrape_retries must be at least 1.")
+        if self.acquisition_timeout_seconds < 0:
+            raise ConfigError("acquisition_timeout_seconds must be zero or greater.")
         if self.max_browser_scrapes_per_query < 0:
             raise ConfigError("max_browser_scrapes_per_query must be zero or greater.")
         for pattern in self.blocked_source_patterns:

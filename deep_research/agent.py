@@ -114,14 +114,18 @@ def run_research(
         }
         artifacts.write_json("metrics.json", metrics)
         if not artifacts.resolve_path("verification.json").exists():
-            artifacts.write_json(
-                "verification.json",
-                {
-                    "schema_version": 2,
-                    "valid": False,
-                    "failures": [failure.message],
-                },
+            verification_payload = {
+                "schema_version": 2,
+                "valid": False,
+                "failures": [failure.message],
+            }
+            artifacts.write_json("verification.json", verification_payload)
+        else:
+            verification_payload = json.loads(
+                artifacts.resolve_path("verification.json").read_text(encoding="utf-8", errors="replace")
             )
+        if not artifacts.resolve_path("report.md").exists():
+            artifacts.write_text("report.md", _failed_report_notice(verification_payload, metrics))
         _emit(activity, "error", f"{failure.category}: {failure.message}")
         raise ResearchRunError(f"Research run failed: {exc}", result) from exc
     return result
@@ -136,7 +140,7 @@ def _write_verification_failure(
     message = "Final report failed verification."
     if failures:
         message += " " + "; ".join(str(failure) for failure in failures[:5])
-    _archive_unaccepted_report(artifacts, verification)
+    _archive_unaccepted_report(artifacts, verification, metrics)
     artifacts.write_json(
         "failure.json",
         {
@@ -156,7 +160,11 @@ def _write_verification_failure(
     artifacts.write_text("error.txt", message + "\n")
 
 
-def _archive_unaccepted_report(artifacts: ResearchArtifactsV2, verification: dict[str, Any]) -> None:
+def _archive_unaccepted_report(
+    artifacts: ResearchArtifactsV2,
+    verification: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
+) -> None:
     report_path = artifacts.resolve_path("report.md")
     best_path = artifacts.resolve_path("best_draft.md")
     draft_path = artifacts.resolve_path("draft_report.md")
@@ -181,15 +189,25 @@ def _archive_unaccepted_report(artifacts: ResearchArtifactsV2, verification: dic
             artifacts.write_text("draft_report.md", draft.rstrip() + "\n")
     elif "Research Run Failed Verification" in existing_report[:200]:
         return
-    artifacts.write_text("report.md", _failed_report_notice(verification))
+    artifacts.write_text("report.md", _failed_report_notice(verification, metrics))
 
 
-def _failed_report_notice(verification: dict[str, Any]) -> str:
+def _failed_report_notice(verification: dict[str, Any], metrics: dict[str, Any] | None = None) -> str:
+    metrics = metrics or {}
     failures = [str(failure) for failure in verification.get("failures", [])][:12]
     lines = [
         "# Research Run Failed Verification",
         "",
         "This run did not produce an accepted final report. The best rejected draft is stored in `failed_report.md` and `best_draft.md`; the latest draft remains in `draft_report.md`.",
+        "",
+        "## Run Summary",
+        "",
+        f"- Verification rounds: {int(metrics.get('verification_rounds', 0) or 0)}",
+        f"- Failure history: {list(metrics.get('verification_failure_history', []))}",
+        f"- Best draft: {metrics.get('best_draft_path') or 'not available'}",
+        f"- Best draft issues: {metrics.get('best_draft_failure_count', 'unknown')}",
+        f"- Source count: {metrics.get('source_count', 'unknown')}",
+        f"- Evidence cards: {metrics.get('evidence_card_count', 'unknown')}",
         "",
         "## Verification Failures",
         "",

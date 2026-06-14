@@ -1,0 +1,27 @@
+All Tavily keys exhausted (This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com); switching to DuckDuckGo for remainder of run.
+All Tavily keys exhausted (This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com); switching to DuckDuckGo for remainder of run.
+Exception in callback SyncBase._sync.<locals>.<lambda>(<Task finishe... the driver')>) at C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_sync_base.py:111
+handle: <Handle SyncBase._sync.<locals>.<lambda>(<Task finishe... the driver')>) at C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_sync_base.py:111>
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_sync_base.py", line 111, in <lambda>
+    task.add_done_callback(lambda _: g_self.switch())
+                                     ^^^^^^^^^^^^^^^
+greenlet.error: cannot switch to a different thread (which happens to have exited)
+Task exception was never retrieved
+future: <Task finished name='Task-1020' coro=<Browser.close() done, defined at C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_browser.py:233> exception=Exception('Browser.close: Connection closed while reading from the driver')>
+Traceback (most recent call last):
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_browser.py", line 242, in close
+    raise e
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_browser.py", line 239, in close
+    await self._channel.send("close", None, {"reason": reason})
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Hp\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+Exception: Browser.close: Connection closed while reading from the driver
+All Tavily keys exhausted (This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com); switching to DuckDuckGo for remainder of run.
+All Tavily keys exhausted (This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com); switching to DuckDuckGo for remainder of run.
+All Tavily keys exhausted (This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com); switching to DuckDuckGo for remainder of run.

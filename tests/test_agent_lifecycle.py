@@ -24,6 +24,8 @@ def test_run_research_writes_v2_artifacts_and_manifest(tmp_path: Path, monkeypat
         "evidence_cards.jsonl",
         "coverage.json",
         "report_blueprint.json",
+        "claim_ledger.json",
+        "sentence_plan.json",
         "report.md",
         "verification.json",
         "metrics.json",
@@ -223,6 +225,7 @@ def test_run_research_treats_failed_verification_as_failed_run(tmp_path: Path, m
     failed_report = (raised.value.result.run_dir / "failed_report.md").read_text(encoding="utf-8")
     assert failure["category"] == "verification_failed"
     assert "Research Run Failed Verification" in report
+    assert "## Run Summary" in report
     assert "No cited evidence" in failed_report
 
 

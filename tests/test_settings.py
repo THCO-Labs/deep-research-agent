@@ -299,6 +299,21 @@ def test_settings_supports_browser_fallback_budget(tmp_path: Path, monkeypatch: 
     assert settings.max_browser_scrapes_per_query == 0
 
 
+def test_settings_supports_acquisition_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
+        "DEEP_RESEARCH_ACQUISITION_TIMEOUT_SECONDS=300\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_ACQUISITION_TIMEOUT_SECONDS", raising=False)
+
+    settings = Settings.from_env(project_root=tmp_path)
+
+    assert settings.acquisition_timeout_seconds == 300
+
+
 def test_settings_supports_followup_query_fairness_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env").write_text(
         "GROQ_API_KEY=groq-test\nTAVILY_API_KEY=tavily-test\n"
