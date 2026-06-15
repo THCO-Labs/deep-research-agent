@@ -82,3 +82,53 @@ def test_source_quality_keeps_user_content_and_software_repositories_distinct() 
     assert repository.label == "usable"
     assert answer.source_type == "user_content"
     assert answer.label == "weak"
+
+
+def test_source_quality_recognizes_product_and_spec_documents() -> None:
+    product = score_source(
+        url="https://manufacturer.example.com/products/machines/model-5000",
+        title="Model 5000 technical specifications",
+        markdown=(
+            "Max spindle speed: 12,000 rpm\n"
+            "Main motor: 26 kW\n"
+            "X-axis stroke: 500 mm\n"
+            "Control software supports OPC UA connectivity.\n"
+        ),
+    )
+    brochure = score_source(
+        url="https://manufacturer.example.com/downloads/model-5000-brochure.pdf",
+        title="Model 5000 brochure",
+        markdown="Technical data brochure with spindle speed 12000 rpm and 26 kW motor.",
+    )
+
+    assert product.source_type in {"product_page", "spec_sheet"}
+    assert product.label in {"usable", "strong", "excellent"}
+    assert brochure.source_type == "brochure_pdf"
+
+
+def test_source_quality_uses_structure_not_only_product_keywords() -> None:
+    quality = score_source(
+        url="https://manufacturer.example.com/resources/5000.pdf",
+        title="5000",
+        markdown=(
+            "A5000-20\n"
+            "Speed: 12,000 rpm\n"
+            "Power: 26 kW\n"
+            "Stroke X: 500 mm\n"
+            "Weight: 4,200 kg\n"
+            "Interface: OPC UA\n"
+        ),
+    )
+
+    assert quality.source_type in {"spec_sheet", "brochure_pdf"}
+    assert any("product/specification" in reason for reason in quality.reasons)
+
+
+def test_source_quality_does_not_promote_product_url_without_specs() -> None:
+    quality = score_source(
+        url="https://manufacturer.example.com/products/model-5000",
+        title="Model 5000 overview",
+        markdown="Welcome to our product page. Contact sales to learn more about promotions and availability.",
+    )
+
+    assert quality.source_type != "product_page"

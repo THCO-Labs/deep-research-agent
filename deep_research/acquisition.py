@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
 
+import httpx
 from tavily import TavilyClient
 
 try:
@@ -26,7 +28,7 @@ from deep_research.schemas import ResearchBranch, SourceCandidate, SourceRecordV
 from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
 from deep_research.source_limits import MAX_TAVILY_RESULTS_PER_QUERY, MINIMUM_SOURCE_TARGET, source_floor
 from deep_research.source_quality import score_source
-from deep_research.source_validation import branch_terms, content_terms, validate_source_content
+from deep_research.source_validation import branch_terms, content_terms, validate_source_content, validation_policy_for_source
 from deep_research.urls import canonicalize_url
 
 
@@ -62,18 +64,55 @@ class AcquisitionResult:
     metrics: AcquisitionMetrics
 
 
+def _search_provider_keys(settings: Any, *, attr_name: str, env_base: str) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    attr_value = str(getattr(settings, attr_name, "") or "").strip()
+    env_names = _numbered_env_names(env_base)
+    if env_base not in env_names:
+        env_names.insert(0, env_base)
+    for raw_value in [attr_value, *(os.environ.get(name, "") for name in env_names)]:
+        for value in re.split(r"[;,\n]+", raw_value):
+            key = value.strip()
+            if key and key not in seen:
+                values.append(key)
+                seen.add(key)
+    return tuple(values)
+
+
+def _numbered_env_names(base_name: str) -> list[str]:
+    names: list[tuple[int, str]] = []
+    prefixes = (base_name, f"{base_name}_")
+    for name in os.environ:
+        if name == base_name:
+            names.append((0, name))
+            continue
+        for prefix in prefixes:
+            suffix = name.removeprefix(prefix)
+            if suffix != name and suffix.isdigit():
+                names.append((int(suffix), name))
+                break
+    return [name for _, name in sorted(names, key=lambda item: (item[0], item[1]))]
+
+
 class TavilySearchClientPool:
     def __init__(self, settings: Any) -> None:
         keys = tuple(getattr(settings, "tavily_key_pool", ()) or ())
         if not keys:
             single = str(getattr(settings, "tavily_api_key", "") or "").strip()
             keys = (single,) if single else ()
-        if not keys:
-            raise ValueError("Tavily API key pool cannot be empty.")
+        self._exa_api_keys = _search_provider_keys(settings, attr_name="exa_api_key", env_base="EXA_API_KEY")
+        self._brave_api_keys = _search_provider_keys(
+            settings, attr_name="brave_search_api_key", env_base="BRAVE_SEARCH_API_KEY"
+        )
+        self._firecrawl_api_keys = _search_provider_keys(
+            settings, attr_name="firecrawl_api_key", env_base="FIRECRAWL_API_KEY"
+        )
+        self._serper_api_keys = _search_provider_keys(settings, attr_name="serper_api_key", env_base="SERPER_API_KEY")
         self._clients = tuple(TavilyClient(api_key=key) for key in keys)
         self.key_count = len(self._clients)
         self._cursor = 0
-        # Once all Tavily keys return quota errors, stop probing them — go straight
+        # Once all Tavily keys return quota errors, stop probing them and go straight
         # to DuckDuckGo for the rest of the run. Avoids logging the same warning
         # 149 times per run.
         self._tavily_dead = False
@@ -83,28 +122,53 @@ class TavilySearchClientPool:
         self._ddg_dead = False
 
     def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        events: list[str] = []
         last_error: Exception | None = None
+        if not self._clients:
+            events.append("provider_skip:tavily:missing_api_key")
+            self._tavily_dead = True
         if not self._tavily_dead:
             for offset in range(self.key_count):
                 index = (self._cursor + offset) % self.key_count
                 try:
                     response = self._clients[index].search(query, **kwargs)
                     self._cursor = (index + 1) % self.key_count
+                    response["_provider"] = str(response.get("_provider") or "tavily")
+                    response["_provider_events"] = events
                     return response
                 except Exception as exc:
                     last_error = exc
                     if classify_exception(exc).category != "quota_or_rate_limit":
-                        raise
-                    if not _duckduckgo_available():
-                        raise
+                        events.append(f"provider_error:tavily:{_short_error(exc)}")
+                        break
                     continue  # try next key
             # All Tavily keys returned quota errors. Mark as dead and log once.
             if last_error is not None:
                 self._tavily_dead = True
+                events.append(f"provider_error:tavily:{_short_error(last_error)}")
                 logging.getLogger(__name__).warning(
-                    "All Tavily keys exhausted (%s); switching to DuckDuckGo for remainder of run.",
+                    "All Tavily keys exhausted (%s); switching to fallback search providers for remainder of run.",
                     last_error,
                 )
+        for provider_name, api_keys, searcher in (
+            ("exa", self._exa_api_keys, _search_with_exa),
+            ("brave", self._brave_api_keys, _search_with_brave),
+            ("firecrawl", self._firecrawl_api_keys, _search_with_firecrawl),
+            ("serper", self._serper_api_keys, _search_with_serper),
+        ):
+            if not api_keys:
+                events.append(f"provider_skip:{provider_name}:missing_api_key")
+                continue
+            for key_index, api_key in enumerate(api_keys, start=1):
+                try:
+                    fallback_results = searcher(query, api_key=api_key, max_results=int(kwargs.get("max_results", 5)))
+                except Exception as exc:
+                    events.append(f"provider_error:{provider_name}[{key_index}]:{_short_error(exc)}")
+                    logging.getLogger(__name__).warning("%s search failed for %r: %s", provider_name, query, exc)
+                    continue
+                if fallback_results:
+                    return {"results": fallback_results, "_provider": provider_name, "_provider_events": events}
+            events.append(f"provider_empty:{provider_name}")
         if self._ddg_dead:
             raise RuntimeError("All search providers exhausted (Tavily quota + DuckDuckGo unavailable).")
         try:
@@ -120,10 +184,11 @@ class TavilySearchClientPool:
                     "DuckDuckGo failed %d times in a row (%s); marking unavailable.",
                     self._ddg_consecutive_failures, exc,
                 )
-            return {"results": [], "_provider": "duckduckgo"}
+            events.append(f"provider_error:duckduckgo:{_short_error(exc)}")
+            return {"results": [], "_provider": "duckduckgo", "_provider_events": events}
         if fallback_results:
             self._ddg_consecutive_failures = 0
-            return {"results": fallback_results, "_provider": "duckduckgo"}
+            return {"results": fallback_results, "_provider": "duckduckgo", "_provider_events": events}
         # Empty results from DDG can mean rate-limited. Count as failure.
         self._ddg_consecutive_failures += 1
         if self._ddg_consecutive_failures >= 10:
@@ -132,7 +197,8 @@ class TavilySearchClientPool:
                 "DuckDuckGo returned empty results %d times in a row; marking unavailable.",
                 self._ddg_consecutive_failures,
             )
-        return {"results": [], "_provider": "duckduckgo"}
+        events.append("provider_empty:duckduckgo")
+        return {"results": [], "_provider": "duckduckgo", "_provider_events": events}
 
 
 MID_ACQUISITION_CHECKPOINT_INTERVAL = 5  # save state every N accepted sources
@@ -193,6 +259,9 @@ def acquire_sources(
     seen_urls: set[str] = {source.canonical_url for source in sources}
     searched = set(searched_queries or ())
     searched.update(candidate.query for candidate in candidates if candidate.query)
+    branch_candidate_counts: dict[str, int] = {}
+    for candidate in candidates:
+        branch_candidate_counts[candidate.branch_id] = branch_candidate_counts.get(candidate.branch_id, 0) + 1
 
     ingested_documents = list(local_documents or []) + list(mcp_documents or [])
     if not existing_sources:
@@ -241,8 +310,11 @@ def acquire_sources(
         if len(sources) >= max_sources:
             break
         branch_source_count = sum(1 for source in sources if source.branch_id == branch.id)
+        branch_candidate_count = branch_candidate_counts.get(branch.id, 0)
         forced_terms = focus_terms_by_branch.get(branch.id, [])
         coverage_followup = active_branch_ids is not None and branch.id in active_branch_ids
+        if branch_candidate_count >= max_candidates:
+            continue
         if branch_source_count >= branch.min_sources and not forced_terms and not coverage_followup:
             continue
         branch_queries = _branch_queries(
@@ -257,7 +329,7 @@ def acquire_sources(
                 break
             if coverage_followup and searched_for_branch >= branch_query_limit:
                 break
-            if len(candidates) >= max_candidates or len(sources) >= max_sources:
+            if branch_candidate_count >= max_candidates or len(sources) >= max_sources:
                 break
             query = _trim_search_query(query)
             if query in searched:
@@ -278,6 +350,19 @@ def acquire_sources(
                 search_response = _search_raw(client, query, settings)
                 search_results = list(search_response.get("results", []))
                 search_provider = str(search_response.get("_provider", "tavily"))
+                for event in search_response.get("_provider_events", []) or []:
+                    event_text = str(event)
+                    metrics.failures.append(f"Search provider event for {query!r}: {event_text}")
+                    _emit_progress(
+                        progress_callback,
+                        "search provider event",
+                        branch_id=branch.id,
+                        query=query,
+                        event=event_text,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
             except Exception as exc:
                 metrics.failures.append(f"Search failed for {query!r}: {exc}")
                 _emit_progress(
@@ -305,6 +390,8 @@ def acquire_sources(
             browser_scrape_limit = int(getattr(settings, "max_browser_scrapes_per_query", 4) or 0)
             for item in search_results:
                 if _time_budget_exhausted():
+                    break
+                if branch_candidate_count >= max_candidates or len(sources) >= max_sources:
                     break
                 url = str(item.get("url") or "")
                 if not url:
@@ -369,6 +456,8 @@ def acquire_sources(
                 )
                 next_candidate_id += 1
                 candidates.append(candidate)
+                branch_candidate_count += 1
+                branch_candidate_counts[branch.id] = branch_candidate_count
                 metrics.candidate_count += 1
                 if requires_browser:
                     browser_scrapes_for_query += 1
@@ -469,6 +558,7 @@ def _record_ingested_documents(
     for document in documents:
         branch = _best_branch_for_text(document.title + "\n" + document.content, branches)
         source_id = len(sources) + 1
+        quality = score_source(url=document.url, title=document.title, markdown=document.content)
         validation = validate_source_content(
             title=document.title,
             content=document.content,
@@ -476,12 +566,35 @@ def _record_ingested_documents(
             min_words=max(40, min_words // 2),
             min_relevant_chunks=max(1, min_chunks),
             question=question,
+            source_type=quality.source_type,
+            url=document.url,
+            extraction_method=str(document.metadata.get("suffix") or document.provenance),
         )
         if not validation.usable:
             metrics.rejected_source_count += 1
-            metrics.failures.append(f"Rejected {document.url}: {', '.join(validation.reasons)}")
+            policy = validation_policy_for_source(
+                question=question,
+                branch=branch,
+                title=document.title,
+                content=document.content,
+                source_type=quality.source_type,
+                url=document.url,
+                extraction_method=str(document.metadata.get("suffix") or document.provenance),
+            )
+            metrics.failures.append(
+                f"Rejected {document.url}: {', '.join(validation.reasons)} "
+                f"(source_type={quality.source_type}; validation_policy={policy})"
+            )
             continue
-        quality = score_source(url=document.url, title=document.title, markdown=document.content)
+        policy = validation_policy_for_source(
+            question=question,
+            branch=branch,
+            title=document.title,
+            content=document.content,
+            source_type=quality.source_type,
+            url=document.url,
+            extraction_method=str(document.metadata.get("suffix") or document.provenance),
+        )
         source = _write_source(
             source_id=source_id,
             branch=branch,
@@ -496,7 +609,11 @@ def _record_ingested_documents(
             quality_type=quality.source_type,
             relevance_score=validation.relevance_score,
             word_count=validation.word_count,
-            metadata=document.metadata,
+            metadata={
+                **document.metadata,
+                "validation_policy": policy,
+                "source_type": quality.source_type,
+            },
         )
         sources.append(source)
         source_texts[source.id] = document.content
@@ -523,6 +640,13 @@ def _candidate_to_source(
         metrics.failures.append(f"Rejected {candidate.url}: {exc}")
         return None
 
+    quality = score_source(
+        url=scraped.url,
+        title=scraped.title,
+        snippet=candidate.snippet,
+        markdown=scraped.markdown,
+        search_score=candidate.search_score,
+    )
     validation = validate_source_content(
         title=scraped.title,
         content=scraped.markdown,
@@ -530,18 +654,35 @@ def _candidate_to_source(
         min_words=min_words,
         min_relevant_chunks=min_chunks,
         question=question,
+        source_type=quality.source_type,
+        url=scraped.url,
+        extraction_method=scraped.extraction_method,
     )
     if not validation.usable:
         metrics.rejected_source_count += 1
-        metrics.failures.append(f"Rejected {candidate.url}: {', '.join(validation.reasons)}")
+        policy = validation_policy_for_source(
+            question=question,
+            branch=branch,
+            title=scraped.title,
+            content=scraped.markdown,
+            source_type=quality.source_type,
+            url=scraped.url,
+            extraction_method=scraped.extraction_method,
+        )
+        metrics.failures.append(
+            f"Rejected {candidate.url}: {', '.join(validation.reasons)} "
+            f"(source_type={quality.source_type}; validation_policy={policy})"
+        )
         return None
 
-    quality = score_source(
-        url=scraped.url,
+    policy = validation_policy_for_source(
+        question=question,
+        branch=branch,
         title=scraped.title,
-        snippet=candidate.snippet,
-        markdown=scraped.markdown,
-        search_score=candidate.search_score,
+        content=scraped.markdown,
+        source_type=quality.source_type,
+        url=scraped.url,
+        extraction_method=scraped.extraction_method,
     )
     source = _write_source(
         source_id=source_id,
@@ -562,6 +703,8 @@ def _candidate_to_source(
             "candidate_id": candidate.id,
             "search_score": candidate.search_score,
             "relevant_chunk_count": validation.relevant_chunk_count,
+            "validation_policy": policy,
+            "source_type": quality.source_type,
             "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
         },
     )
@@ -687,6 +830,139 @@ def _search_raw(client: Any, query: str, settings: Any) -> dict[str, Any]:
 
 def _duckduckgo_available() -> bool:
     return DDGS is not None
+
+
+def _search_with_exa(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://api.exa.ai/search",
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "query": query,
+            "numResults": max_results,
+            "contents": {"text": {"maxCharacters": 12_000}},
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        text = str(item.get("text") or item.get("summary") or item.get("snippet") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(text or str(item.get("highlight") or "")),
+                "raw_content": text,
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_brave(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        params={"q": query, "count": max(1, min(max_results, 20))},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = ((payload.get("web") or {}).get("results")) or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        snippet = str(item.get("description") or item.get("snippet") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(snippet),
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_firecrawl(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://api.firecrawl.dev/v1/search",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"query": query, "limit": max_results, "scrapeOptions": {"formats": ["markdown"]}},
+        timeout=45.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("data") or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or item.get("link") or "")
+        if not url:
+            continue
+        raw = str(item.get("markdown") or item.get("content") or item.get("text") or "")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or metadata.get("title") or url),
+                "content": _snippet(str(item.get("description") or item.get("snippet") or raw)),
+                "raw_content": raw,
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_serper(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        json={"q": query, "num": max(1, min(max_results, 100))},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("organic") or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("link") or item.get("url") or "")
+        if not url:
+            continue
+        snippet = str(item.get("snippet") or item.get("description") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(snippet),
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_score(item: dict[str, Any], rank: int) -> float:
+    raw = item.get("score")
+    try:
+        if raw is not None:
+            return round(max(0.0, min(float(raw), 1.0)), 4)
+    except (TypeError, ValueError):
+        pass
+    return round(0.9 * (0.95 ** rank), 4)
+
+
+def _snippet(text: str, *, limit: int = 900) -> str:
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _short_error(exc: BaseException, *, limit: int = 180) -> str:
+    return re.sub(r"\s+", " ", f"{type(exc).__name__}: {exc}").strip()[:limit]
 
 
 _DDG_QUERY_TIMEOUT_SECONDS = 30.0  # hard wall-clock per DDG query

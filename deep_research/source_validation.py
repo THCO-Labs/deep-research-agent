@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from deep_research.schemas import ResearchBranch
 from deep_research.text_terms import TOKEN_RE, cjk_char_count, contains_cjk, latin_letter_count, normalize_term_text, ordered_terms, term_set
@@ -12,6 +13,39 @@ SENTENCE_END_RE = re.compile(r"[.!?。！？][\"')\]）】」』”’]?$")
 SENTENCE_SPLIT_RE = re.compile(r"\n\s*\n|(?<=[.!?。！？])\s*|[;；]\s*")
 ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,5}\b")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+TECHNICAL_UNIT_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:kw|hp|rpm|min-?1|nm|mm|cm|m|in\.?|inch(?:es)?|kg|lb|lbs|v|hz|"
+    r"bar|psi|mpa|µm|um|micron|%|°c|deg(?:ree)?s?)\b",
+    flags=re.I,
+)
+MODEL_TOKEN_RE = re.compile(r"\b[A-Z]{1,8}[A-Z0-9-]*\s?\d{2,5}[A-Z0-9-]*\b")
+PRODUCT_SPEC_INTENT_RE = re.compile(
+    r"\b(?:compare|comparison|choose|selection|select|between|versus|vs\.?|specs?|specifications?|"
+    r"features?|compatibility|integration|costs?|pricing|vendor|manufacturer|model|models|hardware|"
+    r"software|machine|equipment|device|datasheet|data\s+sheet|manual|brochure|technical\s+data)\b",
+    flags=re.I,
+)
+TECHNICAL_FIELD_RE = re.compile(
+    r"\b(?:spindle|torque|power|speed|rpm|axis|axes|stroke|capacity|diameter|length|width|height|"
+    r"weight|tolerance|accuracy|thermal|control|software|integration|protocol|api|connectivity|"
+    r"voltage|frequency|consumption|tool|tooling|material|coolant|standard|certification|"
+    r"specification|datasheet|manual|brochure|model)\b",
+    flags=re.I,
+)
+PRODUCT_SPEC_SOURCE_TYPES = frozenset(
+    {
+        "product_page",
+        "vendor_page",
+        "spec_sheet",
+        "brochure_pdf",
+        "manual_pdf",
+        "datasheet",
+        "official_docs",
+        "standards_or_government",
+    }
+)
+PRODUCT_SPEC_MIN_WORDS = 40
+ValidationPolicy = Literal["default", "product_spec"]
 
 
 @dataclass(frozen=True)
@@ -31,13 +65,33 @@ def validate_source_content(
     min_words: int,
     min_relevant_chunks: int,
     question: str = "",
+    source_type: str = "",
+    url: str = "",
+    extraction_method: str = "",
 ) -> SourceValidation:
     normalized = _normalize(content)
     words = TOKEN_RE.findall(normalize_term_text(normalized))
     word_count = len(words)
     reasons: list[str] = []
-    if word_count < min_words:
-        reasons.append(f"short extracted text: {word_count} words < {min_words}")
+    policy = validation_policy_for_source(
+        question=question,
+        branch=branch,
+        title=title,
+        content=content,
+        source_type=source_type,
+        url=url,
+        extraction_method=extraction_method,
+    )
+    product_spec_candidate = policy == "product_spec"
+    has_product_spec_evidence = _has_product_spec_evidence(
+        question=question,
+        branch=branch,
+        title=title,
+        content=content,
+    )
+    effective_min_words = PRODUCT_SPEC_MIN_WORDS if product_spec_candidate and has_product_spec_evidence else min_words
+    if word_count < effective_min_words:
+        reasons.append(f"short extracted text: {word_count} words < {effective_min_words}")
 
     if _looks_like_boilerplate(normalized):
         reasons.append("extracted text appears to be mostly boilerplate or related-link content")
@@ -66,11 +120,16 @@ def validate_source_content(
         question_matches = _matched_terms(question_terms, content_terms)
         if len(question_matches) < min(2, len(question_terms)):
             reasons.append("source relevance to the original question below threshold")
-        elif question_anchor_groups and not question_anchor_matches and len(question_matches) / max(len(question_terms), 1) < 0.45:
+        elif (
+            not product_spec_candidate
+            and question_anchor_groups
+            and not question_anchor_matches
+            and len(question_matches) / max(len(question_terms), 1) < 0.45
+        ):
             reasons.append("source lacks a question-specific anchor phrase")
-        elif partial_question_anchor_collisions and len(question_anchor_matches) < 2:
+        elif not product_spec_candidate and partial_question_anchor_collisions and len(question_anchor_matches) < 2:
             reasons.append("source partially matches a question anchor without the complete phrase")
-    if branch_anchor_groups and not branch_anchor_matches and not branch_semantic_match:
+    if branch_anchor_groups and not branch_anchor_matches and not branch_semantic_match and not product_spec_candidate:
         reasons.append("source lacks a branch-specific anchor phrase")
     reasons.extend(_concept_dominance_rejections(
         title=title, content=normalized, branch=branch, question=question,
@@ -81,19 +140,32 @@ def validate_source_content(
     relevance_score = round((term_score * 0.70) + (anchor_score * 0.30), 4)
     if branch_semantic_match:
         relevance_score = max(relevance_score, 0.30)
+    if product_spec_candidate and has_product_spec_evidence:
+        relevance_score = max(relevance_score, 0.34)
     if relevance_score < 0.30:
         reasons.append("branch relevance below threshold")
 
-    relevant_chunks = [
-        chunk
-        for chunk in _chunks(normalized)
-        if len(_matched_terms(terms, _tokens(chunk))) >= max(1, min(3, len(terms)))
-        and (not branch_anchor_groups or _matched_anchor_groups(branch_anchor_groups, _tokens(chunk)))
-    ]
+    relevant_chunks = []
+    for chunk in _chunks(normalized):
+        chunk_terms = _tokens(chunk)
+        default_match = len(_matched_terms(terms, chunk_terms)) >= max(1, min(3, len(terms))) and (
+            not branch_anchor_groups or _matched_anchor_groups(branch_anchor_groups, chunk_terms)
+        )
+        product_spec_match = product_spec_candidate and _chunk_has_product_spec_evidence(
+            question=question,
+            branch=branch,
+            title=title,
+            chunk=chunk,
+        )
+        if default_match or product_spec_match:
+            relevant_chunks.append(chunk)
     if len(relevant_chunks) < min_relevant_chunks:
         reasons.append(
             f"only {len(relevant_chunks)} relevant chunk(s); need {min_relevant_chunks}"
         )
+
+    if product_spec_candidate and not has_product_spec_evidence:
+        reasons.append("product/spec source lacks matching entity and technical field evidence")
 
     return SourceValidation(
         usable=not reasons,
@@ -110,6 +182,137 @@ def branch_terms(branch: ResearchBranch) -> set[str]:
 
 def content_terms(text: str) -> set[str]:
     return _tokens(text)
+
+
+def validation_policy_for_source(
+    *,
+    question: str,
+    branch: ResearchBranch,
+    title: str,
+    content: str,
+    source_type: str = "",
+    url: str = "",
+    extraction_method: str = "",
+) -> ValidationPolicy:
+    task_text = " ".join(
+        [
+            question,
+            branch.title,
+            branch.objective,
+            " ".join(branch.queries),
+            " ".join(branch.required_terms),
+        ]
+    )
+    if not PRODUCT_SPEC_INTENT_RE.search(task_text):
+        return "default"
+    source_marker = " ".join([source_type, url, extraction_method, title]).lower()
+    typed_source = source_type in PRODUCT_SPEC_SOURCE_TYPES or bool(
+        re.search(r"\b(?:pdf|product|products|machine|equipment|spec|specification|datasheet|manual|brochure)\b", source_marker)
+    )
+    if not typed_source:
+        return "default"
+    return "product_spec"
+
+
+def _has_product_spec_evidence(
+    *,
+    question: str,
+    branch: ResearchBranch,
+    title: str,
+    content: str,
+) -> bool:
+    source_text = f"{title}\n{content}"
+    source_terms = _tokens(source_text)
+    task_text = " ".join(
+        [
+            question,
+            branch.title,
+            branch.objective,
+            " ".join(branch.queries),
+            " ".join(branch.required_terms),
+        ]
+    )
+    task_terms = _tokens(task_text)
+    entity_hits = _entity_overlap(task_text, source_text)
+    branch_hits = len(_matched_terms(_branch_terms(branch), source_terms))
+    question_hits = len(_matched_terms(task_terms, source_terms))
+    technical_score = _technical_evidence_score(source_text)
+    return technical_score >= 3 and (
+        entity_hits >= 1
+        or branch_hits >= 4
+        or question_hits >= max(4, min(10, len(task_terms) // 6))
+    )
+
+
+def _chunk_has_product_spec_evidence(
+    *,
+    question: str,
+    branch: ResearchBranch,
+    title: str,
+    chunk: str,
+) -> bool:
+    source_text = f"{title}\n{chunk}"
+    task_text = " ".join(
+        [
+            question,
+            branch.title,
+            branch.objective,
+            " ".join(branch.queries),
+            " ".join(branch.required_terms),
+        ]
+    )
+    source_terms = _tokens(source_text)
+    branch_hits = len(_matched_terms(_branch_terms(branch), source_terms))
+    return _technical_evidence_score(source_text) >= 2 and (
+        _entity_overlap(task_text, source_text) >= 1 or branch_hits >= 3
+    )
+
+
+def _technical_evidence_score(text: str) -> int:
+    key_value_count = len(re.findall(r"(?m)^\s*[A-Za-z][A-Za-z0-9 /().+-]{1,48}\s*[:|]\s*\S+", text))
+    bullet_count = len(re.findall(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S+", text))
+    unit_count = len(TECHNICAL_UNIT_RE.findall(text))
+    model_count = len(MODEL_TOKEN_RE.findall(text))
+    field_count = len(TECHNICAL_FIELD_RE.findall(text))
+    table_count = sum(1 for line in text.splitlines() if line.count("|") >= 2 or len(re.split(r"\s{2,}", line.strip())) >= 3)
+    return (
+        min(key_value_count, 4)
+        + min(bullet_count, 4)
+        + min(unit_count, 6)
+        + min(model_count, 4)
+        + min(field_count, 6)
+        + min(table_count, 4)
+    )
+
+
+def _entity_overlap(task_text: str, source_text: str) -> int:
+    task_entities = _entity_markers(task_text)
+    source_entities = _entity_markers(source_text)
+    if not task_entities or not source_entities:
+        return 0
+    normalized_sources = {_normalize_entity(entity) for entity in source_entities}
+    hits = 0
+    for entity in task_entities:
+        normalized = _normalize_entity(entity)
+        if normalized in normalized_sources or any(
+            normalized and (normalized in source_entity or source_entity in normalized)
+            for source_entity in normalized_sources
+        ):
+            hits += 1
+    return hits
+
+
+def _entity_markers(text: str) -> set[str]:
+    markers = set(MODEL_TOKEN_RE.findall(text))
+    # Capture mixed alphanumeric product/entity phrases without binding to any
+    # specific vendor or domain.
+    phrase_re = re.compile(r"\b(?:[A-Z][A-Za-z0-9+-]{1,12}\s+){0,3}[A-Z0-9][A-Za-z0-9+-]*\d[A-Za-z0-9+-]*\b")
+    markers.update(match.group(0).strip() for match in phrase_re.finditer(text))
+    return {marker for marker in markers if len(_normalize_entity(marker)) >= 3}
+
+
+def _normalize_entity(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def anchor_groups_for_branch(branch: ResearchBranch) -> list[frozenset[str]]:
@@ -307,7 +510,6 @@ def _protected_concept_phrases(branch: ResearchBranch, question: str) -> list[tu
     # cause false rejections on any source whose title shares a single generic word
     # with those noise phrases.  branch.required_terms are the planner's explicit,
     # curated list of concepts a source must address — they are the right source.
-    anchor_terms = set(ordered_terms(f"{question} {branch.title}"))
     phrases: list[tuple[str, ...]] = []
     for text in branch.required_terms:
         terms = ordered_terms(text)

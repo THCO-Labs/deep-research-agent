@@ -542,6 +542,142 @@ def test_acquisition_implicit_source_cap_does_not_use_candidate_budget(tmp_path:
     assert result.metrics.search_count == 0
 
 
+def test_acquisition_candidate_budget_is_per_branch(tmp_path: Path) -> None:
+    searched_queries: list[str] = []
+
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            searched_queries.append(query)
+            slug = query.replace(" ", "-")
+            raw_content = "unrelated filler content without the requested anchor terms. " * 80
+            return {
+                "results": [
+                    {
+                        "url": f"https://example.com/{slug}/{index}",
+                        "title": f"Rejected candidate {index}",
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.5,
+                    }
+                    for index in range(20)
+                ]
+            }
+
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="First branch",
+            objective="Cover first branch evidence.",
+            queries=["first branch evidence"],
+            min_sources=1,
+            required_terms=["first branch anchor"],
+        ),
+        ResearchBranch(
+            id="branch_2",
+            title="Second branch",
+            objective="Cover second branch evidence.",
+            queries=["second branch evidence"],
+            min_sources=1,
+            required_terms=["second branch anchor"],
+        ),
+    ]
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=17,
+        max_sources=0,
+        min_usable_sources=17,
+        search_depth="advanced",
+        allow_raw_content=True,
+        max_browser_scrapes_per_query=0,
+    )
+
+    result = acquire_sources(
+        question="Compare first and second branch evidence.",
+        branches=branches,
+        artifacts=ResearchArtifactsV2.create(tmp_path, "per branch candidate budget"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+    )
+
+    counts_by_branch = {
+        branch.id: sum(1 for candidate in result.candidates if candidate.branch_id == branch.id)
+        for branch in branches
+    }
+    assert searched_queries == ["first branch evidence", "second branch evidence"]
+    assert counts_by_branch == {"branch_1": 17, "branch_2": 17}
+    assert len(result.candidates) == 34
+
+
+def test_search_pool_skips_missing_optional_provider_keys(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        tavily_api_key="",
+        tavily_api_keys=(),
+        exa_api_key="",
+        brave_search_api_key="",
+        firecrawl_api_key="",
+        serper_api_key="",
+    )
+
+    monkeypatch.setattr(
+        "deep_research.acquisition._search_with_duckduckgo",
+        lambda query, max_results: [
+            {
+                "url": "https://example.com/result",
+                "title": "Result",
+                "content": "Result snippet",
+                "score": 0.9,
+            }
+        ],
+    )
+
+    response = TavilySearchClientPool(settings).search("example query", max_results=3)
+
+    assert response["_provider"] == "duckduckgo"
+    assert response["results"][0]["url"] == "https://example.com/result"
+    assert "provider_skip:tavily:missing_api_key" in response["_provider_events"]
+    assert "provider_skip:exa:missing_api_key" in response["_provider_events"]
+    assert "provider_skip:brave:missing_api_key" in response["_provider_events"]
+    assert "provider_skip:firecrawl:missing_api_key" in response["_provider_events"]
+    assert "provider_skip:serper:missing_api_key" in response["_provider_events"]
+
+
+def test_search_pool_rotates_numbered_exa_keys(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        tavily_api_key="",
+        tavily_api_keys=(),
+        exa_api_key="",
+        brave_search_api_key="",
+        firecrawl_api_key="",
+        serper_api_key="",
+    )
+    monkeypatch.setenv("EXA_API_KEY", "first")
+    monkeypatch.setenv("EXA_API_KEY1", "second")
+    calls: list[str] = []
+
+    def fake_exa(query: str, *, api_key: str, max_results: int):
+        calls.append(api_key)
+        if api_key == "first":
+            raise RuntimeError("quota")
+        return [
+            {
+                "url": "https://example.com/exa",
+                "title": "Exa result",
+                "content": "Result snippet",
+                "score": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr("deep_research.acquisition._search_with_exa", fake_exa)
+
+    response = TavilySearchClientPool(settings).search("example query", max_results=3)
+
+    assert response["_provider"] == "exa"
+    assert response["results"][0]["url"] == "https://example.com/exa"
+    assert calls == ["first", "second"]
+    assert any(event.startswith("provider_error:exa[1]:") for event in response["_provider_events"])
+
+
 def test_acquisition_skips_configured_blocked_source_patterns(tmp_path: Path) -> None:
     class FakeSearchClient:
         def search(self, query: str, **kwargs):

@@ -9,7 +9,17 @@ from deep_research.settings import ConfigError, Settings
 @pytest.fixture(autouse=True)
 def clear_research_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
-        if name.startswith(("GOOGLE_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "TAVILY_API_KEY", "DEEP_RESEARCH_")):
+        if name.startswith((
+            "GOOGLE_API_KEY",
+            "GROQ_API_KEY",
+            "OPENROUTER_API_KEY",
+            "TAVILY_API_KEY",
+            "EXA_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "FIRECRAWL_API_KEY",
+            "SERPER_API_KEY",
+            "DEEP_RESEARCH_",
+        )):
             monkeypatch.delenv(name, raising=False)
         elif "TAVILY" in name.upper() and "API" in name.upper() and "KEY" in name.upper():
             monkeypatch.delenv(name, raising=False)

@@ -26,8 +26,28 @@ class DomainSignals:
     path_tokens: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProductDocumentSignals:
+    document_hint: bool
+    product_location_hint: bool
+    product_title_hint: bool
+    key_value_count: int
+    bullet_count: int
+    unit_count: int
+    model_count: int
+    table_count: int
+    structured_score: int
+
+    @property
+    def has_technical_evidence(self) -> bool:
+        return self.structured_score >= 4 or (
+            self.model_count >= 1 and (self.unit_count >= 1 or self.key_value_count >= 2 or self.table_count >= 1)
+        )
+
+
 TECHNICAL_LANGUAGE_RE = re.compile(
-    r"\b(?:documentation|specification|standard|technical\s+report|white\s+paper|manual|reference|guideline|"
+    r"\b(?:documentation|specification|specifications|specs?|standard|technical\s+report|technical\s+data|"
+    r"white\s+paper|manual|reference|guideline|datasheet|data\s+sheet|brochure|catalog(?:ue)?|"
     r"api|sdk|protocol|benchmark|dataset)\b",
     flags=re.I,
 )
@@ -37,6 +57,25 @@ SCHOLARLY_LANGUAGE_RE = re.compile(
     flags=re.I,
 )
 DOCS_TOKEN_RE = re.compile(r"^(?:docs?|documentation|developer|developers|learn|manual|reference|api|sdk)$", flags=re.I)
+PRODUCT_PATH_TOKEN_RE = re.compile(
+    r"^(?:products?|machines?|equipment|models?|model|catalog(?:ue)?|downloads?|technical|specifications?|"
+    r"specs?|datasheets?|brochures?|manuals?|support)$",
+    flags=re.I,
+)
+PRODUCT_TITLE_RE = re.compile(
+    r"\b(?:product|machine|equipment|model|series|brochure|catalog(?:ue)?|datasheet|data\s+sheet|"
+    r"technical\s+data|specifications?|specs?|manual)\b",
+    flags=re.I,
+)
+TECHNICAL_UNIT_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:kw|hp|rpm|min-?1|nm|mm|cm|m|in\.?|inch(?:es)?|kg|lb|lbs|v|hz|"
+    r"bar|psi|mpa|µm|um|micron|%|°c|deg(?:ree)?s?)\b",
+    flags=re.I,
+)
+MODEL_TOKEN_RE = re.compile(r"\b[A-Z]{1,8}[A-Z0-9-]*\s?\d{2,5}[A-Z0-9-]*\b")
+DOCUMENT_EXTENSION_RE = re.compile(r"\.(?:pdf|docx?|xlsx?|csv)(?:$|[?#])", flags=re.I)
+SPEC_FIELD_LINE_RE = re.compile(r"(?m)^\s*[A-Za-z][A-Za-z0-9 /().,+#%-]{1,64}\s*(?::|\||\t| {2,})\s*\S+")
+BULLET_LINE_RE = re.compile(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+\S+")
 REPOSITORY_TOKEN_RE = re.compile(r"^(?:git|github|gitlab|bitbucket|sourceforge|code|repo|repository)$", flags=re.I)
 USER_CONTENT_TOKEN_RE = re.compile(
     r"^(?:blog|blogs|forum|forums|community|question|questions|answer|answers|discussion|discuss|"
@@ -72,7 +111,11 @@ def score_source(
     reasons: list[str] = []
     source_type = "general_web"
 
-    if _is_standards_source(domain, title_text, combined_lower):
+    if _looks_like_product_document(domain, path, title, combined_text, url):
+        score += 0.20
+        source_type = _product_document_type(domain, path, title, combined_text, url)
+        reasons.append("product/specification document signal")
+    elif _is_standards_source(domain, title_text, combined_lower):
         score += 0.28
         source_type = "standards_or_government"
         reasons.append("standards or specification signal")
@@ -122,6 +165,10 @@ def score_source(
     if TECHNICAL_LANGUAGE_RE.search(combined_text):
         score += 0.04
         reasons.append("technical source language")
+
+    if _technical_spec_signal_count(combined_text) >= 3:
+        score += 0.05
+        reasons.append("structured technical/specification signal")
 
     if SCHOLARLY_LANGUAGE_RE.search(combined_text) or _path_has_scholarly_marker(path):
         score += 0.05
@@ -213,6 +260,120 @@ def _looks_like_official_docs(domain: DomainSignals, path: str, text: str) -> bo
         or path.startswith(("/docs", "/developer", "/developers", "/reference", "/manual", "/learn"))
         or re.search(r"\b(?:official\s+documentation|api\s+reference|developer\s+guide|user\s+guide)\b", text)
     )
+
+
+def _looks_like_product_document(
+    domain: DomainSignals,
+    path: str,
+    title: str,
+    text: str,
+    url: str,
+) -> bool:
+    if _looks_like_user_content(domain, path):
+        return False
+    signals = _product_document_signals(domain=domain, path=path, title=title, text=text, url=url)
+    has_extractable_spec_evidence = signals.has_technical_evidence or (signals.document_hint and signals.structured_score >= 2)
+    return bool(
+        has_extractable_spec_evidence
+        and (
+            signals.product_location_hint
+            or signals.product_title_hint
+            or signals.document_hint
+            or signals.structured_score >= 8
+        )
+    )
+
+
+def _product_document_type(
+    domain: DomainSignals,
+    path: str,
+    title: str,
+    text: str,
+    url: str,
+) -> str:
+    lower = " ".join([url, path, title, text[:1200]]).lower()
+    signals = _product_document_signals(domain=domain, path=path, title=title, text=text, url=url)
+    is_pdf = url.lower().split("?", 1)[0].endswith(".pdf")
+    if is_pdf and re.search(r"\b(?:manual|user\s+guide|operation|installation)\b", lower):
+        return "manual_pdf"
+    if is_pdf and re.search(r"\b(?:brochure|catalog(?:ue)?)\b", lower):
+        return "brochure_pdf"
+    if is_pdf and re.search(r"\b(?:datasheet|data\s+sheet|technical\s+data|specifications?|specs?)\b", lower):
+        return "spec_sheet"
+    if is_pdf:
+        return "brochure_pdf"
+    if re.search(r"\b(?:datasheet|data\s+sheet)\b", lower):
+        return "datasheet"
+    if re.search(r"\b(?:specifications?|specs?|technical\s+data)\b", lower):
+        return "spec_sheet"
+    if signals.key_value_count >= 3 or signals.table_count >= 2 or signals.unit_count >= 3:
+        return "spec_sheet"
+    if signals.product_location_hint:
+        return "product_page"
+    return "vendor_page"
+
+
+def _product_document_signals(
+    *,
+    domain: DomainSignals,
+    path: str,
+    title: str,
+    text: str,
+    url: str,
+) -> ProductDocumentSignals:
+    tokens = set(domain.subdomain_tokens + domain.path_tokens)
+    lower_url = url.lower()
+    key_value_count = len(SPEC_FIELD_LINE_RE.findall(text))
+    bullet_count = len(BULLET_LINE_RE.findall(text))
+    unit_count = len(TECHNICAL_UNIT_RE.findall(text))
+    model_count = len(MODEL_TOKEN_RE.findall(text))
+    table_count = _table_like_line_count(text)
+    structured_score = (
+        min(key_value_count, 8)
+        + min(bullet_count, 6)
+        + min(unit_count, 12)
+        + min(model_count, 8)
+        + min(table_count, 8)
+    )
+    document_hint = bool(DOCUMENT_EXTENSION_RE.search(lower_url) or TECHNICAL_LANGUAGE_RE.search(f"{url} {title}"))
+    product_location_hint = bool(
+        any(PRODUCT_PATH_TOKEN_RE.match(token) for token in tokens)
+        or re.search(r"/(?:products?|machines?|equipment|models?)/", path.lower())
+    )
+    product_title_hint = bool(PRODUCT_TITLE_RE.search(title))
+    return ProductDocumentSignals(
+        document_hint=document_hint,
+        product_location_hint=product_location_hint,
+        product_title_hint=product_title_hint,
+        key_value_count=key_value_count,
+        bullet_count=bullet_count,
+        unit_count=unit_count,
+        model_count=model_count,
+        table_count=table_count,
+        structured_score=structured_score,
+    )
+
+
+def _technical_spec_signal_count(text: str) -> int:
+    if not text:
+        return 0
+    key_value_count = len(SPEC_FIELD_LINE_RE.findall(text))
+    bullet_count = len(BULLET_LINE_RE.findall(text))
+    unit_count = len(TECHNICAL_UNIT_RE.findall(text))
+    model_count = len(MODEL_TOKEN_RE.findall(text))
+    table_count = _table_like_line_count(text)
+    return key_value_count + min(bullet_count, 8) + min(unit_count, 12) + min(model_count, 8) + min(table_count, 8)
+
+
+def _table_like_line_count(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.count("|") >= 2 or line.count("\t") >= 2 or len(re.split(r"\s{2,}", stripped)) >= 3:
+            count += 1
+    return count
 
 
 def _is_scholarly_source(domain: DomainSignals, path: str, text: str) -> bool:

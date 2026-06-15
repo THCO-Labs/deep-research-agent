@@ -97,6 +97,10 @@ class Settings:
     openrouter_app_title: str = "Deep Research Agent"
     tavily_api_key: str = field(default="", repr=False)
     tavily_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    exa_api_key: str = field(default="", repr=False)
+    brave_search_api_key: str = field(default="", repr=False)
+    firecrawl_api_key: str = field(default="", repr=False)
+    serper_api_key: str = field(default="", repr=False)
     mistral_api_key: str = field(default="", repr=False)
     mistral_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
@@ -366,6 +370,10 @@ class Settings:
             or "Deep Research Agent",
             tavily_api_key=tavily_api_key,
             tavily_api_keys=tavily_api_keys,
+            exa_api_key=os.environ.get("EXA_API_KEY", "").strip(),
+            brave_search_api_key=os.environ.get("BRAVE_SEARCH_API_KEY", "").strip(),
+            firecrawl_api_key=os.environ.get("FIRECRAWL_API_KEY", "").strip(),
+            serper_api_key=os.environ.get("SERPER_API_KEY", "").strip(),
             mistral_api_key=mistral_api_key,
             mistral_api_keys=mistral_api_keys,
         )
@@ -403,8 +411,8 @@ class Settings:
                 missing.append("GROQ_API_KEY")
             if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
                 missing.append("OPENROUTER_API_KEY")
-            if not self.tavily_key_pool:
-                missing.append("TAVILY_API_KEY")
+            # Tavily and paid search-provider keys are optional because
+            # DuckDuckGo is a no-key emergency fallback when installed.
         if missing:
             joined = ", ".join(missing)
             raise ConfigError(
