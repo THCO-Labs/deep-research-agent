@@ -57,3 +57,7 @@ deep-research = "deep_research.cli:main"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["deep_research*"]
+
