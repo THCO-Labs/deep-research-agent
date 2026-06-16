@@ -439,12 +439,15 @@ def _chat_model_for_role(
     model_name: str,
 ) -> BaseChatModel | None:
     from langchain_openai import ChatOpenAI
+    import os
+    base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1")
+    api_key = os.environ.get("CUSTOM_OPENAI_API_KEY", "sk-deep-research")
     timeout_seconds = float(settings.model_request_timeout_seconds or 120)
     max_output_tokens = int(settings.model_max_output_tokens or 0)
     kwargs: dict[str, object] = {
         "model": "QuantTrio/Qwen3.5-9B-AWQ",
-        "api_key": "sk-deep-research",
-        "base_url": "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1",
+        "api_key": api_key,
+        "base_url": base_url,
         "timeout": timeout_seconds,
         "max_retries": 0,
     }
@@ -455,12 +458,15 @@ def _chat_model_for_role(
 
 def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
+    import os
+    base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1")
+    api_key = os.environ.get("CUSTOM_OPENAI_API_KEY", "sk-deep-research")
     timeout_seconds = float(route.get("request_timeout_seconds") or 120)
     max_output_tokens = int(route.get("max_output_tokens") or 0)
     kwargs: dict[str, object] = {
         "model": "QuantTrio/Qwen3.5-9B-AWQ",
-        "api_key": "sk-deep-research",
-        "base_url": "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1",
+        "api_key": api_key,
+        "base_url": base_url,
         "timeout": timeout_seconds,
         "max_retries": 0,
     }
