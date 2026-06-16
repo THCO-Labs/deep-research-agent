@@ -107,6 +107,10 @@ class PlaywrightScraper:
     def fetch(self, url: str) -> ScrapeResult:
         errors: list[str] = []
         try:
+            return self._fetch_with_jina(url)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"jina: {exc}")
+        try:
             return self._fetch_with_httpx(url)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"httpx: {exc}")
@@ -115,6 +119,72 @@ class PlaywrightScraper:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"playwright: {exc}")
         raise ScrapeQualityError("; ".join(errors) or f"Could not fetch usable content from {url}")
+
+    def _fetch_with_jina(self, url: str) -> ScrapeResult:
+        import os
+        keys = []
+        main_key = os.environ.get("JINA_API_KEY", "").strip()
+        if main_key:
+            keys.append(main_key)
+        idx = 1
+        while True:
+            k = os.environ.get(f"JINA_API_KEY{idx}", "").strip()
+            if not k:
+                break
+            keys.append(k)
+            idx += 1
+
+        if not keys:
+            raise RuntimeError("No JINA_API_KEY configured in environment.")
+
+        errors = []
+        for key in keys:
+            try:
+                headers = {
+                    "X-Return-Format": "markdown",
+                    "Authorization": f"Bearer {key}"
+                }
+                total = self.timeout_ms / 1000
+                timeout = httpx.Timeout(connect=min(10.0, total), read=total, write=total, pool=10.0)
+                
+                with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                    response = client.get(f"https://r.jina.ai/{url}", headers=headers)
+                    if response.status_code == 429:
+                        errors.append("Jina API key rate limit (429)")
+                        continue
+                    response.raise_for_status()
+                    
+                    text = response.text
+                    if not text or len(text.strip().split()) < 40:
+                        errors.append("Jina returned empty or very short content")
+                        continue
+                        
+                    title_match = re.search(r"^Title:\s*(.+)$", text, re.M)
+                    title = title_match.group(1).strip() if title_match else _title_from_url(url)
+                    
+                    return ScrapeResult(
+                        url=url,
+                        title=title,
+                        markdown=text,
+                        extraction_method="jina"
+                    )
+            except httpx.TimeoutException as exc:
+                errors.append(f"Jina timeout: {exc}")
+                # Do not retry other keys on timeout; it's a target site or network issue.
+                break
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                errors.append(f"Jina key status {status_code}: {exc}")
+                if status_code not in (401, 403, 429):
+                    # For non-retryable HTTP errors (like 404, 500, etc.), do not retry other keys.
+                    break
+            except Exception as exc:
+                errors.append(f"Jina error: {exc}")
+                # Break on general exceptions that are likely not key-related
+                break
+        
+        raise RuntimeError("; ".join(errors) or "Jina fetch failed")
+
 
     def _fetch_with_playwright(self, url: str) -> ScrapeResult:
         """Fetch dynamic pages with Playwright in the current thread.

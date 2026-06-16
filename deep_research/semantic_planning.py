@@ -116,11 +116,9 @@ def _critique_and_refine_plan(
         f"- {b.id}: {b.title} | queries: {', '.join(b.queries[:2])} | required_terms: {', '.join(b.required_terms[:3])}"
         for b in plan.branches
     )
-    prompt = f"""You are reviewing a research plan you just generated. Check it for three issues only:
-1. Missing angles — does the user request ask for something not covered by any branch?
-2. Redundant branches — do any two branches cover >80% of the same topic with near-identical queries?
-3. Overly generic queries — queries with fewer than 3 specific topic words that would return useless results.
+    prompt = f"""You are a structural QA gatekeeper evaluating a newly generated research plan.
 
+<INPUT_DATA>
 User request:
 {plan.question}
 
@@ -129,8 +127,19 @@ Plan branches:
 
 Additional guidance:
 {planning_guidance.strip()[:2000] if planning_guidance.strip() else "None"}
+</INPUT_DATA>
 
-Return exactly one JSON object.
+Evaluate these three items only:
+1. Missing angles: Are core constraints, entities, decision criteria, or evidence requirements from the user request entirely omitted by the branches?
+2. Overlap redundancy: Do any two branches share a >80% semantic footprint or use near-identical search strings?
+3. Weak queries: Do any search queries contain fewer than 3 descriptive topic words, lack search specificity, or lack concrete terms from the request?
+
+Approval standard:
+- Approve if the plan covers the user request well enough for acquisition to start.
+- Do not suggest cosmetic rewrites, style changes, or merely nicer wording.
+- Only reject for issues that would materially harm source acquisition or final answer coverage.
+
+Return exactly one JSON object. Do not include markdown code blocks or extra text.
 
 If the plan is sound:
 {{"approved": true}}
@@ -145,7 +154,7 @@ If there are real issues:
   ]
 }}
 
-Be conservative — only flag clear problems. JSON only."""
+Be highly conservative. JSON only."""
     try:
         response = planner.invoke([HumanMessage(content=prompt)])
         text = str(getattr(response, "content", response)).strip()
@@ -170,19 +179,24 @@ def _infer_writer_persona(plan: ResearchPlan, planner: Any) -> ResearchPlan:
     Falls back silently — synthesis works fine with the default persona.
     """
     branch_titles = ", ".join(b.title for b in plan.branches[:6])
-    prompt = f"""Given this research question and its planned branches, write a single sentence describing the ideal expert who should write the final report.
+    prompt = f"""Analyze the following scope to determine the ideal drafting profile.
 
-The sentence must:
-- Name the domain/field (e.g. "senior health policy analyst", "systems architect", "financial economist")
-- Specify the audience framing (e.g. "for a policy-informed technical audience", "for practitioners")
-- Sound like a role briefing, not a job posting
-
+<SCOPE>
 User question:
 {plan.question[:600]}
 
-Research branches: {branch_titles}
+Research branches:
+{branch_titles}
+</SCOPE>
 
-Return ONLY the one-sentence persona. No JSON, no extra text, no quotes."""
+Task: Write a single sentence briefing that establishes the expert identity for drafting the final report.
+
+The sentence must:
+1. Name the domain or field.
+2. Define the audience framing.
+3. Read like an internal role briefing, not a job posting.
+
+Return exactly one raw sentence. Do not wrap in quotes. Do not add JSON or introductory phrases."""
     try:
         response = planner.invoke([HumanMessage(content=prompt)])
         persona = str(getattr(response, "content", response)).strip().strip('"').strip("'")
@@ -251,18 +265,20 @@ def _planning_prompt(base_plan: ResearchPlan, *, planning_guidance: str = "") ->
     }
     return f"""You are the planning node in a deep research graph.
 
-Infer a domain-specific research plan from the user's exact request. Do not use a fixed template. Do not expose reasoning.
+Analyze the provided user request and execution context to synthesize a custom, domain-specific research plan. Do not use a fixed template. Do not expose reasoning.
 
+<CONTEXT>
 User request:
 {base_plan.question}
 
 Additional task-specific guidance, if any:
 {planning_guidance.strip()[:8000] if planning_guidance.strip() else "None"}
 
-Baseline constraints:
+Deterministic baseline constraints:
 {json.dumps(baseline, ensure_ascii=True)}
+</CONTEXT>
 
-Return exactly one JSON object:
+Return exactly one valid JSON object matching this schema:
 {{
   "audience": "specific intended reader",
   "report_outline": ["section heading"],
@@ -274,7 +290,7 @@ Return exactly one JSON object:
     {{
       "title": "specific branch title",
       "objective": "what this branch must learn",
-      "queries": ["search query tailored to this branch"],
+      "queries": ["search query tailored to this branch to help the researcher find relevant sources"],
       "source_types": ["academic", "official_docs", "general_web"],
       "min_sources": 3,
       "required_terms": ["semantic coverage point"],
@@ -283,7 +299,7 @@ Return exactly one JSON object:
   ]
 }}
 
-Hard requirements:
+Critical directions:
 - Create only as many branches as the request and task-specific guidance semantically require.
 - A narrow single-question prompt may be one branch; multi-part or criteria-rich prompts should become multiple branches.
 - Never pad the plan with duplicate, generic, or loosely related branches.
@@ -296,6 +312,8 @@ Hard requirements:
 - Required terms should describe meaning to cover, not exact words to force.
 - Keep the plan proportional to the prompt. Include only branches that are directly necessary to answer the user's wording.
 - Do not add medical, legal, financial, or software assumptions unless the request implies them.
+- For comparison or ranking requests, include the comparison dimensions and evidence requirements needed to compare options fairly.
+- For contradiction-heavy requests, include at least one branch or query angle that can find limitations, exceptions, or opposing evidence.
 - JSON only.
 """
 

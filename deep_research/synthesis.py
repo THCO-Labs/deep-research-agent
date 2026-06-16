@@ -11,8 +11,15 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from deep_research.model_router import model_for_role
+from deep_research.context_builder import format_knowledge_packets_for_prompt
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, SourceRecordV2
 from deep_research.settings import GOOGLE_DEFAULT_MODEL, Settings
+from deep_research.section_writing import (
+    AdaptiveSectionPlan,
+    build_adaptive_section_plan,
+    format_section_plan_for_prompt,
+    refine_section_plan_from_payload,
+)
 from deep_research.source_validation import content_terms
 from deep_research.synthesis_refinement import (
     _build_argumentative_outline,
@@ -288,6 +295,8 @@ def synthesize_report_with_model(
     verification_failures: list[str] | None = None,
     blueprint: dict[str, Any] | None = None,
     sentence_plan: dict[str, Any] | None = None,
+    section_plan: AdaptiveSectionPlan | dict[str, Any] | None = None,
+    knowledge_base: dict[str, Any] | None = None,
     writing_guidance: str = "",
 ) -> str:
     if not evidence_cards:
@@ -307,6 +316,23 @@ def synthesize_report_with_model(
         evidence_cards=synthesis_cards,
         coverage=coverage,
         sources=evidence_sources,
+    )
+    report_section_plan = section_plan or build_adaptive_section_plan(
+        plan=plan,
+        evidence_cards=synthesis_cards,
+        coverage=coverage,
+        sources=evidence_sources,
+    )
+    report_section_plan = _refine_section_plan_with_model(
+        model=model,
+        plan=plan,
+        evidence_cards=synthesis_cards,
+        coverage=coverage,
+        sources=evidence_sources,
+        base_section_plan=report_section_plan,
+        settings=settings,
+        model_spec=model_spec,
+        writing_guidance=writing_guidance,
     )
     target_profile = _target_report_profile(
         plan=plan,
@@ -334,6 +360,8 @@ def synthesize_report_with_model(
         verification_failures=verification_failures or [],
         blueprint=report_blueprint,
         sentence_plan=sentence_plan,
+        section_plan=report_section_plan,
+        knowledge_base=knowledge_base,
         writing_guidance=writing_guidance,
         argumentative_outline=outline,
     )
@@ -473,6 +501,8 @@ def _synthesis_prompt(
     verification_failures: list[str],
     blueprint: dict[str, Any] | None = None,
     sentence_plan: dict[str, Any] | None = None,
+    section_plan: AdaptiveSectionPlan | dict[str, Any] | None = None,
+    knowledge_base: dict[str, Any] | None = None,
     writing_guidance: str = "",
     argumentative_outline: dict[str, str] | None = None,
 ) -> str:
@@ -579,6 +609,14 @@ def _synthesis_prompt(
         )
     synthesis_frame_text = "\n".join(synthesis_frame_lines) or "None"
     sentence_plan_text = _format_sentence_plan_for_prompt(content_plan)
+    report_section_plan = section_plan or build_adaptive_section_plan(
+        plan=plan,
+        evidence_cards=evidence_cards,
+        coverage=coverage,
+        sources=sources,
+    )
+    section_plan_text = format_section_plan_for_prompt(report_section_plan)
+    knowledge_packet_text = format_knowledge_packets_for_prompt(knowledge_base or {})
     minimum_ledger_claims = min(28, int(claim_ledger["claim_count"]))
     return f"""{persona_line}
 
@@ -631,6 +669,12 @@ Safe synthesis moves:
 Sentence-level content plan:
 {sentence_plan_text}
 
+Adaptive section contracts - internal controls, not mandatory visible headings:
+{section_plan_text}
+
+Knowledge-base section packets - durable workspace notes distilled from evidence:
+{knowledge_packet_text}
+
 Allowed source IDs and titles:
 {source_lines}
 
@@ -657,11 +701,16 @@ Hard requirements:
 - Answer the exact user question in the first substantive paragraph, using the opening-answer evidence priority.
 - Use only the evidence cards above; every factual paragraph needs inline source citations like [3].
 - Use the claim ledger as factual ground, not as a cage: write a complete literature-review argument, but every cited factual sentence must be traceable to one or more ledger entries. Do not print claim IDs in the report.
-- Follow the sentence-level content plan for the report's factual moves. You may merge adjacent planned points into polished paragraphs, but do not introduce new factual claims outside the sentence plan or claim ledger.
+- Use the sentence-level content plan as a guide for the report's factual moves, but prioritize readability, smooth transitions, and natural prose. You may merge or reorder adjacent points to construct cohesive paragraphs, provided all factual claims remain anchored to the claim ledger.
+- Use the knowledge-base packets to keep each section focused; they summarize what the durable workspace knows, but citations still must come from evidence cards and allowed source IDs.
+- Use the reasoning brief inside the knowledge-base packets as a visible control layer: caveat weak claims, mention unresolved contradictions/tensions when relevant, and avoid confident wording for branches marked unknown or low-confidence.
+- If the reasoning brief lists contradiction/tension items, incorporate the caveat in the relevant analytical section using only evidence-backed source IDs; do not add unsupported outside facts.
+- If weak claims remain in the reasoning brief, either strengthen them with directly supporting evidence cards or write them as limitations/uncertainties rather than settled conclusions.
 - When the ledger contains enough material, draw on at least {minimum_ledger_claims} distinct ledger claims across the report, distributed across the section-level claim plan.
 - Cite source IDs only, never evidence-card IDs, and cite at least {required_source_breadth} distinct evidence-backed sources when available.
 - Depth target: {target_depth_hint}
 - Cover the branches, acceptance criteria, and depth profile as report coverage requirements, but do not print them as checklists.
+- Follow the adaptive section contracts as quality gates while choosing natural question-specific headings; do not make the report look templated.
 - Use natural question-specific headings and polished analytical prose; synthesize across sources instead of dumping evidence cards.
 - Define central constructs, explain mechanisms and trade-offs, compare evidence strength/tensions, and state limitations or unresolved questions when supported.
 - Keep the title, opening, and body centered on the requested scope; ignore any previous-draft drift.
@@ -678,9 +727,125 @@ CITATION GROUNDING — STRICT RULES (each violation makes the report fail verifi
 - Never cite a source for a claim that is more specific than what its card's excerpt or claim field actually says. If the card says "AI investment is significant" and you write "Accenture invested $3 billion in AI", do NOT cite that card for the $3 billion figure.
 - When a sentence has no card that directly supports it, write it without a citation (mark as "synthesis" or general framing) rather than padding with a loosely related citation.
 
-VERBATIM SOURCE GROUNDING — for specific facts:
-- When you state a specific fact (any number, dollar amount, percentage, year, count, named-entity attribute like "Accenture's headcount", or a notable quote), DRAW THE PHRASING FROM THE EVIDENCE CARD'S EXCERPT FIELD, which is verbatim text from the source URL. Use the same key tokens — names, numbers, percentages, units — exactly as they appear in the excerpt.
-- This does NOT mean copy-paste long passages. It means: if the excerpt says "Square reported revenue of $19.7 billion in 2023", and you want to cite this, write "Square reported $19.7 billion in 2023 revenue [3]" — not "Square earned billions in recent years [3]" (too vague), and not "Square's 2023 revenue was approximately $20 billion [3]" (you rounded — the URL says $19.7 billion).
-- If an excerpt's phrasing is ambiguous or only partly answers your sentence, either (a) use the excerpt's exact wording and adjust your sentence around it, or (b) skip the citation and rephrase to a softer general claim.
-- This rule directly improves FACT-pipeline citation accuracy because a fresh scrape of the URL will find your phrasing in it.
+SOURCE GROUNDING — for specific facts:
+- When you state a specific fact (such as a number, dollar amount, percentage, year, count, or named-entity attribute), ensure it matches the evidence card's data exactly. Maintain accuracy in all numbers and names.
+- Write your sentences in a natural, cohesive, and professional style rather than copying verbatim text fragments or creating robotic sentence structures. Clear synthesis across multiple facts is highly encouraged.
 """
+
+
+def _refine_section_plan_with_model(
+    *,
+    model: BaseChatModel,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    coverage: CoverageMatrix,
+    sources: list[SourceRecordV2],
+    base_section_plan: AdaptiveSectionPlan | dict[str, Any],
+    settings: Settings,
+    model_spec: str,
+    writing_guidance: str,
+) -> AdaptiveSectionPlan | dict[str, Any]:
+    if not evidence_cards:
+        return base_section_plan
+    base_plan = (
+        base_section_plan
+        if isinstance(base_section_plan, AdaptiveSectionPlan)
+        else build_adaptive_section_plan(plan=plan, evidence_cards=evidence_cards, coverage=coverage, sources=sources)
+    )
+    prompt = _section_plan_refinement_prompt(
+        plan=plan,
+        evidence_cards=evidence_cards,
+        base_section_plan=base_plan,
+        writing_guidance=writing_guidance,
+    )
+    try:
+        response = _invoke_with_synthesis_budget(model, prompt=prompt, settings=settings, model_spec=model_spec)
+        payload = _loads_json_object(str(response.content))
+    except Exception:
+        return base_section_plan
+    return refine_section_plan_from_payload(base_plan, payload, evidence_cards=evidence_cards, sources=sources)
+
+
+def _section_plan_refinement_prompt(
+    *,
+    plan: ResearchPlan,
+    evidence_cards: list[EvidenceCard],
+    base_section_plan: AdaptiveSectionPlan,
+    writing_guidance: str,
+) -> str:
+    branch_lines = "\n".join(
+        f"- {branch.id}: {branch.title}; objective: {branch.objective}"
+        for branch in plan.branches
+    )
+    card_lines = "\n".join(
+        f"- card {card.id}; source [{card.source_id}]; branch {card.branch_id}; claim: {card.claim[:220]}"
+        for card in evidence_cards[:80]
+    )
+    return f"""You are designing the internal section contracts for a deep research report.
+
+Do not write the report. Improve the section contracts so the final report can be natural, non-template, and question-specific.
+
+Rules:
+- You may rename, merge, split, or reorder section contracts when it improves the report.
+- Do not force fixed headings such as Executive Summary, Background, Analysis, Recommendation unless the question truly needs them.
+- Do not invent evidence_card_ids or source_ids. Use only IDs listed below.
+- Every section should have enough source_ids to be auditable.
+- Return JSON only, no markdown.
+
+Question:
+{plan.question}
+
+Branches:
+{branch_lines}
+
+Acceptance criteria:
+{json_dumps({"criteria": plan.acceptance_criteria[:12]})}
+
+Additional writing guidance:
+{writing_guidance.strip()[:1800] if writing_guidance.strip() else "None"}
+
+Base deterministic section plan:
+{json_dumps(base_section_plan.to_dict())}
+
+Available evidence cards:
+{card_lines}
+
+Return this schema:
+{{
+  "report_mode": "short adaptive mode label",
+  "structure_style": "short phrase describing the natural report flow",
+  "sections": [
+    {{
+      "id": "stable_snake_case_id",
+      "title_hint": "natural title hint, not mandatory visible text",
+      "role": "answer_frame|analysis_body|decision_dimension|mechanism|evidence_body|risk_or_limit|cross_source_synthesis",
+      "purpose": "what this section must accomplish",
+      "branch_ids": ["branch id"],
+      "required_terms": ["term"],
+      "acceptance_criteria": ["criterion"],
+      "evidence_card_ids": [1],
+      "source_ids": [1],
+      "writing_task": "specific instruction for this section",
+      "quality_gates": ["gate"]
+    }}
+  ]
+}}
+"""
+
+
+def _loads_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        payload = json.loads(cleaned[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("section plan refinement did not return a JSON object")
+    return payload

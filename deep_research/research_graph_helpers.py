@@ -228,6 +228,36 @@ def _write_run_health(
         "best_draft_valid": metrics.get("best_draft_valid"),
         "best_draft_quality_score": metrics.get("best_draft_quality_score"),
         "best_draft_quality_scores": metrics.get("best_draft_quality_scores"),
+        "section_audit_all_locked": metrics.get("section_audit_all_locked"),
+        "section_audit_locked_count": metrics.get("section_audit_locked_count"),
+        "section_audit_section_count": metrics.get("section_audit_section_count"),
+        "section_audit_llm_review_applied": metrics.get("section_audit_llm_review_applied"),
+        "knowledge_context_refinement_applied": metrics.get("knowledge_context_refinement_applied"),
+        "knowledge_context_refinement_reason": metrics.get("knowledge_context_refinement_reason"),
+        "knowledge_context_refinement_history": metrics.get("knowledge_context_refinement_history"),
+        "knowledge_context_section_packets": metrics.get("knowledge_context_section_packets"),
+        "reasoning_decision": metrics.get("reasoning_decision"),
+        "reasoning_iteration_count": metrics.get("reasoning_iteration_count"),
+        "reasoning_weak_claim_count": metrics.get("reasoning_weak_claim_count"),
+        "reasoning_unknown_count": metrics.get("reasoning_unknown_count"),
+        "reasoning_contradiction_count": metrics.get("reasoning_contradiction_count"),
+        "reasoning_model_refinement_applied": metrics.get("reasoning_model_refinement_applied"),
+        "reasoning_model_refinement_reason": metrics.get("reasoning_model_refinement_reason"),
+        "search_intent_count": metrics.get("search_intent_count"),
+        "search_intent_model_applied": metrics.get("search_intent_model_applied"),
+        "search_intent_generation_reason": metrics.get("search_intent_generation_reason"),
+        "search_intent_result_count": metrics.get("search_intent_result_count"),
+        "search_intent_satisfied_count": metrics.get("search_intent_satisfied_count"),
+        "search_intent_result_model_applied": metrics.get("search_intent_result_model_applied"),
+        "replan_iteration_count": metrics.get("replan_iteration_count"),
+        "plan_revision_count": metrics.get("plan_revision_count"),
+        "source_policy_label": metrics.get("source_policy_label"),
+        "best_section_count": metrics.get("best_section_count"),
+        "locked_best_section_count": metrics.get("locked_best_section_count"),
+        "assembled_best_report_usable": metrics.get("assembled_best_report_usable"),
+        "assembled_best_report_reason": metrics.get("assembled_best_report_reason"),
+        "assembled_best_report_section_count": metrics.get("assembled_best_report_section_count"),
+        "assembled_best_report_locked_count": metrics.get("assembled_best_report_locked_count"),
         "draft_history": draft_history,
         "source_count": metrics.get("source_count"),
         "candidate_count": metrics.get("candidate_count_total", metrics.get("candidate_count")),
@@ -259,6 +289,15 @@ def _next_indexed_file(artifacts: ResearchArtifactsV2, glob_pattern: str) -> int
 def _coverage_route(state: ResearchState) -> str:
     coverage = state.get("coverage_matrix", {})
     metrics = state.get("metrics", {})
+    reasoning = state.get("reasoning_decision", {})
+    if (
+        reasoning.get("action") == "search_more"
+        and _reasoning_budget_available(metrics)
+        and _reasoning_search_more_available(metrics)
+    ):
+        return "more_sources"
+    if reasoning.get("action") == "synthesize" and state.get("evidence_cards"):
+        return "synthesize"
     if coverage.get("complete"):
         return "synthesize"
     if not state.get("evidence_cards") and _no_evidence_acquisition_stalled(metrics):
@@ -285,6 +324,42 @@ def _coverage_route(state: ResearchState) -> str:
     if search_count >= int(metrics.get("max_search_queries", 10_000) or 10_000):
         return "synthesize" if partial_ready or exhausted_ready else "finish"
     return "synthesize" if partial_ready or exhausted_ready else "finish"
+
+
+def _reasoning_route(state: ResearchState) -> str:
+    decision = state.get("reasoning_decision", {})
+    metrics = state.get("metrics", {})
+    if (
+        decision.get("action") == "search_more"
+        and _reasoning_budget_available(metrics)
+        and _reasoning_search_more_available(metrics)
+    ):
+        return "search_intents"
+    if (
+        decision.get("action") == "contradiction_search"
+        and _reasoning_budget_available(metrics)
+        and int(metrics.get("contradiction_search_iterations", 0) or 0) < 1
+    ):
+        return "contradiction_search"
+    return "continue"
+
+
+def _reasoning_budget_available(metrics: dict[str, Any]) -> bool:
+    iteration_count = int(metrics.get("reasoning_iteration_count", 0) or 0)
+    max_iterations = int(metrics.get("max_reasoning_iterations", 3) or 3)
+    return iteration_count <= max_iterations
+
+
+def _reasoning_search_more_available(metrics: dict[str, Any]) -> bool:
+    if metrics.get("acquisition_time_budget_exhausted"):
+        return False
+    search_count = int(metrics.get("search_count", 0) or 0)
+    max_search_queries = int(metrics.get("max_search_queries", 10_000) or 10_000)
+    candidate_count = int(metrics.get("candidate_count_total", metrics.get("candidate_count", 0)) or 0)
+    max_candidates = int(metrics.get("max_candidates", 0) or 0)
+    if max_candidates > 0 and candidate_count >= max_candidates:
+        return False
+    return search_count < max_search_queries
 
 
 def _partial_coverage_ready_for_synthesis(state: ResearchState) -> bool:
@@ -352,7 +427,14 @@ def _resume_entry_point(state: ResearchState) -> str:
         "build_evidence": "evidence_hygiene",
         "evidence_hygiene": "semantic_enrichment",
         "semantic_enrichment_partial": "semantic_enrichment",
-        "semantic_enrichment": "check_coverage",
+        "semantic_enrichment": "build_evidence_graph",
+        "build_evidence_graph": "evaluate_search_intents",
+        "evaluate_search_intents": "update_reasoning_state",
+        "update_reasoning_state": "replan_from_reasoning",
+        "replan_from_reasoning": "decide_next_action",
+        "decide_next_action": "check_coverage",
+        "generate_search_intents": "acquire_sources",
+        "prepare_contradiction_search": "acquire_sources",
         "check_coverage": "check_coverage",
         "synthesize": "verify",
         "verify": "verify",
@@ -363,6 +445,8 @@ def _resume_entry_point(state: ResearchState) -> str:
 
 def _acquire_route(state: ResearchState) -> str:
     metrics = state.get("metrics", {})
+    if int(metrics.get("last_acquire_added_sources", 0) or 0) > 0:
+        return "read_sources"
     if _source_acquisition_plateaued(metrics) and state.get("evidence_cards"):
         return "reuse_evidence"
     return "read_sources"
@@ -423,12 +507,6 @@ def _verification_route(state: ResearchState) -> str:
     draft_history = [entry for entry in metrics.get("draft_history", []) if isinstance(entry, dict)]
     if _repair_fall_count(failure_history, draft_history) >= 2:
         return "finish"
-    improving = (
-        len(draft_history) >= 2
-        and _draft_quality_improved(draft_history[-2], draft_history[-1])
-        and len(failure_history) >= 2
-        and failure_history[-1] < failure_history[-2]
-    )
     hard_round_cap = max(max_rounds, MAX_IMPROVING_VERIFICATION_ROUNDS)
     if rounds >= hard_round_cap:
         return "finish"
@@ -476,6 +554,12 @@ def _verification_route(state: ResearchState) -> str:
 def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
     coverage = state.get("coverage_matrix", {})
     focus: dict[str, list[str]] = {}
+    reasoning_focus = state.get("reasoning_focus_terms", {})
+    if isinstance(reasoning_focus, dict):
+        for branch_id, terms in reasoning_focus.items():
+            cleaned = _clean_focus_terms(list(terms) if isinstance(terms, list) else [terms])
+            if cleaned:
+                focus[str(branch_id)] = cleaned
     missing_branch_ids = {str(branch_id) for branch_id in coverage.get("missing_branches", [])}
     for row in coverage.get("branches", []):
         if row.get("complete"):
@@ -489,7 +573,8 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
                     terms = _clean_focus_terms(list(branch.get("required_terms", [])) or terms)
                     break
         if branch_id and terms:
-            focus[branch_id] = terms
+            focus.setdefault(branch_id, [])
+            focus[branch_id].extend(terms)
     verification = state.get("verification", {})
     failures = " ".join(str(failure).lower() for failure in verification.get("failures", []))
     if "answer coverage" in failures or "source quality" in failures or "weakly supported" in failures:
@@ -498,7 +583,8 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
             branch_id = str(branch.get("id", ""))
             terms = _clean_focus_terms(list(branch.get("required_terms", [])))
             if branch_id and terms:
-                focus.setdefault(branch_id, terms)
+                focus.setdefault(branch_id, [])
+                focus[branch_id].extend(terms)
     semantic = verification.get("semantic_verification", {})
     semantic_focus = list(semantic.get("search_focus", [])) + list(semantic.get("missing_context", []))
     if semantic_focus:
@@ -517,7 +603,8 @@ def _focus_terms_from_state(state: ResearchState) -> dict[str, list[str]]:
                     + [branch.get("title", ""), branch.get("objective", "")]
                 )
                 if terms:
-                    focus[branch_id] = terms
+                    focus.setdefault(branch_id, [])
+                    focus[branch_id].extend(terms)
     return {branch_id: _dedupe_focus_terms(terms) for branch_id, terms in focus.items() if terms}
 
 
@@ -549,6 +636,19 @@ def _synthesis_repair_guidance_from_state(state: ResearchState) -> list[str]:
 
 
 def _active_branch_ids_from_state(state: ResearchState) -> set[str] | None:
+    reasoning = state.get("reasoning_decision", {})
+    if reasoning.get("action") == "search_more":
+        intent_branch_ids = {
+            str(row.get("branch_id") or "")
+            for row in state.get("search_intents", []) or []
+            if isinstance(row, dict) and str(row.get("branch_id") or "").strip()
+        }
+        if intent_branch_ids:
+            return intent_branch_ids
+    if reasoning.get("action") in {"search_more", "contradiction_search"}:
+        branch_ids = {str(branch_id) for branch_id in reasoning.get("branch_ids", []) if str(branch_id).strip()}
+        if branch_ids:
+            return branch_ids
     coverage = state.get("coverage_matrix", {})
     if not coverage or coverage.get("complete"):
         return None
@@ -615,11 +715,6 @@ def _with_checkpoint(
 def _plan_from_state(state: ResearchState) -> ResearchPlan:
     payload = dict(state.get("plan") or {})
     branches = [_branch_from_dict(row) for row in payload.get("branches", [])]
-    requirements = [
-        requirement
-        for requirement in payload.get("source_requirements", [])
-        if isinstance(requirement, dict)
-    ]
     return ResearchPlan(
         question=str(payload.get("question") or state.get("request", {}).get("question") or ""),
         intent=payload.get("intent", "general"),
@@ -655,6 +750,8 @@ def _candidate_from_dict(payload: dict[str, Any]) -> SourceCandidate:
         search_score=payload.get("search_score"),
         raw_content=payload.get("raw_content"),
         provenance=payload.get("provenance", "web"),
+        search_intent_id=str(payload.get("search_intent_id", "")),
+        search_intent_goal=str(payload.get("search_intent_goal", "")),
     )
 
 

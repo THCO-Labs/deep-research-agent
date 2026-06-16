@@ -316,7 +316,6 @@ def _build_argumentative_outline(
     into the main synthesis prompt so the writer has argumentative direction, not just
     a coverage checklist. Falls back silently to an empty dict on any error.
     """
-    source_lookup = {source.id: source for source in sources}
     cards_by_branch: dict[str, list[EvidenceCard]] = {}
     for card in evidence_cards:
         cards_by_branch.setdefault(card.branch_id, []).append(card)

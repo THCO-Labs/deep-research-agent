@@ -24,6 +24,7 @@ except Exception:
 from deep_research.artifacts_v2 import ResearchArtifactsV2
 from deep_research.errors import classify_exception
 from deep_research.ingestion import IngestedDocument
+from deep_research.search_intents import SearchIntent
 from deep_research.schemas import ResearchBranch, SourceCandidate, SourceRecordV2
 from deep_research.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
 from deep_research.source_limits import MAX_TAVILY_RESULTS_PER_QUERY, MINIMUM_SOURCE_TARGET, source_floor
@@ -220,6 +221,7 @@ def acquire_sources(
     searched_queries: set[str] | None = None,
     focus_terms_by_branch: dict[str, list[str]] | None = None,
     active_branch_ids: set[str] | None = None,
+    search_intents: list[SearchIntent] | None = None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     mid_checkpoint_callback: Callable[[list[SourceCandidate], list[SourceRecordV2]], None] | None = None,
 ) -> AcquisitionResult:
@@ -252,6 +254,12 @@ def acquire_sources(
             source_floor(explicit_max_sources),
             required_branch_sources,
         )
+    search_intents_by_branch = _search_intents_by_branch(search_intents or [])
+    if search_intents_by_branch and existing_sources:
+        max_sources = max(max_sources, len(existing_sources) + max(4, len(search_intents_by_branch) * 2))
+    elif focus_terms_by_branch and existing_sources:
+        focused_branch_count = len(set(focus_terms_by_branch))
+        max_sources = max(max_sources, len(existing_sources) + max(4, focused_branch_count * 2))
     max_candidates = max(max_candidates, max_sources)
     candidates: list[SourceCandidate] = list(existing_candidates or [])
     sources: list[SourceRecordV2] = list(existing_sources or [])
@@ -312,16 +320,22 @@ def acquire_sources(
         branch_source_count = sum(1 for source in sources if source.branch_id == branch.id)
         branch_candidate_count = branch_candidate_counts.get(branch.id, 0)
         forced_terms = focus_terms_by_branch.get(branch.id, [])
-        coverage_followup = active_branch_ids is not None and branch.id in active_branch_ids
+        branch_intents = search_intents_by_branch.get(branch.id, [])
+        coverage_followup = active_branch_ids is not None and branch.id in active_branch_ids and not branch_intents
         if branch_candidate_count >= max_candidates:
             continue
-        if branch_source_count >= branch.min_sources and not forced_terms and not coverage_followup:
+        if branch_source_count >= branch.min_sources and not forced_terms and not coverage_followup and not branch_intents:
             continue
-        branch_queries = _branch_queries(
-            branch,
-            forced_terms or (branch.required_terms if coverage_followup else []),
-            question,
-        )
+        if branch_intents:
+            branch_queries = [intent.query for intent in branch_intents]
+            intent_by_query = {intent.query: intent for intent in branch_intents}
+        else:
+            branch_queries = _branch_queries(
+                branch,
+                forced_terms or (branch.required_terms if coverage_followup else []),
+                question,
+            )
+            intent_by_query = {}
         branch_query_limit = int(getattr(settings, "max_followup_queries_per_branch", 12) or 12)
         searched_for_branch = 0
         for query in branch_queries:
@@ -332,6 +346,7 @@ def acquire_sources(
             if branch_candidate_count >= max_candidates or len(sources) >= max_sources:
                 break
             query = _trim_search_query(query)
+            search_intent = intent_by_query.get(query)
             if query in searched:
                 continue
             searched.add(query)
@@ -453,6 +468,8 @@ def acquire_sources(
                     search_score=_float_or_none(item.get("score")),
                     raw_content=candidate_raw,
                     provenance="web",
+                    search_intent_id=search_intent.id if search_intent else "",
+                    search_intent_goal=search_intent.expected_evidence if search_intent else "",
                 )
                 next_candidate_id += 1
                 candidates.append(candidate)
@@ -493,6 +510,16 @@ def acquire_sources(
                         searches=metrics.search_count,
                     )
                     continue
+                if search_intent:
+                    record.source.metadata.update(
+                        {
+                            "search_intent_id": search_intent.id,
+                            "search_intent_gap": search_intent.gap,
+                            "search_intent_expected_evidence": search_intent.expected_evidence,
+                            "search_intent_success_criteria": search_intent.success_criteria,
+                            "search_intent_source_preference": search_intent.source_preference,
+                        }
+                    )
                 sources.append(record.source)
                 source_texts[record.source.id] = record.text
                 _emit_progress(
@@ -535,6 +562,15 @@ def _emit_progress(
     if callback is None:
         return
     callback(message, data)
+
+
+def _search_intents_by_branch(intents: list[SearchIntent]) -> dict[str, list[SearchIntent]]:
+    by_branch: dict[str, list[SearchIntent]] = {}
+    for intent in intents:
+        if not intent.branch_id or not intent.query:
+            continue
+        by_branch.setdefault(intent.branch_id, []).append(intent)
+    return by_branch
 
 
 @dataclass(frozen=True)
@@ -1047,28 +1083,35 @@ def _search_with_duckduckgo(query: str, *, max_results: int) -> list[dict[str, A
 def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: str) -> list[str]:
     if not forced_terms:
         return branch.queries
-    terms = _dedupe([term for term in forced_terms if term])[:12]
+    direct_queries = [
+        str(term).split(":", 1)[1].strip()
+        for term in forced_terms
+        if str(term).lower().startswith("search_query:") and str(term).split(":", 1)[1].strip()
+    ]
+    terms = _dedupe(
+        [term for term in forced_terms if term and not str(term).lower().startswith("search_query:")]
+    )[:12]
     focus = " ".join(terms).strip()
-    followups = list(branch.queries)
+    followups = _dedupe(direct_queries) + list(branch.queries)
     if focus:
         followups.extend(
             [
-                f"{question} {branch.title} {focus}",
-                f"{branch.title} {focus} evidence review findings",
-                f"{branch.title} {focus} mechanisms context limitations",
-                f"{branch.objective} {focus} empirical evidence",
+                f"{branch.title} {focus}",
+                f"{branch.objective} {focus}",
+                f"{focus} evidence",
+                f"{focus} limitations",
             ]
         )
     for term in terms:
         followups.extend(
             [
-                f"{question} {term}",
                 f"{branch.title} {term} evidence",
                 f"{branch.objective} {term}",
+                f"{term} empirical evidence",
             ]
         )
     for index in range(0, max(0, len(terms) - 1), 2):
-        followups.append(f"{question} {terms[index]} {terms[index + 1]}")
+        followups.append(f"{terms[index]} {terms[index + 1]} evidence")
     return followups
 
 

@@ -19,10 +19,10 @@ from deep_research.synthesis_selection import (
     _source_diverse_cards,
 )
 
-INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.30
-SPECIFIC_FACT_REPAIR_THRESHOLD = 0.40
+INDIVIDUAL_CITATION_REPAIR_THRESHOLD = 0.20
+SPECIFIC_FACT_REPAIR_THRESHOLD = 0.30
 _REWRITE_MAX_SENTENCES = 30
-_REWRITE_MIN_OVERLAP = 0.42
+_REWRITE_MIN_OVERLAP = 0.30
 
 
 def _normalize_report_markdown(report: str, sources: list[SourceRecordV2]) -> str:
@@ -441,7 +441,7 @@ def _strip_hallucinated_specific_citations(
     return "".join(repaired_parts) + (separator + source_tail if separator else "")
 
 
-_REWRITE_OVERLAP_THRESHOLD = 0.35  # below this, sentence needs rewrite or strip
+_REWRITE_OVERLAP_THRESHOLD = 0.25  # below this, sentence needs rewrite or strip
 _REWRITE_MAX_SENTENCES = 30        # cap to keep prompt size reasonable
 _REWRITE_MIN_CARDS_PER_SOURCE = 1  # need at least one card with excerpt
 

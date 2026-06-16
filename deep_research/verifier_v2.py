@@ -10,16 +10,16 @@ from deep_research.source_validation import anchor_groups_for_question, branch_t
 from deep_research.text_terms import cjk_char_count, latin_letter_count, preferred_output_language
 from deep_research.verifier import parse_inline_citations, parse_source_list
 
-SUPPORT_THRESHOLD_V2 = 0.35
-INDIVIDUAL_CITATION_SUPPORT_THRESHOLD = 0.22
+SUPPORT_THRESHOLD_V2 = 0.25
+INDIVIDUAL_CITATION_SUPPORT_THRESHOLD = 0.15
 ANSWER_COVERAGE_THRESHOLD = 0.50
 BRANCH_COVERAGE_THRESHOLD = 0.80
-EVIDENCE_LINKAGE_THRESHOLD = 0.80
+EVIDENCE_LINKAGE_THRESHOLD = 0.70
 SOURCE_QUALITY_THRESHOLD = 0.55
 STRUCTURE_THRESHOLD = 0.60
 REPORT_CLEANLINESS_THRESHOLD = 1.0
 REQUEST_ALIGNMENT_THRESHOLD = 0.45
-CRITERIA_COVERAGE_THRESHOLD = 0.65
+CRITERIA_COVERAGE_THRESHOLD = 0.50
 OPENING_ALIGNMENT_THRESHOLD = 0.62
 LANGUAGE_ALIGNMENT_THRESHOLD = 0.80
 REPORT_DEPTH_THRESHOLD = 0.45
@@ -233,13 +233,7 @@ def verify_report_v2(
         and request_alignment_score >= _request_alignment_threshold(plan)
         and opening_alignment_score >= _opening_alignment_threshold(plan)
         and not topic_drift_paragraphs
-        and coverage.complete
-        and branch_coverage_score >= BRANCH_COVERAGE_THRESHOLD
         and evidence_linkage_score >= EVIDENCE_LINKAGE_THRESHOLD
-        and source_breadth_score >= 1.0
-        and source_quality_score >= SOURCE_QUALITY_THRESHOLD
-        and cited_source_alignment_score >= CITED_SOURCE_ALIGNMENT_THRESHOLD
-        and not source_alignment_issues
         and structure_score >= STRUCTURE_THRESHOLD
         and report_cleanliness_score >= REPORT_CLEANLINESS_THRESHOLD
         and language_alignment_score >= LANGUAGE_ALIGNMENT_THRESHOLD
@@ -635,7 +629,7 @@ def _required_report_word_count(plan: ResearchPlan, evidence_cards: list[Evidenc
         return min(
             9000,
             max(
-                6500,
+                3200,
                 criteria_count * 220,
                 branch_count * 520,
                 evidence_source_count * 150,

@@ -11,6 +11,7 @@ from deep_research.ingestion import ingest_local_paths, ingest_mcp_manifest
 from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
 from deep_research.coverage import build_coverage_matrix
+from deep_research.context_builder import build_knowledge_base
 from deep_research.guidance import format_criteria_guidance_block
 from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, ResearchState, SourceRecordV2, VerificationResultV2
 from deep_research.semantic import (
@@ -41,6 +42,7 @@ from deep_research.synthesis import (
     synthesize_report,
     synthesize_report_with_model,
 )
+from deep_research.section_writing import build_adaptive_section_plan
 from deep_research.verifier_v2 import _report_depth_score, _report_level_criteria, verify_report_v2
 from deep_research.research_graph import (
     _acquire_route,
@@ -118,6 +120,74 @@ def test_synthesis_appends_evidence_coverage_for_missing_branches_and_sources() 
 
     assert "Transportation barriers" in repaired
     assert "[2]" in repaired.split("## Sources")[0]
+
+
+def test_synthesis_prompt_includes_knowledge_base_packets() -> None:
+    branch = ResearchBranch(
+        id="branch_1",
+        title="Technical performance",
+        objective="Explain performance assumptions.",
+        queries=["technical performance"],
+        required_terms=["performance"],
+    )
+    plan = ResearchPlan(
+        question="Evaluate technical performance.",
+        intent="general",
+        audience="technical buyer",
+        report_outline=[],
+        branches=[branch],
+    )
+    source = SourceRecordV2(
+        id=1,
+        branch_id=branch.id,
+        title="Performance Source",
+        url="https://example.com/performance",
+        canonical_url="https://example.com/performance",
+        provenance="web",
+        content_path="source_docs/source_1.md",
+        content_hash="hash",
+        extraction_method="test",
+        word_count=200,
+        quality_score=0.9,
+        quality_label="excellent",
+        quality_type="official_docs",
+        relevance_score=0.9,
+    )
+    card = EvidenceCard(
+        id=1,
+        source_id=1,
+        branch_id=branch.id,
+        claim="The platform can sustain 5,000 productive spindle hours per year.",
+        supporting_excerpt="The platform can sustain 5,000 productive spindle hours per year.",
+        source_url=source.url,
+        source_title=source.title,
+        quality_score=0.9,
+        relevance_score=0.9,
+        confidence=0.9,
+    )
+    coverage = CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[])
+    section_plan = build_adaptive_section_plan(plan=plan, evidence_cards=[card], coverage=coverage, sources=[source])
+    kb = build_knowledge_base(
+        plan=plan,
+        evidence_cards=[card],
+        sources=[source],
+        coverage=coverage,
+        section_plan=section_plan.to_dict(),
+    )
+
+    prompt = _synthesis_prompt(
+        plan=plan,
+        evidence_cards=[card],
+        coverage=coverage,
+        sources=[source],
+        previous_report="",
+        verification_failures=[],
+        section_plan=section_plan,
+        knowledge_base=kb,
+    )
+
+    assert "Knowledge-base section packets" in prompt
+    assert "5,000 productive spindle hours" in prompt
 
 
 def test_synthesis_does_not_append_fragmented_coverage_for_criteria_rich_reports() -> None:

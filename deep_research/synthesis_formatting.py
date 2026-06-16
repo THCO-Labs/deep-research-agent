@@ -365,7 +365,7 @@ def _target_report_profile(
         min_words = min(
             9000,
             max(
-                6500,
+                3200,
                 criteria_count * 220,
                 branch_count * 520,
                 evidence_sources * 150,

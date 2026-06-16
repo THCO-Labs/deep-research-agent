@@ -19,7 +19,7 @@ from deep_research.semantic import (
     enrich_evidence_cards_with_semantics,
     verify_report_with_semantics,
 )
-from deep_research.semantic_planning import build_or_enrich_research_plan
+from deep_research.semantic_planning import build_or_enrich_research_plan, _planning_prompt
 from deep_research.semantic_planning import _loads_json_object
 from deep_research.settings import Settings
 from deep_research.scraper import ScrapeQualityError
@@ -79,6 +79,18 @@ def test_generic_plan_handles_chinese_question_without_empty_research_branch() -
     assert sum(branch.min_sources for branch in plan.branches) >= 17
     assert plan.branches[0].title != "Research"
     assert "中性粒细胞" in " ".join(plan.branches[0].queries)
+
+
+def test_semantic_planning_prompt_uses_delimited_context_and_keeps_baseline_terms() -> None:
+    plan = build_research_plan("Compare open-source models by benchmark score, cost, and deployment constraints.")
+
+    prompt = _planning_prompt(plan, planning_guidance="Prefer benchmark evidence.")
+
+    assert "<CONTEXT>" in prompt
+    assert "</CONTEXT>" in prompt
+    assert "Deterministic baseline constraints:" in prompt
+    assert '"baseline_terms"' in prompt
+    assert "comparison dimensions and evidence requirements" in prompt
 
 
 def test_llm_semantic_planning_accepts_valid_domain_specific_plan(tmp_path: Path) -> None:

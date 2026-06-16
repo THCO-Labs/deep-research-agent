@@ -61,6 +61,8 @@ class SourceCandidate:
     search_score: float | None = None
     raw_content: str | None = None
     provenance: SourceProvenance = "web"
+    search_intent_id: str = ""
+    search_intent_goal: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -191,7 +193,19 @@ class ResearchState(TypedDict, total=False):
     source_records: list[dict[str, Any]]
     evidence_cards: list[dict[str, Any]]
     semantic_judgments: dict[str, Any]
+    source_policy: dict[str, Any]
+    evidence_graph: dict[str, Any]
+    reasoning_state: dict[str, Any]
+    reasoning_decision: dict[str, Any]
+    reasoning_focus_terms: dict[str, list[str]]
+    search_intents: list[dict[str, Any]]
+    search_intent_results: list[dict[str, Any]]
+    plan_revisions: dict[str, Any]
+    contradiction_queries: list[dict[str, Any]]
+    contradictions: list[dict[str, Any]]
     coverage_matrix: dict[str, Any]
+    section_plan: dict[str, Any]
+    knowledge_base: dict[str, Any]
     draft_report: str
     current_draft: dict[str, Any]
     verification: dict[str, Any]

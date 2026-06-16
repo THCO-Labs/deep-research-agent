@@ -438,72 +438,35 @@ def _chat_model_for_role(
     provider: str,
     model_name: str,
 ) -> BaseChatModel | None:
-    keys = _key_pool_for_provider(settings, provider)
-    if not keys:
-        return None
-    key_slot = _key_slot_for_role(keys, role)
-    return _chat_model_for_route(
-        {
-            "provider": provider,
-            "model": model_name,
-            "api_key": keys[key_slot],
-            "referer": settings.openrouter_http_referer,
-            "app_title": settings.openrouter_app_title,
-            "request_timeout_seconds": settings.model_request_timeout_seconds,
-            "max_output_tokens": settings.model_max_output_tokens,
-        }
-    )
+    from langchain_openai import ChatOpenAI
+    timeout_seconds = float(settings.model_request_timeout_seconds or 120)
+    max_output_tokens = int(settings.model_max_output_tokens or 0)
+    kwargs: dict[str, object] = {
+        "model": "QuantTrio/Qwen3.5-9B-AWQ",
+        "api_key": "sk-deep-research",
+        "base_url": "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1",
+        "timeout": timeout_seconds,
+        "max_retries": 0,
+    }
+    if max_output_tokens > 0:
+        kwargs["max_tokens"] = max_output_tokens
+    return ChatOpenAI(**kwargs)
 
 
 def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
-    provider = str(route["provider"])
-    model_name = str(route["model"])
-    api_key = str(route["api_key"])
+    from langchain_openai import ChatOpenAI
     timeout_seconds = float(route.get("request_timeout_seconds") or 120)
     max_output_tokens = int(route.get("max_output_tokens") or 0)
-    if provider == "groq":
-        kwargs: dict[str, object] = {
-            "model": model_name,
-            "api_key": api_key,
-            "timeout": timeout_seconds,
-            "max_retries": 0,
-        }
-        if max_output_tokens > 0:
-            kwargs["max_tokens"] = max_output_tokens
-        return ChatGroq(**kwargs)
-    if provider == "google_genai":
-        kwargs = {
-            "model": model_name,
-            "api_key": api_key,
-            "request_timeout": timeout_seconds,
-            "retries": 0,
-        }
-        if max_output_tokens > 0:
-            kwargs["max_output_tokens"] = max_output_tokens
-        return ChatGoogleGenerativeAI(**kwargs)
-    if provider == "openrouter":
-        return ChatOpenRouter(
-            model=model_name,
-            api_key=api_key,
-            referer=str(route.get("referer") or ""),
-            app_title=str(route.get("app_title") or "Deep Research Agent"),
-            timeout_seconds=timeout_seconds,
-            max_tokens=max_output_tokens if max_output_tokens > 0 else None,
-        )
-    if provider == "mistral_ai":
-        kwargs = {
-            "model": model_name,
-            "api_key": api_key,
-            "timeout": timeout_seconds,
-            "max_retries": 0,
-        }
-        if max_output_tokens > 0:
-            kwargs["max_tokens"] = max_output_tokens
-        return ChatMistralAI(**kwargs)
-    if provider == "ollama":
-        from langchain_ollama import ChatOllama
-        return ChatOllama(model=model_name)
-    raise ValueError(f"Unsupported model provider: {provider}")
+    kwargs: dict[str, object] = {
+        "model": "QuantTrio/Qwen3.5-9B-AWQ",
+        "api_key": "sk-deep-research",
+        "base_url": "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1",
+        "timeout": timeout_seconds,
+        "max_retries": 0,
+    }
+    if max_output_tokens > 0:
+        kwargs["max_tokens"] = max_output_tokens
+    return ChatOpenAI(**kwargs)
 
 
 def _fallback_routes(
