@@ -265,6 +265,8 @@ def acquire_sources(
     sources: list[SourceRecordV2] = list(existing_sources or [])
     source_texts: dict[int, str] = dict(existing_source_texts or {})
     seen_urls: set[str] = {source.canonical_url for source in sources}
+    for candidate in candidates:
+        seen_urls.add(_safe_canonical(candidate.url))
     searched = set(searched_queries or ())
     searched.update(candidate.query for candidate in candidates if candidate.query)
     branch_candidate_counts: dict[str, int] = {}

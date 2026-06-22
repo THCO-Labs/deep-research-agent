@@ -16,7 +16,7 @@ from langchain_mistralai import ChatMistralAI
 import httpx
 
 from deep_research.errors import classify_exception
-from deep_research.settings import Settings
+from deep_research.settings import OPENROUTER_DEFAULT_MODEL, Settings
 
 ModelLike: TypeAlias = str | BaseChatModel
 FallbackCallback: TypeAlias = Callable[[str], None]
@@ -49,7 +49,7 @@ _ROLE_MODEL_ATTRS = {
     "verifier": "verifier_model",
     "judge": "judge_model",
     "fast": "fast_model",
-    "synthesis": "model",
+    "synthesis": "synthesis_model",
 }
 
 _usage_lock = threading.Lock()
@@ -362,7 +362,7 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
 
 
 def route_summary(settings: Settings) -> str:
-    visible_roles = ("orchestrator", "planner", "researcher", "analyst", "verifier", "judge")
+    visible_roles = ("orchestrator", "planner", "researcher", "analyst", "verifier", "judge", "synthesis")
     routes = [_describe_role(settings, role) for role in visible_roles]
     parts = []
     for route in routes:
@@ -380,8 +380,7 @@ def _key_for_role(keys: tuple[str, ...], role: str) -> str:
 
 
 def _describe_role(settings: Settings, role: str) -> ModelRoute:
-    attr = _ROLE_MODEL_ATTRS[role]
-    model_spec = getattr(settings, attr)
+    model_spec = _model_spec_for_manifest_role(settings, role)
     provider, model_name = _split_model_spec(model_spec)
     keys = _key_pool_for_provider(settings, provider)
     key_slot = _key_slot_for_role(keys, role) if keys else None
@@ -400,6 +399,14 @@ def _describe_role(settings: Settings, role: str) -> ModelRoute:
         if settings.model_fallbacks
         else [],
     )
+
+
+def _model_spec_for_manifest_role(settings: Settings, role: str) -> str:
+    attr = _ROLE_MODEL_ATTRS[role]
+    model_spec = str(getattr(settings, attr) or "")
+    if role == "synthesis" and not model_spec:
+        return settings.model
+    return model_spec
 
 
 def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]:
@@ -438,41 +445,72 @@ def _chat_model_for_role(
     provider: str,
     model_name: str,
 ) -> BaseChatModel | None:
-    from langchain_openai import ChatOpenAI
-    import os
-    base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1")
-    api_key = os.environ.get("CUSTOM_OPENAI_API_KEY", "sk-deep-research")
-    timeout_seconds = float(settings.model_request_timeout_seconds or 120)
-    max_output_tokens = int(settings.model_max_output_tokens or 0)
-    kwargs: dict[str, object] = {
-        "model": "QuantTrio/Qwen3.5-9B-AWQ",
-        "api_key": api_key,
-        "base_url": base_url,
-        "timeout": timeout_seconds,
-        "max_retries": 0,
-    }
-    if max_output_tokens > 0:
-        kwargs["max_tokens"] = max_output_tokens
-    return ChatOpenAI(**kwargs)
+    keys = _key_pool_for_provider(settings, provider)
+    if not keys:
+        return None
+    key_slot = _key_slot_for_role(keys, role)
+    return _chat_model_for_route(
+        {
+            "provider": provider,
+            "model": model_name,
+            "api_key": keys[key_slot],
+            "referer": settings.openrouter_http_referer,
+            "app_title": settings.openrouter_app_title,
+            "request_timeout_seconds": settings.model_request_timeout_seconds,
+            "max_output_tokens": settings.model_max_output_tokens,
+        }
+    )
 
 
 def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
-    from langchain_openai import ChatOpenAI
-    import os
-    base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "https://0taexv0epvlrm9-8000.proxy.runpod.net/v1")
-    api_key = os.environ.get("CUSTOM_OPENAI_API_KEY", "sk-deep-research")
+    provider = str(route["provider"])
+    model_name = str(route["model"])
+    api_key = str(route["api_key"])
     timeout_seconds = float(route.get("request_timeout_seconds") or 120)
     max_output_tokens = int(route.get("max_output_tokens") or 0)
-    kwargs: dict[str, object] = {
-        "model": "QuantTrio/Qwen3.5-9B-AWQ",
-        "api_key": api_key,
-        "base_url": base_url,
-        "timeout": timeout_seconds,
-        "max_retries": 0,
-    }
-    if max_output_tokens > 0:
-        kwargs["max_tokens"] = max_output_tokens
-    return ChatOpenAI(**kwargs)
+    if provider == "groq":
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatGroq(**kwargs)
+    if provider == "google_genai":
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "request_timeout": timeout_seconds,
+            "retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_output_tokens"] = max_output_tokens
+        return ChatGoogleGenerativeAI(**kwargs)
+    if provider == "openrouter":
+        return ChatOpenRouter(
+            model=model_name,
+            api_key=api_key,
+            referer=str(route.get("referer") or ""),
+            app_title=str(route.get("app_title") or "Deep Research Agent"),
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_output_tokens if max_output_tokens > 0 else None,
+        )
+    if provider == "mistral_ai":
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatMistralAI(**kwargs)
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(model=model_name)
+    raise ValueError(f"Unsupported model provider: {provider}")
 
 
 def _fallback_routes(
@@ -523,10 +561,11 @@ def _fallback_routes(
             )
     if settings.openrouter_key_pool and provider != "openrouter":
         openrouter_slot = _key_slot_for_role(settings.openrouter_key_pool, role)
+        openrouter_provider, openrouter_model = _split_model_spec(OPENROUTER_DEFAULT_MODEL)
         routes.append(
             {
-                "provider": "openrouter",
-                "model": "meta-llama/llama-3.3-70b-instruct:free",
+                "provider": openrouter_provider,
+                "model": openrouter_model,
                 "api_key": settings.openrouter_key_pool[openrouter_slot],
                 "key_slot": openrouter_slot,
                 "key_label": _key_label("openrouter", openrouter_slot),

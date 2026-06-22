@@ -12,7 +12,7 @@ from deep_research.managed import run_gemini_managed_research
 from deep_research.planning import build_research_plan
 from deep_research.coverage import build_coverage_matrix
 from deep_research.guidance import format_criteria_guidance_block
-from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, ResearchState, SourceRecordV2, VerificationResultV2
+from deep_research.schemas import CoverageMatrix, EvidenceCard, ResearchBranch, ResearchPlan, ResearchState, SourceRecordV2, VerificationResultV2, SourceCandidate
 from deep_research.semantic import (
     _load_json_object,
     apply_semantic_report_result,
@@ -976,3 +976,79 @@ def test_acquisition_interleaves_missing_branch_followups(tmp_path: Path) -> Non
     )
 
     assert searched_queries == ["mediator query one", "limitations query one"]
+
+
+def test_acquisition_deduplicates_existing_candidates(tmp_path: Path) -> None:
+    searched_queries: list[str] = []
+
+    class FakeSearchClient:
+        def search(self, query: str, **kwargs):
+            searched_queries.append(query)
+            raw_content = "unrelated filler content without the requested anchor terms. " * 80
+            return {
+                "results": [
+                    {
+                        "url": "https://example.com/seen-candidate",
+                        "title": "Search result candidate",
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.5,
+                    },
+                    {
+                        "url": "https://example.com/new-candidate",
+                        "title": "Another candidate",
+                        "content": raw_content,
+                        "raw_content": raw_content,
+                        "score": 0.5,
+                    }
+                ]
+            }
+
+    branches = [
+        ResearchBranch(
+            id="branch_1",
+            title="First branch",
+            objective="Cover first branch evidence.",
+            queries=["first query"],
+            min_sources=1,
+            required_terms=["first branch anchor"],
+        ),
+    ]
+    settings = SimpleNamespace(
+        min_source_words=40,
+        min_relevant_chunks=1,
+        max_candidates=10,
+        max_sources=0,
+        min_usable_sources=1,
+        search_depth="advanced",
+        allow_raw_content=True,
+        max_browser_scrapes_per_query=0,
+    )
+
+    existing_candidates = [
+        SourceCandidate(
+            id=1,
+            branch_id="branch_1",
+            title="Existing candidate",
+            url="https://example.com/seen-candidate",
+            query="previous query",
+            snippet="some snippet",
+            search_score=0.5,
+            provenance="web",
+        )
+    ]
+
+    result = acquire_sources(
+        question="Deduplication test",
+        branches=branches,
+        artifacts=ResearchArtifactsV2.create(tmp_path, "dedup_test"),
+        settings=settings,
+        search_client=FakeSearchClient(),
+        existing_candidates=existing_candidates,
+    )
+
+    urls = [candidate.url for candidate in result.candidates]
+    assert "https://example.com/seen-candidate" in urls
+    assert "https://example.com/new-candidate" in urls
+    assert urls.count("https://example.com/seen-candidate") == 1
+
