@@ -6,6 +6,7 @@ runs/
 eval_runs/
 .venv/
 venv/
+.claude/
 dist/
 build/
 *.egg-info/

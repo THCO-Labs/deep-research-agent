@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from deep_research import model_router
-from deep_research.settings import Settings
+from deep_research.settings import OPENROUTER_DEFAULT_MODEL, Settings
 
 
 class FakeChatModel:
@@ -157,6 +157,65 @@ def test_model_route_manifest_exposes_key_slots_without_secret_values(tmp_path: 
     assert "secret" not in str(manifest)
 
 
+def test_model_route_manifest_reports_explicit_synthesis_model(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:main",
+        fast_model="groq:fast",
+        planner_model="groq:planner",
+        researcher_model="groq:researcher",
+        analyst_model="groq:analyst",
+        verifier_model="google_genai:verifier",
+        judge_model="google_genai:judge",
+        synthesis_model="mistral_ai:mistral-large-latest",
+        groq_api_keys=("groq-secret-a", "groq-secret-b"),
+        google_api_keys=("google-secret-a", "google-secret-b"),
+        mistral_api_keys=("mistral-secret-a", "mistral-secret-b", "mistral-secret-c"),
+        tavily_api_key="tavily",
+    )
+
+    manifest = model_router.describe_model_routes(settings)
+    routes = {route["role"]: route for route in manifest["roles"]}
+    summary = model_router.route_summary(settings)
+
+    assert routes["synthesis"]["provider"] == "mistral_ai"
+    assert routes["synthesis"]["model"] == "mistral-large-latest"
+    assert routes["synthesis"]["key_label"] == "MISTRAL_API_KEY"
+    assert [route["key_label"] for route in routes["synthesis"]["fallback_routes"][:2]] == [
+        "MISTRAL_API_KEY1",
+        "MISTRAL_API_KEY2",
+    ]
+    assert "synthesis=mistral_ai:mistral-large-latest via MISTRAL_API_KEY" in summary
+    assert "secret" not in str(manifest)
+
+
+def test_model_route_manifest_falls_back_to_main_model_when_synthesis_model_is_empty(tmp_path: Path) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        out_dir=tmp_path,
+        provider="groq",
+        model="groq:main",
+        fast_model="groq:fast",
+        planner_model="groq:planner",
+        researcher_model="groq:researcher",
+        analyst_model="groq:analyst",
+        verifier_model="groq:verifier",
+        judge_model="groq:judge",
+        synthesis_model="",
+        groq_api_keys=("groq-a", "groq-b"),
+        tavily_api_key="tavily",
+    )
+
+    manifest = model_router.describe_model_routes(settings)
+    routes = {route["role"]: route for route in manifest["roles"]}
+
+    assert routes["synthesis"]["provider"] == "groq"
+    assert routes["synthesis"]["model"] == "main"
+    assert routes["synthesis"]["model_spec"] == "groq:main"
+
+
 def test_model_route_manifest_describes_ollama_without_api_key(tmp_path: Path) -> None:
     settings = Settings(
         project_root=tmp_path,
@@ -235,10 +294,11 @@ def test_openrouter_free_is_available_as_cross_provider_fallback(tmp_path: Path)
 
     manifest = model_router.describe_model_routes(settings)
     routes = {route["role"]: route for route in manifest["roles"]}
+    openrouter_provider, _, openrouter_model = OPENROUTER_DEFAULT_MODEL.partition(":")
 
     assert {
-        "provider": "openrouter",
-        "model": "openrouter/free",
+        "provider": openrouter_provider,
+        "model": openrouter_model,
         "key_slot": 0,
         "key_label": "OPENROUTER_API_KEY",
         "fallback_type": "free_provider",
@@ -407,7 +467,7 @@ def test_bound_model_waits_and_retries_retryable_provider_window(
     assert "waiting 2s before retry 1/1" in retry_events[0]
 
 
-def test_bound_model_does_not_wait_past_retry_cap(tmp_path: Path, monkeypatch) -> None:
+def test_bound_model_caps_retry_after_wait(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(model_router, "ChatGroq", FakeChatModel)
     sleeps: list[int] = []
     monkeypatch.setattr(model_router.time, "sleep", lambda seconds: sleeps.append(seconds))
@@ -430,10 +490,7 @@ def test_bound_model_does_not_wait_past_retry_cap(tmp_path: Path, monkeypatch) -
 
     model = model_router.model_for_role(settings, "orchestrator", settings.model)
 
-    try:
-        model.bind_tools([]).invoke("input")
-    except RuntimeError as exc:
-        assert "RESOURCE_EXHAUSTED" in str(exc)
-    else:
-        raise AssertionError("Expected retry cap to preserve the provider error.")
-    assert sleeps == []
+    result = model.bind_tools([]).invoke("input")
+
+    assert result == "retry-once"
+    assert sleeps == [1]
