@@ -658,7 +658,6 @@ For a broad educational prompt like `what is fine tuning`, a passing local repor
 - OpenAI Deep Research introduction: https://openai.com/index/introducing-deep-research/
 - OpenAI Deep Research API docs: https://developers.openai.com/api/docs/guides/deep-research
 - OpenAI Deep Research system card: https://openai.com/index/deep-research-system-card/
-- OpenAI BrowseComp benchmark: https://openai.com/index/browsecomp/
 - LangChain Deep Agents overview: https://docs.langchain.com/oss/python/deepagents/overview
 - LangChain Deep Agents subagents docs: https://docs.langchain.com/oss/python/deepagents/subagents
 - Tavily Search API docs: https://docs.tavily.com/api-reference/endpoint/search
