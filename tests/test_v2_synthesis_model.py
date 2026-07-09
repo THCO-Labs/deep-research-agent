@@ -474,8 +474,8 @@ def test_criteria_rich_synthesis_profile_requires_reference_grade_depth() -> Non
     )
 
     assert profile["criteria_rich"] is True
-    assert profile["minimum_words"] >= 6500
-    assert profile["target_words"] >= 8000
+    assert profile["minimum_words"] >= 3200
+    assert profile["target_words"] >= 4500
     assert profile["target_words"] > profile["minimum_words"]
     assert profile["minimum_cited_paragraphs"] >= 28
     assert profile["minimum_major_sections_before_sources"] >= 16

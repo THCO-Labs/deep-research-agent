@@ -961,7 +961,7 @@ def test_claim_ledger_preserves_breadth_for_literature_reviews() -> None:
     assert "Section-level claim plan" in prompt
     assert "Safe synthesis moves" in prompt
     assert "Sentence-level content plan" in prompt
-    assert "Follow the sentence-level content plan" in prompt
+    assert "Use the sentence-level content plan as a guide" in prompt
     assert "draw on at least 28 distinct ledger claims" in prompt
 
 

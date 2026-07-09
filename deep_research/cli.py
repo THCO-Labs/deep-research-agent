@@ -4,13 +4,18 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from deep_research.agent import ResearchRunError, resume_research, run_research, verify_research_run
 from deep_research.settings import ConfigError, Settings
+
+CONFIGURATION_GUIDE = Path(__file__).resolve().parents[1] / "CONFIGURATION.md"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the LangGraph deep research engine.")
+    parser = argparse.ArgumentParser(
+        description="Run the LangGraph deep research engine.",
+        epilog="Use `python -m deep_research config` for the full configuration guide.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run local LangGraph research.")
@@ -29,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     managed_parser.add_argument("managed_provider", choices=["gemini", "openai"])
     _add_runtime_flags(managed_parser, include_engine=False)
     managed_parser.add_argument("question", nargs="+", help="Research question to answer.")
+
+    subparsers.add_parser(
+        "config",
+        help="Print the full configuration guide, including environment-only settings.",
+    )
     return parser
 
 
@@ -92,10 +102,16 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] not in {"run", "resume", "verify", "managed", "-h", "--help"}:
+    if argv and argv[0] not in {"run", "resume", "verify", "managed", "config", "-h", "--help"}:
         argv.insert(0, "run")
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "config":
+        print(CONFIGURATION_GUIDE.read_text(encoding="utf-8"))
+        return 0
+
+    from deep_research.agent import ResearchRunError, resume_research, run_research, verify_research_run
 
     try:
         if args.command == "verify":
@@ -197,7 +213,7 @@ def _print_progress(line: str) -> None:
     print(line, flush=True)
 
 
-def _print_run_error(exc: ResearchRunError) -> None:
+def _print_run_error(exc: Any) -> None:
     print(f"Error: {exc}", file=sys.stderr)
     failure_path = exc.result.run_dir / "failure.json"
     if failure_path.exists():

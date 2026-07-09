@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from deep_research.source_limits import MINIMUM_SOURCE_TARGET, source_floor
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter"]
-ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter"]
+Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter", "together"]
+ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter", "together"]
 ResearchEngineName = Literal["local_langgraph", "gemini_managed", "openai_managed"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
@@ -23,7 +23,7 @@ OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
 OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
 OPENROUTER_DEFAULT_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
 OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
-MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai"})
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GOOGLE_DEFAULT_MODEL,
     "fast": GROQ_DEFAULT_FAST_MODEL,
@@ -103,6 +103,8 @@ class Settings:
     serper_api_key: str = field(default="", repr=False)
     mistral_api_key: str = field(default="", repr=False)
     mistral_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    together_api_key: str = field(default="", repr=False)
+    together_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
     @classmethod
     def from_env(
@@ -169,6 +171,8 @@ class Settings:
         groq_api_key = groq_api_keys[0] if groq_api_keys else ""
         openrouter_api_key = openrouter_api_keys[0] if openrouter_api_keys else ""
         mistral_api_key = mistral_api_keys[0] if mistral_api_keys else ""
+        together_api_keys = _collect_numbered_env_values("TOGETHER_API_KEY")
+        together_api_key = together_api_keys[0] if together_api_keys else ""
         tavily_api_keys = _collect_numbered_env_values(
             "TAVILY_API_KEY",
             extra_names=_semantic_api_key_env_names("TAVILY"),
@@ -178,7 +182,7 @@ class Settings:
             tavily_api_key = tavily_api_keys[0]
         provider_explicit = provider is not None
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
-        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys)
+        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys, together_api_keys)
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
         depth = _depth_defaults(mode)
         resolved_fast_model = _resolve_model(
@@ -376,6 +380,8 @@ class Settings:
             serper_api_key=os.environ.get("SERPER_API_KEY", "").strip(),
             mistral_api_key=mistral_api_key,
             mistral_api_keys=mistral_api_keys,
+            together_api_key=together_api_key,
+            together_api_keys=together_api_keys,
         )
         settings.validate()
         return settings
@@ -400,6 +406,10 @@ class Settings:
     def mistral_key_pool(self) -> tuple[str, ...]:
         return self.mistral_api_keys or ((self.mistral_api_key,) if self.mistral_api_key else ())
 
+    @property
+    def together_key_pool(self) -> tuple[str, ...]:
+        return self.together_api_keys or ((self.together_api_key,) if self.together_api_key else ())
+
     def validate(self) -> None:
         missing = []
         if self.research_engine == "gemini_managed" and not self.google_key_pool:
@@ -411,6 +421,8 @@ class Settings:
                 missing.append("GROQ_API_KEY")
             if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
                 missing.append("OPENROUTER_API_KEY")
+            if self._uses_model_provider("together") and not self.together_key_pool:
+                missing.append("TOGETHER_API_KEY")
             # Tavily and paid search-provider keys are optional because
             # DuckDuckGo is a no-key emergency fallback when installed.
         if missing:
@@ -421,7 +433,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter"}:
+        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.research_engine not in {"local_langgraph", "gemini_managed", "openai_managed"}:
             raise ConfigError(f"Unsupported research engine: {self.research_engine}")
@@ -540,12 +552,14 @@ def _resolve_provider(
     google_api_keys: Iterable[str],
     groq_api_keys: Iterable[str],
     openrouter_api_keys: Iterable[str],
+    together_api_keys: Iterable[str] = (),
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
         has_google = bool(tuple(google_api_keys))
         has_groq = bool(tuple(groq_api_keys))
         has_openrouter = bool(tuple(openrouter_api_keys))
+        has_together = bool(tuple(together_api_keys))
         if has_google and has_groq:
             return "hybrid"
         if has_groq:
@@ -554,8 +568,10 @@ def _resolve_provider(
             return "google"
         if has_openrouter:
             return "openrouter"
+        if has_together:
+            return "together"
         return "google"
-    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter"}:
+    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 

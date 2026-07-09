@@ -529,10 +529,11 @@ def _synthesis_prompt(
                 f"- card {card.id}; branch {card.branch_id}; source [{card.source_id}] {source.title}; "
                 f"claim: {card.claim}; excerpt (VERBATIM source text — quote from here for specific facts): "
                 f"{card.supporting_excerpt[:excerpt_limit]}; "
-                f"limits: {', '.join(card.limitations[:2]) or 'none'}"
+                f"limits: {', '.join(card.limitations[:2]) or 'none'}; "
+                f"WRITING RULE: prefer excerpt's exact wording over the claim paraphrase for specific facts from this card"
             )
         )
-    source_lines = "\n".join(f"[{source.id}] {source.title}" for source in sorted(sources, key=lambda item: item.id))
+    source_lines = "\n".join(f"[{source.id}] {source.title}: {source.url}" for source in sorted(sources, key=lambda item: item.id))
     branch_lines = "\n".join(
         f"- {branch.id}: {branch.title}; objective: {branch.objective[:220]}"
         for branch in plan.branches
@@ -559,7 +560,12 @@ def _synthesis_prompt(
         target_profile=target_profile,
     )
     writer_persona = (plan.writer_persona.strip() if plan.writer_persona else "").strip()
-    persona_line = writer_persona if writer_persona else "You are writing a professional deep research report from verified evidence cards."
+    persona_line = writer_persona if writer_persona else (
+        "You are writing a professional deep research report from verified evidence cards. "
+        "For every specific fact (numbers, percentages, dates, prices, named entities), "
+        "use the exact wording from the evidence card's supporting excerpt. "
+        "State one factual claim per sentence so each sentence maps cleanly to a single source citation."
+    )
     outline_text = "None"
     if argumentative_outline:
         outline_lines = [
@@ -697,6 +703,11 @@ Report style examples to learn from, not copy:
 - Evidence review: bottom-line evidence assessment, study/evidence distinctions, conflicts, gaps.
 - Technical or decision brief: system/choice framing, trade-offs, constraints, verification checks.
 
+Formatting tools — use when the evidence supports it:
+- Use markdown tables when comparing specifications, features, prices, or options across multiple items (e.g., manufacturer × model specs, year-over-year data, pros/cons). Cite each data cell to its source when available.
+- Use LaTeX math ($...$ for inline, $$...$$ for display) for formulas, growth equations, ratios, or technical calculations. Cite the source of each formula or numerical coefficient.
+- Use tables and equations only when they clarify the analysis; never create generic placeholder tables with "N/A" or invented numbers.
+
 Hard requirements:
 - Answer the exact user question in the first substantive paragraph, using the opening-answer evidence priority.
 - Use only the evidence cards above; every factual paragraph needs inline source citations like [3].
@@ -729,7 +740,7 @@ CITATION GROUNDING — STRICT RULES (each violation makes the report fail verifi
 
 SOURCE GROUNDING — for specific facts:
 - When you state a specific fact (such as a number, dollar amount, percentage, year, count, or named-entity attribute), ensure it matches the evidence card's data exactly. Maintain accuracy in all numbers and names.
-- Write your sentences in a natural, cohesive, and professional style rather than copying verbatim text fragments or creating robotic sentence structures. Clear synthesis across multiple facts is highly encouraged.
+- Write your sentences in a natural, cohesive, and professional style. When stating specific facts (numbers, percentages, dates, prices, named entities), prefer the exact wording from the supporting excerpt — verbatim precision for data claims is required. Synthesis across multiple facts is for analysis and interpretation paragraphs, not data claims. One cited claim per sentence.
 """
 
 

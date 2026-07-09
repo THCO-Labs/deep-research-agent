@@ -152,8 +152,8 @@ def test_settings_auto_uses_openrouter_when_only_openrouter_is_present(
     settings = Settings.from_env(project_root=tmp_path)
 
     assert settings.provider == "openrouter"
-    assert settings.model == "openrouter:openrouter/free"
-    assert settings.fast_model == "openrouter:openrouter/free"
+    assert settings.model == "openrouter:meta-llama/llama-3.3-70b-instruct:free"
+    assert settings.fast_model == "openrouter:meta-llama/llama-3.3-70b-instruct:free"
     assert settings.openrouter_key_pool == ("openrouter-test",)
 
 

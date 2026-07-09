@@ -304,3 +304,28 @@ def _card(card_id: int, source: SourceRecordV2, claim: str) -> EvidenceCard:
         relevance_score=source.relevance_score,
         confidence=0.9,
     )
+
+
+def test_preface_skipping_and_heading_matching() -> None:
+    plan = _single_branch_plan()
+    source = _source(1, "performance", "Performance Source")
+    card = _card(1, source, "The platform can sustain 5,000 spindle hours.")
+    section_plan = build_adaptive_section_plan(
+        plan=plan,
+        evidence_cards=[card],
+        coverage=CoverageMatrix(branches=[], complete=True, coverage_score=1.0, missing_branches=[]),
+        sources=[source],
+    )
+    # preface is only title
+    report = (
+        "# Research Report: Titanium Machining\n\n"
+        "## Titanium performance\n\n"
+        "Titanium machining performance depends on stable spindle utilization [1].\n\n"
+        "## Sources\n\n"
+        "[1] Performance Source: https://example.com/1\n"
+    )
+    drafts = extract_report_sections(report, section_plan=section_plan)
+    # Preface should be skipped, so only 1 section (Titanium performance)
+    assert len(drafts) == 1
+    assert drafts[0].section_id == "branch_1_performance"
+

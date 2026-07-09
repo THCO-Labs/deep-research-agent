@@ -331,6 +331,8 @@ def _previous_sentence_boundary(text: str, offset: int) -> int:
     for pattern in (". ", "? ", "! ", "\n", " - "):
         index = text.rfind(pattern, 0, offset)
         if index != -1:
+            if not text[index + len(pattern):offset].strip():
+                continue
             candidates.append(index + len(pattern))
     return max(candidates)
 

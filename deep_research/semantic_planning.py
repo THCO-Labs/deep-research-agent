@@ -176,7 +176,6 @@ def _infer_writer_persona(plan: ResearchPlan, planner: Any) -> ResearchPlan:
 
     The persona is used at synthesis time to give the writer a domain-appropriate
     voice and expertise framing without any hardcoded domain lists.
-    Falls back silently — synthesis works fine with the default persona.
     """
     branch_titles = ", ".join(b.title for b in plan.branches[:6])
     prompt = f"""Analyze the following scope to determine the ideal drafting profile.
@@ -199,8 +198,14 @@ The sentence must:
 Return exactly one raw sentence. Do not wrap in quotes. Do not add JSON or introductory phrases."""
     try:
         response = planner.invoke([HumanMessage(content=prompt)])
-        persona = str(getattr(response, "content", response)).strip().strip('"').strip("'")
-        if len(persona) >= 40 and len(persona) <= 400 and "\n" not in persona:
+        raw = str(getattr(response, "content", response)).strip()
+        persona = raw.strip('"').strip("'").replace("\n", " ").replace("  ", " ").strip()
+        if not persona:
+            return plan
+        if len(persona) < 40:
+            persona = persona.strip() + " " + raw.strip('"').strip("'").replace("\n", " ")
+        persona = persona[:400].strip().rstrip(".")
+        if len(persona) >= 40:
             return replace(plan, writer_persona=persona)
     except Exception:
         pass

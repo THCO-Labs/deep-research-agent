@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -89,6 +90,7 @@ _KEY_ENV_BASE = {
     "ollama": "OLLAMA_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "mistral_ai": "MISTRAL_API_KEY",
+    "together": "TOGETHER_API_KEY",
 }
 
 
@@ -188,7 +190,7 @@ class ChatOpenRouter(BaseChatModel):
     app_title: str = "Deep Research Agent"
     timeout_seconds: float = 120.0
     max_tokens: int | None = None
-    base_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    base_url: str = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 
     @property
     def _llm_type(self) -> str:
@@ -228,7 +230,8 @@ class ChatOpenRouter(BaseChatModel):
         if self.app_title:
             headers["X-Title"] = self.app_title
             headers["X-OpenRouter-Title"] = self.app_title
-        response = httpx.post(self.base_url, headers=headers, json=payload, timeout=self.timeout_seconds)
+        base_url = os.environ.get("OPENROUTER_BASE_URL") or self.base_url
+        response = httpx.post(base_url, headers=headers, json=payload, timeout=self.timeout_seconds)
         if response.status_code >= 400:
             raise RuntimeError(f"OpenRouter request failed with HTTP {response.status_code}: {response.text[:1000]}")
         data = response.json()
@@ -418,6 +421,8 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.openrouter_key_pool
     if provider == "mistral_ai":
         return settings.mistral_key_pool
+    if provider == "together":
+        return settings.together_key_pool
     if provider == "ollama":
         return ("ollama-local",)
     return ()
@@ -510,6 +515,18 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(model=model_name)
+    if provider == "together":
+        from langchain_openai import ChatOpenAI
+        kwargs = {
+            "model": model_name,
+            "api_key": api_key,
+            "base_url": "https://api.together.xyz/v1",
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatOpenAI(**kwargs)
     raise ValueError(f"Unsupported model provider: {provider}")
 
 

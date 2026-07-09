@@ -73,6 +73,7 @@ def test_resume_reuses_checkpointed_sources_without_duplicate_fetches(tmp_path: 
     result = run_research("How do urban heat islands affect public health?", settings, progress_mode="quiet")
 
     resume_settings = _settings(tmp_path, max_rounds=12, max_search_queries=22)
+    calls["resume"] = 0
     resumed = resume_research(result.run_dir.name, resume_settings, progress_mode="quiet")
 
     sources = (resumed.run_dir / "sources.jsonl").read_text(encoding="utf-8").splitlines()

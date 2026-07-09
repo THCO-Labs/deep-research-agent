@@ -284,6 +284,49 @@ def audit_report_sections(
     }
 
 
+def _heading_match(heading: str, sections: list[SectionContract], used_contracts: set[str]) -> SectionContract | None:
+    clean_heading = re.sub(r"[^a-z0-9\s]+", "", heading.lower()).strip()
+    if not clean_heading or clean_heading in (
+        "opening",
+        "bottom line",
+        "sources",
+        "what the sources show together",
+        "comparison table",
+        "implications",
+        "limits and confidence",
+        "evidence gaps",
+        "核心结论",
+        "综合分析",
+        "对比分析",
+        "补充证据",
+        "含义",
+        "局限与信心",
+        "证据缺口",
+        "研究报告",
+    ):
+        return None
+    words_heading = set(clean_heading.split())
+    best_section = None
+    best_score = 0.0
+    for section in sections:
+        if section.id in used_contracts:
+            continue
+        clean_title = re.sub(r"[^a-z0-9\s]+", "", section.title_hint.lower()).strip()
+        if not clean_title:
+            continue
+        if clean_heading == clean_title:
+            return section
+        words_title = set(clean_title.split())
+        intersection = words_heading & words_title
+        union = words_heading | words_title
+        jaccard = len(intersection) / len(union) if union else 0.0
+        is_substring = len(words_heading) >= 2 and (clean_heading in clean_title or clean_title in clean_heading)
+        if (jaccard >= 0.35 or is_substring) and jaccard > best_score:
+            best_score = jaccard
+            best_section = section
+    return best_section
+
+
 def extract_report_sections(
     report_markdown: str,
     *,
@@ -294,15 +337,31 @@ def extract_report_sections(
     blocks = _heading_blocks(body)
     if not blocks:
         blocks = [("", body.strip())] if body.strip() else []
-    drafts: list[SectionDraft] = []
+
+    drafts_dict: dict[int, tuple[str, float]] = {}
     used_contracts: set[str] = set()
-    for heading, markdown in blocks:
+
+    # Pass 1: Match by strong heading / title_hint similarity
+    for i, (heading, markdown) in enumerate(blocks):
+        matched_section = _heading_match(heading, plan.sections, used_contracts)
+        if matched_section is not None:
+            used_contracts.add(matched_section.id)
+            drafts_dict[i] = (matched_section.id, 1.0)
+
+    # Pass 2: Match remaining blocks using content overlap score
+    for i, (heading, markdown) in enumerate(blocks):
+        if i in drafts_dict:
+            continue
         section, score = _match_contract(heading, markdown, plan.sections, used_contracts)
         if section is not None:
             used_contracts.add(section.id)
-            section_id = section.id
+            drafts_dict[i] = (section.id, score)
         else:
-            section_id = _slug_id(heading or "unmatched_section")
+            drafts_dict[i] = (_slug_id(heading or "unmatched_section"), 0.0)
+
+    drafts: list[SectionDraft] = []
+    for i, (heading, markdown) in enumerate(blocks):
+        section_id, score = drafts_dict[i]
         drafts.append(
             SectionDraft(
                 section_id=section_id,
@@ -644,13 +703,22 @@ def _strip_sources(markdown: str) -> str:
     return re.split(r"(?im)^##\s+Sources\s*$", markdown, maxsplit=1)[0].strip()
 
 
+def _is_just_title_preface(preface: str) -> bool:
+    lines = [line.strip() for line in preface.splitlines() if line.strip()]
+    content_lines = [line for line in lines if not line.startswith("#")]
+    if not content_lines:
+        return True
+    content_text = " ".join(content_lines).strip()
+    return len(content_text.split()) < 10
+
+
 def _heading_blocks(markdown: str) -> list[tuple[str, str]]:
     matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", markdown))
     if not matches:
         return []
     blocks: list[tuple[str, str]] = []
     preface = markdown[: matches[0].start()].strip()
-    if preface:
+    if preface and not _is_just_title_preface(preface):
         blocks.append(("Opening", preface))
     for index, match in enumerate(matches):
         start = match.start()

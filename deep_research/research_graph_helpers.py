@@ -402,6 +402,29 @@ def _semantic_gate_collapsed_coverage(
         return False
     if len(before_cards) < MIN_SEMANTIC_GATE_EVIDENCE_CARDS:
         return False
+
+    cards_by_branch_before = {}
+    for card in before_cards:
+        if card.branch_id:
+            cards_by_branch_before[card.branch_id] = cards_by_branch_before.get(card.branch_id, 0) + 1
+
+    cards_by_branch_after = {}
+    for card in after_cards:
+        if card.branch_id:
+            cards_by_branch_after[card.branch_id] = cards_by_branch_after.get(card.branch_id, 0) + 1
+
+    for branch in plan.branches:
+        before_cnt = cards_by_branch_before.get(branch.id, 0)
+        after_cnt = cards_by_branch_after.get(branch.id, 0)
+        if before_cnt >= 1 and after_cnt == 0:
+            return True
+        if before_cnt >= 2 and after_cnt < 2:
+            return True
+        if before_cnt >= 4 and after_cnt < 3:
+            return True
+        if before_cnt >= 6 and after_cnt < 4:
+            return True
+
     before = build_coverage_matrix(branches=plan.branches, evidence_cards=before_cards, sources=sources)
     after = build_coverage_matrix(branches=plan.branches, evidence_cards=after_cards, sources=sources)
     return (

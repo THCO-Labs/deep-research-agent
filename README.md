@@ -68,6 +68,15 @@ python -m deep_research managed gemini "How do urban heat islands affect public 
 
 ## Useful Options
 
+For the full configuration reference, including environment-only settings and
+recommended values:
+
+```powershell
+python -m deep_research config
+```
+
+The same content is also available in `CONFIGURATION.md`.
+
 ```powershell
 python -m deep_research run `
   --mode balanced `
