@@ -1,0 +1,1185 @@
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import re
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any, Callable
+
+import httpx
+from tavily import TavilyClient
+
+try:
+    from ddgs import DDGS
+except Exception:
+    try:
+        from duckduckgo_search import DDGS
+    except Exception:
+        DDGS = None
+
+from deep_research.runtime.artifacts_v2 import ResearchArtifactsV2
+from deep_research.core.errors import classify_exception
+from deep_research.acquisition.ingestion import IngestedDocument
+from deep_research.planning.search_intents import SearchIntent
+from deep_research.core.schemas import ResearchBranch, SourceCandidate, SourceRecordV2
+from deep_research.acquisition.scraper import PlaywrightScraper, ScrapeQualityError, ScrapeResult
+from deep_research.acquisition.source_limits import MAX_TAVILY_RESULTS_PER_QUERY, MINIMUM_SOURCE_TARGET, source_floor
+from deep_research.evidence.source_quality import score_source
+from deep_research.evidence.source_validation import branch_terms, content_terms, validate_source_content, validation_policy_for_source
+from deep_research.acquisition.urls import canonicalize_url
+
+
+@dataclass
+class AcquisitionMetrics:
+    search_count: int = 0
+    candidate_count: int = 0
+    scrape_count: int = 0
+    usable_source_count: int = 0
+    rejected_source_count: int = 0
+    time_budget_exhausted: bool = False
+    elapsed_seconds: float = 0.0
+    failures: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "search_count": self.search_count,
+            "candidate_count": self.candidate_count,
+            "scrape_count": self.scrape_count,
+            "usable_source_count": self.usable_source_count,
+            "rejected_source_count": self.rejected_source_count,
+            "acquisition_time_budget_exhausted": self.time_budget_exhausted,
+            "acquisition_elapsed_seconds": round(self.elapsed_seconds, 3),
+            "failures": self.failures,
+        }
+
+
+@dataclass
+class AcquisitionResult:
+    candidates: list[SourceCandidate]
+    sources: list[SourceRecordV2]
+    source_texts: dict[int, str]
+    metrics: AcquisitionMetrics
+
+
+def _search_provider_keys(settings: Any, *, attr_name: str, env_base: str) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    attr_value = str(getattr(settings, attr_name, "") or "").strip()
+    env_names = _numbered_env_names(env_base)
+    if env_base not in env_names:
+        env_names.insert(0, env_base)
+    for raw_value in [attr_value, *(os.environ.get(name, "") for name in env_names)]:
+        for value in re.split(r"[;,\n]+", raw_value):
+            key = value.strip()
+            if key and key not in seen:
+                values.append(key)
+                seen.add(key)
+    return tuple(values)
+
+
+def _numbered_env_names(base_name: str) -> list[str]:
+    names: list[tuple[int, str]] = []
+    prefixes = (base_name, f"{base_name}_")
+    for name in os.environ:
+        if name == base_name:
+            names.append((0, name))
+            continue
+        for prefix in prefixes:
+            suffix = name.removeprefix(prefix)
+            if suffix != name and suffix.isdigit():
+                names.append((int(suffix), name))
+                break
+    return [name for _, name in sorted(names, key=lambda item: (item[0], item[1]))]
+
+
+class TavilySearchClientPool:
+    def __init__(self, settings: Any) -> None:
+        keys = tuple(getattr(settings, "tavily_key_pool", ()) or ())
+        if not keys:
+            single = str(getattr(settings, "tavily_api_key", "") or "").strip()
+            keys = (single,) if single else ()
+        self._exa_api_keys = _search_provider_keys(settings, attr_name="exa_api_key", env_base="EXA_API_KEY")
+        self._brave_api_keys = _search_provider_keys(
+            settings, attr_name="brave_search_api_key", env_base="BRAVE_SEARCH_API_KEY"
+        )
+        self._firecrawl_api_keys = _search_provider_keys(
+            settings, attr_name="firecrawl_api_key", env_base="FIRECRAWL_API_KEY"
+        )
+        self._serper_api_keys = _search_provider_keys(settings, attr_name="serper_api_key", env_base="SERPER_API_KEY")
+        self._clients = tuple(TavilyClient(api_key=key) for key in keys)
+        self.key_count = len(self._clients)
+        self._cursor = 0
+        # Once all Tavily keys return quota errors, stop probing them and go straight
+        # to DuckDuckGo for the rest of the run. Avoids logging the same warning
+        # 149 times per run.
+        self._tavily_dead = False
+        # Track DuckDuckGo failures so we can short-circuit when DDG starts
+        # rate-limiting us (which happens after ~50-100 rapid queries).
+        self._ddg_consecutive_failures = 0
+        self._ddg_dead = False
+
+    def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        events: list[str] = []
+        last_error: Exception | None = None
+        if not self._clients:
+            events.append("provider_skip:tavily:missing_api_key")
+            self._tavily_dead = True
+        if not self._tavily_dead:
+            for offset in range(self.key_count):
+                index = (self._cursor + offset) % self.key_count
+                try:
+                    response = self._clients[index].search(query, **kwargs)
+                    self._cursor = (index + 1) % self.key_count
+                    response["_provider"] = str(response.get("_provider") or "tavily")
+                    response["_provider_events"] = events
+                    return response
+                except Exception as exc:
+                    last_error = exc
+                    if classify_exception(exc).category != "quota_or_rate_limit":
+                        events.append(f"provider_error:tavily:{_short_error(exc)}")
+                        break
+                    continue  # try next key
+            # All Tavily keys returned quota errors. Mark as dead and log once.
+            if last_error is not None:
+                self._tavily_dead = True
+                events.append(f"provider_error:tavily:{_short_error(last_error)}")
+                logging.getLogger(__name__).warning(
+                    "All Tavily keys exhausted (%s); switching to fallback search providers for remainder of run.",
+                    last_error,
+                )
+        for provider_name, api_keys, searcher in (
+            ("exa", self._exa_api_keys, _search_with_exa),
+            ("brave", self._brave_api_keys, _search_with_brave),
+            ("firecrawl", self._firecrawl_api_keys, _search_with_firecrawl),
+            ("serper", self._serper_api_keys, _search_with_serper),
+        ):
+            if not api_keys:
+                events.append(f"provider_skip:{provider_name}:missing_api_key")
+                continue
+            for key_index, api_key in enumerate(api_keys, start=1):
+                try:
+                    fallback_results = searcher(query, api_key=api_key, max_results=int(kwargs.get("max_results", 5)))
+                except Exception as exc:
+                    events.append(f"provider_error:{provider_name}[{key_index}]:{_short_error(exc)}")
+                    logging.getLogger(__name__).warning("%s search failed for %r: %s", provider_name, query, exc)
+                    continue
+                if fallback_results:
+                    return {"results": fallback_results, "_provider": provider_name, "_provider_events": events}
+            events.append(f"provider_empty:{provider_name}")
+        if self._ddg_dead:
+            raise RuntimeError("All search providers exhausted (Tavily quota + DuckDuckGo unavailable).")
+        try:
+            fallback_results = _search_with_duckduckgo(
+                query,
+                max_results=int(kwargs.get("max_results", 5)),
+            )
+        except Exception as exc:
+            self._ddg_consecutive_failures += 1
+            if self._ddg_consecutive_failures >= 5:
+                self._ddg_dead = True
+                logging.getLogger(__name__).error(
+                    "DuckDuckGo failed %d times in a row (%s); marking unavailable.",
+                    self._ddg_consecutive_failures, exc,
+                )
+            events.append(f"provider_error:duckduckgo:{_short_error(exc)}")
+            return {"results": [], "_provider": "duckduckgo", "_provider_events": events}
+        if fallback_results:
+            self._ddg_consecutive_failures = 0
+            return {"results": fallback_results, "_provider": "duckduckgo", "_provider_events": events}
+        # Empty results from DDG can mean rate-limited. Count as failure.
+        self._ddg_consecutive_failures += 1
+        if self._ddg_consecutive_failures >= 10:
+            self._ddg_dead = True
+            logging.getLogger(__name__).error(
+                "DuckDuckGo returned empty results %d times in a row; marking unavailable.",
+                self._ddg_consecutive_failures,
+            )
+        events.append("provider_empty:duckduckgo")
+        return {"results": [], "_provider": "duckduckgo", "_provider_events": events}
+
+
+MID_ACQUISITION_CHECKPOINT_INTERVAL = 5  # save state every N accepted sources
+
+
+def acquire_sources(
+    *,
+    question: str,
+    branches: list[ResearchBranch],
+    artifacts: ResearchArtifactsV2,
+    settings: Any,
+    search_client: Any | None = None,
+    scraper: Any | None = None,
+    local_documents: list[IngestedDocument] | None = None,
+    mcp_documents: list[IngestedDocument] | None = None,
+    existing_candidates: list[SourceCandidate] | None = None,
+    existing_sources: list[SourceRecordV2] | None = None,
+    existing_source_texts: dict[int, str] | None = None,
+    searched_queries: set[str] | None = None,
+    focus_terms_by_branch: dict[str, list[str]] | None = None,
+    active_branch_ids: set[str] | None = None,
+    search_intents: list[SearchIntent] | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    mid_checkpoint_callback: Callable[[list[SourceCandidate], list[SourceRecordV2]], None] | None = None,
+) -> AcquisitionResult:
+    metrics = AcquisitionMetrics()
+    client = search_client or TavilySearchClientPool(settings)
+    scrape_timeout_ms = int(getattr(settings, "scrape_timeout_ms", 20_000))
+    page_scraper = scraper or PlaywrightScraper(
+        timeout_ms=scrape_timeout_ms,
+        retries=int(getattr(settings, "scrape_retries", 1)),
+    )
+    candidate_scrape_timeout_s = float(
+        getattr(settings, "candidate_scrape_timeout_seconds", (scrape_timeout_ms + 35_000) / 1000)
+        or 0
+    )
+    acquisition_started = time.perf_counter()
+    acquisition_timeout_s = float(getattr(settings, "acquisition_timeout_seconds", 1500) or 0)
+    min_words = int(getattr(settings, "min_source_words", 250))
+    min_chunks = int(getattr(settings, "min_relevant_chunks", 1))
+    max_candidates = int(getattr(settings, "max_candidates", 80))
+    required_branch_sources = sum(branch.min_sources for branch in branches)
+    explicit_max_sources = int(getattr(settings, "max_sources", MINIMUM_SOURCE_TARGET) or 0)
+    min_source_target = source_floor(
+        int(getattr(settings, "min_usable_sources", MINIMUM_SOURCE_TARGET) or MINIMUM_SOURCE_TARGET)
+    )
+    if explicit_max_sources <= 0:
+        max_sources = max(min_source_target, required_branch_sources)
+    else:
+        max_sources = max(
+            min_source_target,
+            source_floor(explicit_max_sources),
+            required_branch_sources,
+        )
+    search_intents_by_branch = _search_intents_by_branch(search_intents or [])
+    if search_intents_by_branch and existing_sources:
+        max_sources = max(max_sources, len(existing_sources) + max(4, len(search_intents_by_branch) * 2))
+    elif focus_terms_by_branch and existing_sources:
+        focused_branch_count = len(set(focus_terms_by_branch))
+        max_sources = max(max_sources, len(existing_sources) + max(4, focused_branch_count * 2))
+    max_candidates = max(max_candidates, max_sources)
+    candidates: list[SourceCandidate] = list(existing_candidates or [])
+    sources: list[SourceRecordV2] = list(existing_sources or [])
+    source_texts: dict[int, str] = dict(existing_source_texts or {})
+    seen_urls: set[str] = {source.canonical_url for source in sources}
+    for candidate in candidates:
+        seen_urls.add(_safe_canonical(candidate.url))
+    searched = set(searched_queries or ())
+    searched.update(candidate.query for candidate in candidates if candidate.query)
+    branch_candidate_counts: dict[str, int] = {}
+    for candidate in candidates:
+        branch_candidate_counts[candidate.branch_id] = branch_candidate_counts.get(candidate.branch_id, 0) + 1
+
+    ingested_documents = list(local_documents or []) + list(mcp_documents or [])
+    if not existing_sources:
+        _record_ingested_documents(
+            ingested_documents,
+            branches,
+            artifacts,
+            sources,
+            source_texts,
+            question=question,
+            min_words=min_words,
+            min_chunks=min_chunks,
+            metrics=metrics,
+        )
+
+    next_candidate_id = max((candidate.id for candidate in candidates), default=0) + 1
+    focus_terms_by_branch = focus_terms_by_branch or {}
+
+    def _time_budget_exhausted() -> bool:
+        metrics.elapsed_seconds = time.perf_counter() - acquisition_started
+        if acquisition_timeout_s <= 0 or metrics.elapsed_seconds <= acquisition_timeout_s:
+            return False
+        if not metrics.time_budget_exhausted:
+            metrics.time_budget_exhausted = True
+            reason = (
+                f"Acquisition time budget exhausted after {metrics.elapsed_seconds:.1f}s "
+                f"(limit {acquisition_timeout_s:.1f}s)"
+            )
+            metrics.failures.append(reason)
+            _emit_progress(
+                progress_callback,
+                "acquisition time budget exhausted",
+                elapsed_seconds=round(metrics.elapsed_seconds, 3),
+                limit_seconds=round(acquisition_timeout_s, 3),
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
+        return True
+
+    for branch in branches:
+        if _time_budget_exhausted():
+            break
+        if active_branch_ids is not None and branch.id not in active_branch_ids:
+            continue
+        if len(sources) >= max_sources:
+            break
+        branch_source_count = sum(1 for source in sources if source.branch_id == branch.id)
+        branch_candidate_count = branch_candidate_counts.get(branch.id, 0)
+        forced_terms = focus_terms_by_branch.get(branch.id, [])
+        branch_intents = search_intents_by_branch.get(branch.id, [])
+        coverage_followup = active_branch_ids is not None and branch.id in active_branch_ids and not branch_intents
+        if branch_candidate_count >= max_candidates:
+            continue
+        if branch_source_count >= branch.min_sources and not forced_terms and not coverage_followup and not branch_intents:
+            continue
+        if branch_intents:
+            branch_queries = [intent.query for intent in branch_intents]
+            intent_by_query = {intent.query: intent for intent in branch_intents}
+        else:
+            branch_queries = _branch_queries(
+                branch,
+                forced_terms or (branch.required_terms if coverage_followup else []),
+                question,
+            )
+            intent_by_query = {}
+        branch_query_limit = int(getattr(settings, "max_followup_queries_per_branch", 12) or 12)
+        searched_for_branch = 0
+        for query in branch_queries:
+            if _time_budget_exhausted():
+                break
+            if coverage_followup and searched_for_branch >= branch_query_limit:
+                break
+            if branch_candidate_count >= max_candidates or len(sources) >= max_sources:
+                break
+            query = _trim_search_query(query)
+            search_intent = intent_by_query.get(query)
+            if query in searched:
+                continue
+            searched.add(query)
+            searched_for_branch += 1
+            metrics.search_count += 1
+            _emit_progress(
+                progress_callback,
+                "searching source candidates",
+                branch_id=branch.id,
+                query=query,
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
+            try:
+                search_response = _search_raw(client, query, settings)
+                search_results = list(search_response.get("results", []))
+                search_provider = str(search_response.get("_provider", "tavily"))
+                for event in search_response.get("_provider_events", []) or []:
+                    event_text = str(event)
+                    metrics.failures.append(f"Search provider event for {query!r}: {event_text}")
+                    _emit_progress(
+                        progress_callback,
+                        "search provider event",
+                        branch_id=branch.id,
+                        query=query,
+                        event=event_text,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
+            except Exception as exc:
+                metrics.failures.append(f"Search failed for {query!r}: {exc}")
+                _emit_progress(
+                    progress_callback,
+                    "source search failed",
+                    branch_id=branch.id,
+                    query=query,
+                    error=str(exc),
+                    sources=len(sources),
+                    candidates=len(candidates),
+                    searches=metrics.search_count,
+                )
+                continue
+            _emit_progress(
+                progress_callback,
+                f"search returned {len(search_results)} candidate(s)",
+                branch_id=branch.id,
+                query=query,
+                search_provider=search_provider,
+                sources=len(sources),
+                candidates=len(candidates),
+                searches=metrics.search_count,
+            )
+            browser_scrapes_for_query = 0
+            browser_scrape_limit = int(getattr(settings, "max_browser_scrapes_per_query", 4) or 0)
+            for item in search_results:
+                if _time_budget_exhausted():
+                    break
+                if branch_candidate_count >= max_candidates or len(sources) >= max_sources:
+                    break
+                url = str(item.get("url") or "")
+                if not url:
+                    continue
+                title = str(item.get("title") or url)
+                snippet = str(item.get("content") or item.get("snippet") or "")
+                block_reason = _blocked_source_reason(
+                    url=url,
+                    title=title,
+                    snippet=snippet,
+                    settings=settings,
+                )
+                if block_reason:
+                    metrics.rejected_source_count += 1
+                    metrics.failures.append(f"Blocked {url}: {block_reason}")
+                    _emit_progress(
+                        progress_callback,
+                        "blocked source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        reason=block_reason,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
+                    continue
+                requires_browser = not _candidate_has_raw_content(candidate_raw := _raw_content(item))
+                if requires_browser and browser_scrapes_for_query >= browser_scrape_limit and browser_scrape_limit > 0:
+                    metrics.rejected_source_count += 1
+                    reason = f"browser fallback budget exhausted for query ({browser_scrape_limit})"
+                    metrics.failures.append(f"Skipped {url}: {reason}")
+                    _emit_progress(
+                        progress_callback,
+                        "skipped source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        reason=reason,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
+                    continue
+                # When browser scraping is fully disabled (limit=0), fall through to httpx scraping
+                # rather than skipping — DuckDuckGo results have no raw content but httpx can still
+                # fetch many of them directly.
+                if requires_browser and browser_scrape_limit == 0:
+                    requires_browser = False
+                canonical = _safe_canonical(url)
+                if canonical in seen_urls:
+                    continue
+                seen_urls.add(canonical)
+                candidate = SourceCandidate(
+                    id=next_candidate_id,
+                    branch_id=branch.id,
+                    title=title,
+                    url=url,
+                    query=query,
+                    snippet=snippet,
+                    search_score=_float_or_none(item.get("score")),
+                    raw_content=candidate_raw,
+                    provenance="web",
+                    search_intent_id=search_intent.id if search_intent else "",
+                    search_intent_goal=search_intent.expected_evidence if search_intent else "",
+                )
+                next_candidate_id += 1
+                candidates.append(candidate)
+                branch_candidate_count += 1
+                branch_candidate_counts[branch.id] = branch_candidate_count
+                metrics.candidate_count += 1
+                if requires_browser:
+                    browser_scrapes_for_query += 1
+                record = _candidate_to_source(
+                    candidate,
+                    branch,
+                    artifacts,
+                    page_scraper,
+                    min_words=min_words,
+                    min_chunks=min_chunks,
+                    metrics=metrics,
+                    question=question,
+                    source_id=len(sources) + 1,
+                    scrape_hard_timeout_s=candidate_scrape_timeout_s,
+                )
+                if record is None:
+                    # Surface the rejection reason from the metrics failures log so
+                    # the activity file records WHY a candidate was rejected.
+                    rejection_reason = ""
+                    if metrics.failures:
+                        last_failure = metrics.failures[-1]
+                        if url in last_failure:
+                            # Strip the "Rejected <url>: " prefix for brevity
+                            rejection_reason = last_failure.split(": ", 2)[-1].split(";")[0].strip()[:200]
+                    _emit_progress(
+                        progress_callback,
+                        "rejected source candidate",
+                        branch_id=branch.id,
+                        url=url,
+                        rejection_reason=rejection_reason,
+                        sources=len(sources),
+                        candidates=len(candidates),
+                        searches=metrics.search_count,
+                    )
+                    continue
+                if search_intent:
+                    record.source.metadata.update(
+                        {
+                            "search_intent_id": search_intent.id,
+                            "search_intent_gap": search_intent.gap,
+                            "search_intent_expected_evidence": search_intent.expected_evidence,
+                            "search_intent_success_criteria": search_intent.success_criteria,
+                            "search_intent_source_preference": search_intent.source_preference,
+                        }
+                    )
+                sources.append(record.source)
+                source_texts[record.source.id] = record.text
+                _emit_progress(
+                    progress_callback,
+                    f"accepted source [{record.source.id}]",
+                    branch_id=branch.id,
+                    source_id=record.source.id,
+                    sources=len(sources),
+                    candidates=len(candidates),
+                    searches=metrics.search_count,
+                )
+                # Mid-acquisition checkpoint: save progress every N sources so a
+                # crash/resume doesn't redo the entire acquisition from scratch.
+                if (
+                    mid_checkpoint_callback is not None
+                    and len(sources) % MID_ACQUISITION_CHECKPOINT_INTERVAL == 0
+                ):
+                    try:
+                        mid_checkpoint_callback(candidates, sources)
+                    except Exception:
+                        pass  # never let checkpoint failure abort acquisition
+                if sum(1 for source in sources if source.branch_id == branch.id) >= branch.min_sources:
+                    break
+
+    metrics.elapsed_seconds = time.perf_counter() - acquisition_started
+    artifacts.write_jsonl("sources.jsonl", [source.to_dict() for source in sources])
+    return AcquisitionResult(
+        candidates=candidates,
+        sources=sources,
+        source_texts=source_texts,
+        metrics=metrics,
+    )
+
+
+def _emit_progress(
+    callback: Callable[[str, dict[str, Any]], None] | None,
+    message: str,
+    **data: Any,
+) -> None:
+    if callback is None:
+        return
+    callback(message, data)
+
+
+def _search_intents_by_branch(intents: list[SearchIntent]) -> dict[str, list[SearchIntent]]:
+    by_branch: dict[str, list[SearchIntent]] = {}
+    for intent in intents:
+        if not intent.branch_id or not intent.query:
+            continue
+        by_branch.setdefault(intent.branch_id, []).append(intent)
+    return by_branch
+
+
+@dataclass(frozen=True)
+class _RecordedSource:
+    source: SourceRecordV2
+    text: str
+
+
+def _record_ingested_documents(
+    documents: list[IngestedDocument],
+    branches: list[ResearchBranch],
+    artifacts: ResearchArtifactsV2,
+    sources: list[SourceRecordV2],
+    source_texts: dict[int, str],
+    *,
+    min_words: int,
+    min_chunks: int,
+    metrics: AcquisitionMetrics,
+    question: str,
+) -> None:
+    for document in documents:
+        branch = _best_branch_for_text(document.title + "\n" + document.content, branches)
+        source_id = len(sources) + 1
+        quality = score_source(url=document.url, title=document.title, markdown=document.content)
+        validation = validate_source_content(
+            title=document.title,
+            content=document.content,
+            branch=branch,
+            min_words=max(40, min_words // 2),
+            min_relevant_chunks=max(1, min_chunks),
+            question=question,
+            source_type=quality.source_type,
+            url=document.url,
+            extraction_method=str(document.metadata.get("suffix") or document.provenance),
+        )
+        if not validation.usable:
+            metrics.rejected_source_count += 1
+            policy = validation_policy_for_source(
+                question=question,
+                branch=branch,
+                title=document.title,
+                content=document.content,
+                source_type=quality.source_type,
+                url=document.url,
+                extraction_method=str(document.metadata.get("suffix") or document.provenance),
+            )
+            metrics.failures.append(
+                f"Rejected {document.url}: {', '.join(validation.reasons)} "
+                f"(source_type={quality.source_type}; validation_policy={policy})"
+            )
+            continue
+        policy = validation_policy_for_source(
+            question=question,
+            branch=branch,
+            title=document.title,
+            content=document.content,
+            source_type=quality.source_type,
+            url=document.url,
+            extraction_method=str(document.metadata.get("suffix") or document.provenance),
+        )
+        source = _write_source(
+            source_id=source_id,
+            branch=branch,
+            title=document.title,
+            url=document.url,
+            text=document.content,
+            extraction_method=str(document.metadata.get("suffix") or document.provenance),
+            provenance=document.provenance,
+            artifacts=artifacts,
+            quality_score=quality.score,
+            quality_label=quality.label,
+            quality_type=quality.source_type,
+            relevance_score=validation.relevance_score,
+            word_count=validation.word_count,
+            metadata={
+                **document.metadata,
+                "validation_policy": policy,
+                "source_type": quality.source_type,
+            },
+        )
+        sources.append(source)
+        source_texts[source.id] = document.content
+        metrics.usable_source_count += 1
+
+
+def _candidate_to_source(
+    candidate: SourceCandidate,
+    branch: ResearchBranch,
+    artifacts: ResearchArtifactsV2,
+    scraper: Any,
+    *,
+    min_words: int,
+    min_chunks: int,
+    metrics: AcquisitionMetrics,
+    question: str,
+    source_id: int,
+    scrape_hard_timeout_s: float,
+) -> _RecordedSource | None:
+    try:
+        scraped = _scrape_candidate(candidate, scraper, metrics, hard_timeout_s=scrape_hard_timeout_s)
+    except Exception as exc:
+        metrics.rejected_source_count += 1
+        metrics.failures.append(f"Rejected {candidate.url}: {exc}")
+        return None
+
+    quality = score_source(
+        url=scraped.url,
+        title=scraped.title,
+        snippet=candidate.snippet,
+        markdown=scraped.markdown,
+        search_score=candidate.search_score,
+    )
+    validation = validate_source_content(
+        title=scraped.title,
+        content=scraped.markdown,
+        branch=branch,
+        min_words=min_words,
+        min_relevant_chunks=min_chunks,
+        question=question,
+        source_type=quality.source_type,
+        url=scraped.url,
+        extraction_method=scraped.extraction_method,
+    )
+    if not validation.usable:
+        metrics.rejected_source_count += 1
+        policy = validation_policy_for_source(
+            question=question,
+            branch=branch,
+            title=scraped.title,
+            content=scraped.markdown,
+            source_type=quality.source_type,
+            url=scraped.url,
+            extraction_method=scraped.extraction_method,
+        )
+        metrics.failures.append(
+            f"Rejected {candidate.url}: {', '.join(validation.reasons)} "
+            f"(source_type={quality.source_type}; validation_policy={policy})"
+        )
+        return None
+
+    policy = validation_policy_for_source(
+        question=question,
+        branch=branch,
+        title=scraped.title,
+        content=scraped.markdown,
+        source_type=quality.source_type,
+        url=scraped.url,
+        extraction_method=scraped.extraction_method,
+    )
+    source = _write_source(
+        source_id=source_id,
+        branch=branch,
+        title=scraped.title,
+        url=scraped.url,
+        text=scraped.markdown,
+        extraction_method=scraped.extraction_method,
+        provenance="web",
+        artifacts=artifacts,
+        quality_score=quality.score,
+        quality_label=quality.label,
+        quality_type=quality.source_type,
+        relevance_score=validation.relevance_score,
+        word_count=validation.word_count,
+        metadata={
+            "query": candidate.query,
+            "candidate_id": candidate.id,
+            "search_score": candidate.search_score,
+            "relevant_chunk_count": validation.relevant_chunk_count,
+            "validation_policy": policy,
+            "source_type": quality.source_type,
+            "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        },
+    )
+    metrics.usable_source_count += 1
+    return _RecordedSource(source=source, text=scraped.markdown)
+
+
+def _scrape_candidate(
+    candidate: SourceCandidate,
+    scraper: Any,
+    metrics: AcquisitionMetrics,
+    *,
+    hard_timeout_s: float,
+) -> ScrapeResult:
+    if candidate.raw_content and len(candidate.raw_content.split()) >= 80:
+        return ScrapeResult(
+            url=candidate.url,
+            title=candidate.title,
+            markdown=candidate.raw_content,
+            extraction_method="tavily_raw_content",
+        )
+    metrics.scrape_count += 1
+    if hard_timeout_s <= 0 or isinstance(scraper, PlaywrightScraper):
+        try:
+            return scraper.fetch(candidate.url)
+        except ScrapeQualityError:
+            raise
+
+    result_holder: list[ScrapeResult] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result_holder.append(scraper.fetch(candidate.url))
+        except Exception as exc:  # noqa: BLE001
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=hard_timeout_s)
+    if thread.is_alive():
+        raise ScrapeQualityError(
+            f"Candidate scrape hard timeout ({hard_timeout_s:.0f}s) exceeded for {candidate.url}"
+        )
+    if error_holder:
+        error = error_holder[0]
+        if isinstance(error, ScrapeQualityError):
+            raise error
+        raise error
+    if not result_holder:
+        raise ScrapeQualityError(f"Candidate scrape returned no result for {candidate.url}")
+    return result_holder[0]
+
+
+def _write_source(
+    *,
+    source_id: int,
+    branch: ResearchBranch,
+    title: str,
+    url: str,
+    text: str,
+    extraction_method: str,
+    provenance: str,
+    artifacts: ResearchArtifactsV2,
+    quality_score: float,
+    quality_label: str,
+    quality_type: str,
+    relevance_score: float,
+    word_count: int,
+    metadata: dict[str, Any],
+) -> SourceRecordV2:
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    content_path = f"source_docs/source_{source_id}.md"
+    canonical = _safe_canonical(url)
+    artifacts.write_text(
+        content_path,
+        f"# {title}\n\n"
+        f"URL: {url}\n"
+        f"Canonical URL: {canonical}\n"
+        f"Branch: {branch.id}\n"
+        f"Extraction method: {extraction_method}\n"
+        f"Word count: {word_count}\n\n"
+        f"{text.strip()}\n",
+    )
+    return SourceRecordV2(
+        id=source_id,
+        branch_id=branch.id,
+        title=title,
+        url=url,
+        canonical_url=canonical,
+        provenance=provenance,  # type: ignore[arg-type]
+        content_path=content_path,
+        content_hash=content_hash,
+        extraction_method=extraction_method,
+        word_count=word_count,
+        quality_score=quality_score,
+        quality_label=quality_label,
+        quality_type=quality_type,
+        relevance_score=relevance_score,
+        metadata=metadata,
+    )
+
+
+def _search_raw(client: Any, query: str, settings: Any) -> dict[str, Any]:
+    query = _trim_search_query(query)
+    explicit_max_sources = int(getattr(settings, "max_sources", MINIMUM_SOURCE_TARGET) or 0)
+    max_results = min(
+        MAX_TAVILY_RESULTS_PER_QUERY,
+        MAX_TAVILY_RESULTS_PER_QUERY if explicit_max_sources <= 0 else source_floor(explicit_max_sources),
+    )
+    kwargs = {
+        "max_results": max_results,
+        "search_depth": getattr(settings, "search_depth", "advanced"),
+        "chunks_per_source": 3,
+        "include_raw_content": bool(getattr(settings, "allow_raw_content", True)),
+    }
+    try:
+        response = client.search(query, **kwargs)
+    except TypeError:
+        response = client.search(query, max_results=max_results)
+    return response
+
+
+def _duckduckgo_available() -> bool:
+    return DDGS is not None
+
+
+def _search_with_exa(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://api.exa.ai/search",
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "query": query,
+            "numResults": max_results,
+            "contents": {"text": {"maxCharacters": 12_000}},
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        text = str(item.get("text") or item.get("summary") or item.get("snippet") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(text or str(item.get("highlight") or "")),
+                "raw_content": text,
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_brave(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        params={"q": query, "count": max(1, min(max_results, 20))},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = ((payload.get("web") or {}).get("results")) or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        snippet = str(item.get("description") or item.get("snippet") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(snippet),
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_firecrawl(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://api.firecrawl.dev/v1/search",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"query": query, "limit": max_results, "scrapeOptions": {"formats": ["markdown"]}},
+        timeout=45.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("data") or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("url") or item.get("link") or "")
+        if not url:
+            continue
+        raw = str(item.get("markdown") or item.get("content") or item.get("text") or "")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or metadata.get("title") or url),
+                "content": _snippet(str(item.get("description") or item.get("snippet") or raw)),
+                "raw_content": raw,
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_with_serper(query: str, *, api_key: str, max_results: int) -> list[dict[str, Any]]:
+    response = httpx.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        json={"q": query, "num": max(1, min(max_results, 100))},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results = payload.get("organic") or payload.get("results") or []
+    rows: list[dict[str, Any]] = []
+    for rank, item in enumerate(results):
+        url = str(item.get("link") or item.get("url") or "")
+        if not url:
+            continue
+        snippet = str(item.get("snippet") or item.get("description") or "")
+        rows.append(
+            {
+                "url": url,
+                "title": str(item.get("title") or url),
+                "content": _snippet(snippet),
+                "score": _search_score(item, rank),
+            }
+        )
+    return rows
+
+
+def _search_score(item: dict[str, Any], rank: int) -> float:
+    raw = item.get("score")
+    try:
+        if raw is not None:
+            return round(max(0.0, min(float(raw), 1.0)), 4)
+    except (TypeError, ValueError):
+        pass
+    return round(0.9 * (0.95 ** rank), 4)
+
+
+def _snippet(text: str, *, limit: int = 900) -> str:
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _short_error(exc: BaseException, *, limit: int = 180) -> str:
+    return re.sub(r"\s+", " ", f"{type(exc).__name__}: {exc}").strip()[:limit]
+
+
+_DDG_QUERY_TIMEOUT_SECONDS = 30.0  # hard wall-clock per DDG query
+
+
+class _DuckDuckGoTimeoutError(RuntimeError):
+    """Raised when a DDG query exceeds the wall-clock budget."""
+
+
+def _ddg_query_with_timeout(query: str, *, max_results: int) -> list[dict[str, Any]]:
+    """Run DDGS().text() in a daemon thread with a hard wall-clock timeout.
+
+    The duckduckgo-search library has no timeout parameter and can block on
+    a hung TCP socket indefinitely. We wrap it the same way we wrap Playwright
+    and synthesis: daemon thread + thread.join(timeout). On timeout the thread
+    is abandoned (dies with the process); main thread raises and the caller
+    treats it like any DDG failure.
+    """
+    if DDGS is None:
+        return []
+    result_holder: list[list[dict[str, Any]]] = []
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        rows: list[dict[str, Any]] = []
+        try:
+            with DDGS() as ddgs:
+                for rank, row in enumerate(ddgs.text(query, max_results=max_results)):
+                    url = str((row or {}).get("href") or "")
+                    if not url:
+                        continue
+                    title = str((row or {}).get("title") or url)
+                    snippet = str((row or {}).get("body") or (row or {}).get("snippet") or "")
+                    if not snippet:
+                        snippet = title
+                    # Position-decay score so search_score is informative even
+                    # without Tavily relevance data.
+                    positional_score = round(0.9 * (0.95 ** rank), 4)
+                    rows.append(
+                        {
+                            "url": url,
+                            "title": title,
+                            "content": snippet,
+                            "score": positional_score,
+                        }
+                    )
+            result_holder.append(rows)
+        except BaseException as exc:  # noqa: BLE001
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=_DDG_QUERY_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        raise _DuckDuckGoTimeoutError(
+            f"DuckDuckGo query did not return within {_DDG_QUERY_TIMEOUT_SECONDS:.0f}s; "
+            f"abandoning thread."
+        )
+    if error_holder:
+        raise error_holder[0]
+    return result_holder[0] if result_holder else []
+
+
+def _search_with_duckduckgo(query: str, *, max_results: int) -> list[dict[str, Any]]:
+    if DDGS is None:
+        return []
+    try:
+        return _ddg_query_with_timeout(query, max_results=max_results)
+    except _DuckDuckGoTimeoutError as exc:
+        # Re-raise as a regular exception so the caller's failure counter
+        # treats this as a hard failure (5 consecutive → DDG marked dead).
+        # Otherwise we wait 10 empty results which is twice as slow.
+        logging.getLogger(__name__).warning(
+            "DuckDuckGo query timed out (%s); counting as hard failure.", exc,
+        )
+        raise RuntimeError(str(exc)) from exc
+    except Exception:
+        return []
+
+
+def _branch_queries(branch: ResearchBranch, forced_terms: list[str], question: str) -> list[str]:
+    if not forced_terms:
+        return branch.queries
+    direct_queries = [
+        str(term).split(":", 1)[1].strip()
+        for term in forced_terms
+        if str(term).lower().startswith("search_query:") and str(term).split(":", 1)[1].strip()
+    ]
+    terms = _dedupe(
+        [term for term in forced_terms if term and not str(term).lower().startswith("search_query:")]
+    )[:12]
+    focus = " ".join(terms).strip()
+    followups = _dedupe(direct_queries) + list(branch.queries)
+    if focus:
+        followups.extend(
+            [
+                f"{branch.title} {focus}",
+                f"{branch.objective} {focus}",
+                f"{focus} evidence",
+                f"{focus} limitations",
+            ]
+        )
+    for term in terms:
+        followups.extend(
+            [
+                f"{branch.title} {term} evidence",
+                f"{branch.objective} {term}",
+                f"{term} empirical evidence",
+            ]
+        )
+    for index in range(0, max(0, len(terms) - 1), 2):
+        followups.append(f"{terms[index]} {terms[index + 1]} evidence")
+    return followups
+
+
+def _trim_search_query(query: str, *, max_chars: int = 380) -> str:
+    cleaned = " ".join(str(query).split()).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    boundary = cleaned.rfind(" ", 0, max_chars)
+    return cleaned[: boundary if boundary > 120 else max_chars].strip()
+
+
+def _best_branch_for_text(text: str, branches: list[ResearchBranch]) -> ResearchBranch:
+    terms = content_terms(text)
+    return max(
+        branches,
+        key=lambda branch: len(branch_terms(branch) & terms),
+    )
+
+
+def _safe_canonical(url: str) -> str:
+    try:
+        return canonicalize_url(url)
+    except ValueError:
+        return url.strip()
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_content(item: dict[str, Any]) -> str | None:
+    for key in ("raw_content", "rawContent", "content"):
+        value = item.get(key)
+        if isinstance(value, str) and len(value.split()) >= 120:
+            return value
+    return None
+
+
+def _candidate_has_raw_content(raw_content: str | None) -> bool:
+    return bool(raw_content and len(raw_content.split()) >= 80)
+
+
+def _blocked_source_reason(*, url: str, title: str, snippet: str, settings: Any) -> str:
+    patterns = tuple(getattr(settings, "blocked_source_patterns", ()) or ())
+    if not patterns:
+        return ""
+    haystack = "\n".join([url, title, snippet])
+    for pattern in patterns:
+        if re.search(pattern, haystack, flags=re.I):
+            return f"matched blocked source pattern: {pattern}"
+    return ""
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = " ".join(value.split()).strip()
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
