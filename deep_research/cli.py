@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from deep_research.settings import ConfigError, Settings
+from deep_research.core.settings import ConfigError, Settings
 
 CONFIGURATION_GUIDE = Path(__file__).resolve().parents[1] / "CONFIGURATION.md"
 
@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     managed_parser.add_argument("managed_provider", choices=["gemini", "openai"])
     _add_runtime_flags(managed_parser, include_engine=False)
     managed_parser.add_argument("question", nargs="+", help="Research question to answer.")
+
+    server_parser = subparsers.add_parser("server", help="Start the FastAPI REST server.")
+    server_parser.add_argument("--host", default="0.0.0.0", help="Host to bind server.")
+    server_parser.add_argument("--port", type=int, default=8080, help="Port to bind server.")
+    server_parser.add_argument("--workers", type=int, default=1, help="Uvicorn worker count.")
 
     subparsers.add_parser(
         "config",
@@ -109,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "config":
         print(CONFIGURATION_GUIDE.read_text(encoding="utf-8"))
+        return 0
+
+    if args.command == "server":
+        import uvicorn
+        uvicorn.run("deep_research.server:app", host=args.host, port=args.port, workers=args.workers)
         return 0
 
     from deep_research.agent import ResearchRunError, resume_research, run_research, verify_research_run
