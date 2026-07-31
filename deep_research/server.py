@@ -295,20 +295,27 @@ def get_job_activity(job_id: str):
     return {"job_id": job_id, "events": events}
 
 
+def _resolve_run_dir(job_id: str) -> Optional[Path]:
+    if job_id in JOBS and JOBS[job_id].get("run_dir"):
+        return Path(JOBS[job_id]["run_dir"])
+    runs_dir = _get_runs_dir()
+    candidate = runs_dir / job_id
+    if candidate.exists() and candidate.is_dir():
+        return candidate
+    # Fallback: check if job_id matches active job in memory and find most recently modified run dir
+    if job_id in JOBS:
+        dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+        if dirs:
+            return max(dirs, key=lambda p: p.stat().st_mtime)
+    return None
+
+
 @app.get("/v1/research/{job_id}/reports")
 def get_all_job_reports(job_id: str):
     """Returns all generated report versions (final report, best draft, failed report, draft report)."""
-    run_dir_path: Optional[Path] = None
-    if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        run_dir_path = Path(JOBS[job_id]["run_dir"])
-    else:
-        runs_dir = _get_runs_dir()
-        candidate = runs_dir / job_id
-        if candidate.exists():
-            run_dir_path = candidate
-
+    run_dir_path = _resolve_run_dir(job_id)
     if not run_dir_path or not run_dir_path.exists():
-        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found or run directory not yet initialized.")
 
     report_files = ["report.md", "best_draft.md", "failed_report.md", "draft_report.md"]
     reports = {}
@@ -328,15 +335,7 @@ def get_all_job_reports(job_id: str):
 @app.get("/v1/research/{job_id}/report/{variant}", response_class=PlainTextResponse)
 def get_job_report(job_id: str, variant: str = "report.md"):
     """Fetch report or specific report variant (report.md, best_draft.md, draft_report.md, failed_report.md)."""
-    run_dir_path: Optional[Path] = None
-    if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        run_dir_path = Path(JOBS[job_id]["run_dir"])
-    else:
-        runs_dir = _get_runs_dir()
-        candidate = runs_dir / job_id
-        if candidate.exists():
-            run_dir_path = candidate
-
+    run_dir_path = _resolve_run_dir(job_id)
     if not run_dir_path:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
