@@ -295,8 +295,39 @@ def get_job_activity(job_id: str):
     return {"job_id": job_id, "events": events}
 
 
+@app.get("/v1/research/{job_id}/reports")
+def get_all_job_reports(job_id: str):
+    """Returns all generated report versions (final report, best draft, failed report, draft report)."""
+    run_dir_path: Optional[Path] = None
+    if job_id in JOBS and JOBS[job_id].get("run_dir"):
+        run_dir_path = Path(JOBS[job_id]["run_dir"])
+    else:
+        runs_dir = _get_runs_dir()
+        candidate = runs_dir / job_id
+        if candidate.exists():
+            run_dir_path = candidate
+
+    if not run_dir_path or not run_dir_path.exists():
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
+    report_files = ["report.md", "best_draft.md", "failed_report.md", "draft_report.md"]
+    reports = {}
+    for filename in report_files:
+        p = run_dir_path / filename
+        if p.exists():
+            reports[filename] = {
+                "size_bytes": p.stat().st_size,
+                "url": f"/v1/research/{job_id}/report/{filename}",
+                "content": p.read_text(encoding="utf-8"),
+            }
+
+    return {"job_id": job_id, "reports": reports}
+
+
 @app.get("/v1/research/{job_id}/report", response_class=PlainTextResponse)
-def get_job_report(job_id: str):
+@app.get("/v1/research/{job_id}/report/{variant}", response_class=PlainTextResponse)
+def get_job_report(job_id: str, variant: str = "report.md"):
+    """Fetch report or specific report variant (report.md, best_draft.md, draft_report.md, failed_report.md)."""
     run_dir_path: Optional[Path] = None
     if job_id in JOBS and JOBS[job_id].get("run_dir"):
         run_dir_path = Path(JOBS[job_id]["run_dir"])
@@ -309,9 +340,11 @@ def get_job_report(job_id: str):
     if not run_dir_path:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
-    report_path = run_dir_path / "report.md"
+    # Standardize variant filename
+    filename = variant if variant.endswith(".md") else f"{variant}.md"
+    report_path = run_dir_path / filename
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail=f"Report for job '{job_id}' is not ready or does not exist.")
+        raise HTTPException(status_code=404, detail=f"Report variant '{filename}' for job '{job_id}' does not exist.")
 
     return report_path.read_text(encoding="utf-8")
 
