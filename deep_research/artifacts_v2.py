@@ -14,10 +14,12 @@ class ResearchArtifactsV2:
 
     @classmethod
     def create(cls, out_dir: Path, question: str) -> "ResearchArtifactsV2":
-        if out_dir.exists() and (out_dir.name.startswith("job_") or (out_dir / "activity.jsonl").exists()):
-            base = RunArtifacts(run_dir=out_dir.resolve())
+        out_dir_path = Path(out_dir)
+        if out_dir_path.exists() or out_dir_path.name.startswith("job_"):
+            base = RunArtifacts(run_dir=out_dir_path.resolve())
+            base.run_dir.mkdir(parents=True, exist_ok=True)
         else:
-            base = RunArtifacts.create(out_dir, question)
+            base = RunArtifacts.create(out_dir_path, question)
         for directory in ("documents", "checkpoints", "findings", "source_docs"):
             (base.run_dir / directory).mkdir(exist_ok=True)
         for file_name in (

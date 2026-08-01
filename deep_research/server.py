@@ -139,8 +139,8 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
     (job_run_dir / "activity.jsonl").touch(exist_ok=True)
     (job_run_dir / "manifest.json").write_text(json.dumps({"job_id": job_id, "question": request_data.question}))
 
-    settings_kwargs: Dict[str, Any] = {
-        "out_dir": job_run_dir,
+    settings_kwargs = {
+        "out_dir": JOBS[job_id]["run_dir"],
         "mode": request_data.mode,
         "research_engine": request_data.engine,
     }
