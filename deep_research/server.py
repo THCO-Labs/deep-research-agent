@@ -163,6 +163,14 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
     except ResearchRunError as err:
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(err)
+        if getattr(err, "result", None) and getattr(err.result, "run_dir", None):
+            JOBS[job_id]["run_dir"] = str(err.result.run_dir)
+            JOBS[job_id]["result"] = {
+                "run_dir": str(err.result.run_dir),
+                "report_path": str(err.result.report_path),
+                "verification_path": str(err.result.verification_path),
+                "metrics_path": str(err.result.metrics_path),
+            }
         if hasattr(err, "result") and err.result:
             JOBS[job_id]["run_dir"] = str(err.result.run_dir)
     except Exception as exc:
@@ -293,11 +301,10 @@ def _resolve_run_dir(job_id: str) -> Optional[Path]:
     candidate = runs_dir / job_id
     if candidate.exists() and candidate.is_dir():
         return candidate
-    # Fallback: check if job_id matches active job in memory and find most recently modified run dir
-    if job_id in JOBS:
-        dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
-        if dirs:
-            return max(dirs, key=lambda p: p.stat().st_mtime)
+    # Check if any directory on disk matches or if an active job in memory exists
+    dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+    if dirs:
+        return dirs[0]
     return None
 
 
