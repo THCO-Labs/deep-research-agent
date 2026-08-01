@@ -99,10 +99,13 @@ def _enabled_unless_disabled(flag_value: Optional[bool]) -> Optional[bool]:
 
 def _execute_research_job(job_id: str, request_data: ResearchRequest):
     JOBS[job_id]["status"] = "running"
-    runs_dir = _get_runs_dir()
+    base_runs_dir = _get_runs_dir()
+    job_run_dir = base_runs_dir / job_id
+    job_run_dir.mkdir(parents=True, exist_ok=True)
+    JOBS[job_id]["run_dir"] = str(job_run_dir)
 
     settings_kwargs: Dict[str, Any] = {
-        "out_dir": runs_dir,
+        "out_dir": job_run_dir,
         "mode": request_data.mode,
         "research_engine": request_data.engine,
     }
@@ -191,11 +194,15 @@ def root():
 @app.post("/v1/research", status_code=status.HTTP_202_ACCEPTED)
 async def submit_research(req: ResearchRequest, background_tasks: BackgroundTasks):
     job_id = f"job_{uuid.uuid4().hex[:12]}"
+    runs_dir = _get_runs_dir()
+    job_run_dir = runs_dir / job_id
+    job_run_dir.mkdir(parents=True, exist_ok=True)
+    
     JOBS[job_id] = {
         "job_id": job_id,
         "status": "queued",
         "question": req.question,
-        "run_dir": None,
+        "run_dir": str(job_run_dir),
         "error": None,
         "result": None,
     }
@@ -296,13 +303,23 @@ def get_job_activity(job_id: str):
 
 def _resolve_run_dir(job_id: str) -> Optional[Path]:
     if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        return Path(JOBS[job_id]["run_dir"])
+        p = Path(JOBS[job_id]["run_dir"])
+        if p.exists():
+            return p
     runs_dir = _get_runs_dir()
     candidate = runs_dir / job_id
     if candidate.exists() and candidate.is_dir():
         return candidate
-    # Check if any directory on disk matches or if an active job in memory exists
+    # Scan runs_dir for any directory containing job_id or timestamped folders
     dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+    for d in dirs:
+        if (d / "manifest.json").exists():
+            try:
+                manifest_text = (d / "manifest.json").read_text(encoding="utf-8")
+                if job_id in manifest_text:
+                    return d
+            except Exception:
+                pass
     if dirs:
         return dirs[0]
     return None
