@@ -521,7 +521,7 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
     if provider == "deepseek":
         from langchain_openai import ChatOpenAI
         kwargs = {
-            "model": model_name or "deepseek-chat",
+            "model": model_name or "deepseek-v4vflash",
             "api_key": api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
             "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             "timeout": timeout_seconds,
