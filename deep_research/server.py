@@ -214,14 +214,14 @@ async def submit_research(req: ResearchRequest, background_tasks: BackgroundTask
 def get_job_status(job_id: str):
     if job_id in JOBS:
         info = JOBS[job_id]
-        run_dir_str = info.get("run_dir")
+        run_dir_path = _resolve_run_dir(job_id)
+        run_dir_str = str(run_dir_path) if run_dir_path else info.get("run_dir")
         report_exists = False
         activity_events = []
-        if run_dir_str:
-            p_run = Path(run_dir_str)
-            if p_run.joinpath("report.md").exists():
+        if run_dir_path and run_dir_path.exists():
+            if run_dir_path.joinpath("report.md").exists():
                 report_exists = True
-            act_file = p_run.joinpath("activity.jsonl")
+            act_file = run_dir_path.joinpath("activity.jsonl")
             if act_file.exists():
                 try:
                     lines = act_file.read_text(encoding="utf-8").strip().splitlines()
@@ -241,11 +241,10 @@ def get_job_status(job_id: str):
         }
     
     # Fallback to checking disk for existing run dir
-    runs_dir = _get_runs_dir()
-    possible_dir = runs_dir / job_id
-    if possible_dir.exists() and possible_dir.is_dir():
-        report_file = possible_dir / "report.md"
-        act_file = possible_dir / "activity.jsonl"
+    run_dir_path = _resolve_run_dir(job_id)
+    if run_dir_path and run_dir_path.exists():
+        report_file = run_dir_path / "report.md"
+        act_file = run_dir_path / "activity.jsonl"
         activity_events = []
         if act_file.exists():
             try:
@@ -257,7 +256,7 @@ def get_job_status(job_id: str):
             "job_id": job_id,
             "status": "completed" if report_file.exists() else "unknown",
             "question": "",
-            "run_dir": str(possible_dir),
+            "run_dir": str(run_dir_path),
             "report_available": report_file.exists(),
             "recent_activity": activity_events,
         }
