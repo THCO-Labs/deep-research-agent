@@ -264,6 +264,14 @@ def get_job_status(job_id: str):
     if run_dir_path and run_dir_path.exists():
         report_file = run_dir_path / "report.md"
         act_file = run_dir_path / "activity.jsonl"
+        manifest_file = run_dir_path / "manifest.json"
+        question = ""
+        if manifest_file.exists():
+            try:
+                mdata = json.loads(manifest_file.read_text(encoding="utf-8"))
+                question = mdata.get("question", "")
+            except Exception:
+                pass
         activity_events = []
         if act_file.exists():
             try:
@@ -271,10 +279,12 @@ def get_job_status(job_id: str):
                 activity_events = [json.loads(line) for line in lines[-20:] if line.strip()]
             except Exception:
                 pass
+        
+        status_str = "completed" if report_file.exists() else ("running" if act_file.exists() else "queued")
         return {
             "job_id": job_id,
-            "status": "completed" if report_file.exists() else "unknown",
-            "question": "",
+            "status": status_str,
+            "question": question,
             "run_dir": str(run_dir_path),
             "report_available": report_file.exists(),
             "recent_activity": activity_events,
