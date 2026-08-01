@@ -423,6 +423,9 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.mistral_key_pool
     if provider == "together":
         return settings.together_key_pool
+    if provider == "deepseek":
+        key = os.environ.get("DEEPSEEK_API_KEY", "")
+        return (key,) if key else ("deepseek-key",)
     if provider == "azure_openai":
         key = os.environ.get("AZURE_OPENAI_API_KEY", "")
         return (key,) if key else ("azure-key",)
@@ -515,6 +518,18 @@ def _chat_model_for_route(route: dict[str, object]) -> BaseChatModel:
         if max_output_tokens > 0:
             kwargs["max_tokens"] = max_output_tokens
         return ChatMistralAI(**kwargs)
+    if provider == "deepseek":
+        from langchain_openai import ChatOpenAI
+        kwargs = {
+            "model": model_name or "deepseek-chat",
+            "api_key": api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+            "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "timeout": timeout_seconds,
+            "max_retries": 0,
+        }
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatOpenAI(**kwargs)
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(model=model_name)
