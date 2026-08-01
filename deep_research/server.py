@@ -268,16 +268,8 @@ def get_job_status(job_id: str):
 @app.get("/v1/research/{job_id}/activity")
 def get_job_activity(job_id: str):
     """Returns the step-by-step progress events stream for the research job."""
-    run_dir_path: Optional[Path] = None
-    if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        run_dir_path = Path(JOBS[job_id]["run_dir"])
-    else:
-        runs_dir = _get_runs_dir()
-        candidate = runs_dir / job_id
-        if candidate.exists():
-            run_dir_path = candidate
-
-    if not run_dir_path:
+    run_dir_path = _resolve_run_dir(job_id)
+    if not run_dir_path or not run_dir_path.exists():
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
     activity_path = run_dir_path / "activity.jsonl"
