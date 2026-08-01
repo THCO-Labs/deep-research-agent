@@ -205,8 +205,8 @@ async def submit_research(req: ResearchRequest, background_tasks: BackgroundTask
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(executor, _execute_research_job, job_id, req)
         job_info = JOBS[job_id]
-        if job_info["status"] == "failed":
-            raise HTTPException(status_code=500, detail=job_info.get("error", "Research run failed."))
+        job_info["reports_url"] = f"/v1/research/{job_id}/reports"
+        job_info["report_url"] = f"/v1/research/{job_id}/report"
         return job_info
 
 
