@@ -97,12 +97,42 @@ def _enabled_unless_disabled(flag_value: Optional[bool]) -> Optional[bool]:
     return None if flag_value is None else not flag_value
 
 
+def _persist_job_state(job_id: str) -> None:
+    """Write job metadata to disk so it survives restarts."""
+    if job_id not in JOBS:
+        return
+    info = JOBS[job_id]
+    run_dir_str = info.get("run_dir")
+    if not run_dir_str:
+        return
+    job_file = Path(run_dir_str) / "job.json"
+    payload = {
+        "job_id": info["job_id"],
+        "status": info["status"],
+        "question": info["question"],
+        "run_dir": run_dir_str,
+        "error": info.get("error"),
+        "result": info.get("result"),
+    }
+    tmp = job_file.with_name(f".job.json.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        tmp.replace(job_file)
+    except PermissionError:
+        job_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _execute_research_job(job_id: str, request_data: ResearchRequest):
     JOBS[job_id]["status"] = "running"
     base_runs_dir = _get_runs_dir()
     job_run_dir = base_runs_dir / job_id
     job_run_dir.mkdir(parents=True, exist_ok=True)
     JOBS[job_id]["run_dir"] = str(job_run_dir)
+    _persist_job_state(job_id)
 
     # Initialize empty activity.jsonl and manifest.json inside job_run_dir immediately
     (job_run_dir / "activity.jsonl").touch(exist_ok=True)
@@ -167,6 +197,7 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
             "verification_path": str(result.verification_path),
             "metrics_path": str(result.metrics_path),
         }
+        _persist_job_state(job_id)
     except ResearchRunError as err:
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(err)
@@ -178,11 +209,11 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
                 "verification_path": str(err.result.verification_path),
                 "metrics_path": str(err.result.metrics_path),
             }
-        if hasattr(err, "result") and err.result:
-            JOBS[job_id]["run_dir"] = str(err.result.run_dir)
+        _persist_job_state(job_id)
     except Exception as exc:
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(exc)
+        _persist_job_state(job_id)
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -265,13 +296,33 @@ def get_job_status(job_id: str):
         report_file = run_dir_path / "report.md"
         act_file = run_dir_path / "activity.jsonl"
         manifest_file = run_dir_path / "manifest.json"
+        job_file = run_dir_path / "job.json"
+        
         question = ""
-        if manifest_file.exists():
+        status_str = "running" if act_file.exists() else "queued"
+        error_msg = None
+        result_payload = None
+
+        if job_file.exists():
+            try:
+                jdata = json.loads(job_file.read_text(encoding="utf-8"))
+                status_str = jdata.get("status", status_str)
+                question = jdata.get("question", question)
+                error_msg = jdata.get("error")
+                result_payload = jdata.get("result")
+            except Exception:
+                pass
+
+        if not question and manifest_file.exists():
             try:
                 mdata = json.loads(manifest_file.read_text(encoding="utf-8"))
                 question = mdata.get("question", "")
             except Exception:
                 pass
+
+        if report_file.exists():
+            status_str = "completed"
+
         activity_events = []
         if act_file.exists():
             try:
@@ -280,14 +331,15 @@ def get_job_status(job_id: str):
             except Exception:
                 pass
         
-        status_str = "completed" if report_file.exists() else ("running" if act_file.exists() else "queued")
         return {
             "job_id": job_id,
             "status": status_str,
             "question": question,
             "run_dir": str(run_dir_path),
+            "error": error_msg,
             "report_available": report_file.exists(),
             "recent_activity": activity_events,
+            "result": result_payload,
         }
 
     raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
