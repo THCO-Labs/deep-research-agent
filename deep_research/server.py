@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-executor = ThreadPoolExecutor(max_workers=int(os.environ.get("MAX_WORKERS", "4")))
+executor = ThreadPoolExecutor(max_workers=int(os.environ.get("MAX_WORKERS", "20")))
 JOBS: Dict[str, Dict[str, Any]] = {}
 
 
