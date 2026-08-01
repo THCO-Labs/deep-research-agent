@@ -109,7 +109,7 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
     (job_run_dir / "manifest.json").write_text(json.dumps({"job_id": job_id, "question": request_data.question}))
 
     settings_kwargs: Dict[str, Any] = {
-        "out_dir": base_runs_dir,
+        "out_dir": job_run_dir,
         "mode": request_data.mode,
         "research_engine": request_data.engine,
     }
