@@ -244,7 +244,8 @@ async def submit_research(req: ResearchRequest, background_tasks: BackgroundTask
     }
 
     if req.async_mode:
-        background_tasks.add_task(_execute_research_job, job_id, req)
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(executor, _execute_research_job, job_id, req)
         return {
             "job_id": job_id,
             "status": "queued",
