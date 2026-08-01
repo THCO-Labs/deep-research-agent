@@ -45,3 +45,4 @@ jobs:
           resourceGroup: rg-deepresearch-bench
           imageToDeploy: cae637758ca2acr.azurecr.io/deep-research-agent:${{ github.sha }}
           targetPort: 8080
+          environmentVariables: RUNS_DIR=/app/runs
