@@ -376,18 +376,18 @@ def _resolve_run_dir(job_id: str) -> Optional[Path]:
     candidate = runs_dir / job_id
     if candidate.exists() and candidate.is_dir():
         return candidate
-    # Scan runs_dir for any directory containing job_id or timestamped folders
+    # Scan runs_dir for any directory containing job_id in manifest.json or job.json
     dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
     for d in dirs:
-        if (d / "manifest.json").exists():
-            try:
-                manifest_text = (d / "manifest.json").read_text(encoding="utf-8")
-                if job_id in manifest_text:
-                    return d
-            except Exception:
-                pass
-    if dirs:
-        return dirs[0]
+        for fname in ("manifest.json", "job.json"):
+            fpath = d / fname
+            if fpath.exists():
+                try:
+                    ftext = fpath.read_text(encoding="utf-8")
+                    if job_id in ftext:
+                        return d
+                except Exception:
+                    pass
     return None
 
 
