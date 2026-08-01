@@ -104,8 +104,12 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
     job_run_dir.mkdir(parents=True, exist_ok=True)
     JOBS[job_id]["run_dir"] = str(job_run_dir)
 
+    # Initialize empty activity.jsonl and manifest.json inside job_run_dir immediately
+    (job_run_dir / "activity.jsonl").touch(exist_ok=True)
+    (job_run_dir / "manifest.json").write_text(json.dumps({"job_id": job_id, "question": request_data.question}))
+
     settings_kwargs: Dict[str, Any] = {
-        "out_dir": job_run_dir,
+        "out_dir": base_runs_dir,
         "mode": request_data.mode,
         "research_engine": request_data.engine,
     }
