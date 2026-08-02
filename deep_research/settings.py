@@ -173,6 +173,7 @@ class Settings:
         mistral_api_key = mistral_api_keys[0] if mistral_api_keys else ""
         together_api_keys = _collect_numbered_env_values("TOGETHER_API_KEY")
         together_api_key = together_api_keys[0] if together_api_keys else ""
+        deepseek_api_key_env = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         tavily_api_keys = _collect_numbered_env_values(
             "TAVILY_API_KEY",
             extra_names=_semantic_api_key_env_names("TAVILY"),
@@ -182,7 +183,10 @@ class Settings:
             tavily_api_key = tavily_api_keys[0]
         provider_explicit = provider is not None
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
-        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys, together_api_keys)
+        resolved_provider = _resolve_provider(
+            requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys,
+            together_api_keys, deepseek_api_key=deepseek_api_key_env,
+        )
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
         depth = _depth_defaults(mode)
         resolved_fast_model = _resolve_model(
@@ -420,28 +424,18 @@ class Settings:
                 self.researcher_model, self.analyst_model,
                 self.verifier_model, self.judge_model,
             )
-            # For deepseek/azure providers, only require third-party provider keys
-            # when a role model *explicitly* uses that provider's prefix.
-            # For google/groq/hybrid/openrouter/together, use provider-aware logic.
-            _standalone_providers = {"deepseek", "azure", "ollama"}
-            if self.provider in _standalone_providers:
-                if any(m.startswith("google_genai:") for m in _role_models) and not self.google_key_pool:
-                    missing.append("GOOGLE_API_KEY")
-                if any(m.startswith("groq:") for m in _role_models) and not self.groq_key_pool:
-                    missing.append("GROQ_API_KEY")
-                if any(m.startswith("openrouter:") for m in _role_models) and not self.openrouter_key_pool:
-                    missing.append("OPENROUTER_API_KEY")
-                if any(m.startswith("together:") for m in _role_models) and not self.together_key_pool:
-                    missing.append("TOGETHER_API_KEY")
-            else:
-                if self._uses_model_provider("google_genai") and not self.google_key_pool:
-                    missing.append("GOOGLE_API_KEY")
-                if self._uses_model_provider("groq") and not self.groq_key_pool:
-                    missing.append("GROQ_API_KEY")
-                if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
-                    missing.append("OPENROUTER_API_KEY")
-                if self._uses_model_provider("together") and not self.together_key_pool:
-                    missing.append("TOGETHER_API_KEY")
+            # Always use explicit model-prefix inspection so that the check is
+            # independent of how the provider env-var resolved at runtime.
+            # Google/hybrid defaults produce "google_genai:…" prefixes explicitly;
+            # deepseek/azure/ollama defaults never produce "google_genai:…" prefixes.
+            if any(m.startswith("google_genai:") for m in _role_models) and not self.google_key_pool:
+                missing.append("GOOGLE_API_KEY")
+            if any(m.startswith("groq:") for m in _role_models) and not self.groq_key_pool:
+                missing.append("GROQ_API_KEY")
+            if any(m.startswith("openrouter:") for m in _role_models) and not self.openrouter_key_pool:
+                missing.append("OPENROUTER_API_KEY")
+            if any(m.startswith("together:") for m in _role_models) and not self.together_key_pool:
+                missing.append("TOGETHER_API_KEY")
             # Tavily and paid search-provider keys are optional because
             # DuckDuckGo is a no-key emergency fallback when installed.
         if missing:
@@ -572,9 +566,15 @@ def _resolve_provider(
     groq_api_keys: Iterable[str],
     openrouter_api_keys: Iterable[str],
     together_api_keys: Iterable[str] = (),
+    deepseek_api_key: str = "",
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
+        # Prefer deepseek when its key is explicitly available, so that the
+        # container's DEEPSEEK_API_KEY env var takes precedence over the
+        # google/groq keys that might also be present from a previous config.
+        if deepseek_api_key:
+            return "deepseek"
         has_google = bool(tuple(google_api_keys))
         has_groq = bool(tuple(groq_api_keys))
         has_openrouter = bool(tuple(openrouter_api_keys))
