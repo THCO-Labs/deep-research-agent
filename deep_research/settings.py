@@ -623,6 +623,10 @@ def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
         return OPENROUTER_DEFAULT_FAST_MODEL if fast else OPENROUTER_DEFAULT_MODEL
     if provider == "hybrid":
         return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
+    if provider == "deepseek":
+        return "deepseek:deepseek-v4-flash"
+    if provider == "azure":
+        return "azure_openai:gpt-4o"
     if provider == "groq":
         return GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL
     return GOOGLE_DEFAULT_FAST_MODEL if fast else GOOGLE_DEFAULT_MODEL
