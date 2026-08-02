@@ -1,0 +1,158 @@
+{
+  "google_key_count": 2,
+  "groq_key_count": 2,
+  "mistral_key_count": 3,
+  "model_fallbacks": true,
+  "model_max_output_tokens": 16000,
+  "model_request_timeout_seconds": 600,
+  "openrouter_key_count": 1,
+  "provider": "hybrid",
+  "provider_retry_attempts": 3,
+  "provider_retry_max_wait_seconds": 30,
+  "roles": [
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "orchestrator"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "planner"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "researcher"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "analyst"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "verifier"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "judge"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "fast"
+    },
+    {
+      "fallback_routes": [
+        {
+          "fallback_type": "free_provider",
+          "key_label": "OPENROUTER_API_KEY",
+          "key_slot": 0,
+          "model": "meta-llama/llama-3.3-70b-instruct:free",
+          "provider": "openrouter"
+        }
+      ],
+      "key_count": 0,
+      "key_label": null,
+      "key_slot": null,
+      "model": "gpt-4o",
+      "model_spec": "azure_openai:gpt-4o",
+      "provider": "azure_openai",
+      "role": "synthesis"
+    }
+  ]
+}

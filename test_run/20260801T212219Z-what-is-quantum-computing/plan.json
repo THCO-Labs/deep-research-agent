@@ -1,0 +1,59 @@
+{
+  "acceptance_criteria": [
+    "Every branch has evidence cards from usable sources.",
+    "Every factual paragraph has inline citations.",
+    "The report answers the question directly before deep detail.",
+    "Verification passes citation, evidence, coverage, and structure gates."
+  ],
+  "audience": "technical generalist",
+  "branches": [
+    {
+      "completion_criteria": [
+        "At least the minimum source count is usable.",
+        "Evidence cards cover the branch-specific required terms."
+      ],
+      "id": "branch_1",
+      "min_sources": 17,
+      "objective": "Research this aspect of the request: quantum computing. Keep findings grounded in the full user question: What is quantum computing?",
+      "queries": [
+        "quantum computing",
+        "What is quantum computing?"
+      ],
+      "required_terms": [
+        "quantum",
+        "computing"
+      ],
+      "source_types": [
+        "academic",
+        "official_docs",
+        "standards_or_government",
+        "general_web"
+      ],
+      "title": "Quantum computing"
+    }
+  ],
+  "intent": "general",
+  "question": "What is quantum computing?",
+  "report_outline": [
+    "Quantum computing"
+  ],
+  "schema_version": 2,
+  "source_requirements": [
+    {
+      "min_count": 1,
+      "rationale": "Anchor technical claims in research where available.",
+      "source_type": "academic"
+    },
+    {
+      "min_count": 1,
+      "rationale": "Prefer primary documentation for implementation details.",
+      "source_type": "official_docs"
+    },
+    {
+      "min_count": 1,
+      "rationale": "Capture current context when recency matters.",
+      "source_type": "recent_or_contextual"
+    }
+  ],
+  "writer_persona": ""
+}

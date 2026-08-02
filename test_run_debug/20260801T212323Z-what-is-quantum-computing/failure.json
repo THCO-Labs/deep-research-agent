@@ -1,0 +1,8 @@
+{
+  "category": "unknown",
+  "error_type": "RuntimeError",
+  "message": "Semantic judge role did not resolve to an invokable model: 'azure_openai:gpt-4o'",
+  "retry_after_seconds": null,
+  "retryable": false,
+  "suggested_action": "Inspect error.txt, transcript.log, activity.md, and provider dashboards."
+}

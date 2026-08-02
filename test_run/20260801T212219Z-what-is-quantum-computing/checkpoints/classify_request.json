@@ -1,0 +1,23 @@
+{
+  "checkpoint_phase": "classify_request",
+  "evidence_cards": [],
+  "failures": [],
+  "metrics": {
+    "coverage_rounds": 0,
+    "engine": "local_langgraph",
+    "max_candidates": 160,
+    "max_reasoning_iterations": 5,
+    "max_rounds": 2,
+    "max_search_queries": 16,
+    "max_sources": 24,
+    "started_at_monotonic": 626242.786805
+  },
+  "request": {
+    "engine": "local_langgraph",
+    "mode": "fast",
+    "question": "What is quantum computing?",
+    "writing_guidance": ""
+  },
+  "source_candidates": [],
+  "source_records": []
+}

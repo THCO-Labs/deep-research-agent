@@ -1,0 +1,7 @@
+{
+  "failures": [
+    "Semantic judge role did not resolve to an invokable model: 'azure_openai:gpt-4o'"
+  ],
+  "schema_version": 2,
+  "valid": false
+}

@@ -1,0 +1,6 @@
+{
+  "engine": "local_langgraph",
+  "mode": "fast",
+  "question": "What is quantum computing?",
+  "writing_guidance": ""
+}

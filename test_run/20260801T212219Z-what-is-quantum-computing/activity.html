@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5">
+  <title>Deep Research Activity</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172018;
+      --muted: #5d6a60;
+      --line: #d9ded5;
+      --surface: #f7f8f4;
+      --panel: #ffffff;
+      --accent: #0f6f5c;
+      --warn: #9a5b00;
+      --error: #a6362f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Aptos", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #f7f8f4 0%, #eef3ea 100%);
+    }
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+    header {
+      display: grid;
+      gap: 8px;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 4vw, 44px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .subtle { color: var(--muted); margin: 0; max-width: 780px; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin: 22px 0;
+    }
+    .chip {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .latest {
+      margin: 0 0 20px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      background: var(--panel);
+      box-shadow: 0 1px 0 rgba(0,0,0,.04);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: #f2f5ef;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .stage {
+      display: inline-block;
+      min-width: 92px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .stage-error { color: var(--error); }
+    .stage-retry, .stage-model_fallback { color: var(--warn); }
+    code {
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    @media (max-width: 720px) {
+      main { width: min(100% - 20px, 1120px); padding-top: 20px; }
+      th:nth-child(1), td:nth-child(1) { display: none; }
+      .stage { min-width: 72px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="subtle">Auto-refreshes every 5 seconds</p>
+      <h1>Deep Research Activity</h1>
+      <p class="subtle">20260801T212219Z-what-is-quantum-computing</p>
+      <p class="subtle">This dashboard shows observable research actions, tool progress, verification status, and model fallback events. It does not expose hidden chain-of-thought.</p>
+    </header>
+    <section class="stats" aria-label="Activity counts">
+      <span class="chip"><span>Total events</span><strong>38</strong></span>
+      <span class="chip"><span>error</span><strong>1</strong></span>
+<span class="chip"><span>research_status</span><strong>36</strong></span>
+<span class="chip"><span>run</span><strong>1</strong></span>
+    </section>
+    <p class="latest"><strong>Latest:</strong> unknown: Semantic judge role did not resolve to an invokable model: &#x27;azure_openai:gpt-4o&#x27;</p>
+    <table>
+      <thead><tr><th>Time</th><th>Stage</th><th>Message</th></tr></thead>
+      <tbody>
+        <tr><td><code>2026-08-01T21:26:14+00:00</code></td><td><span class="stage stage-error">error</span></td><td>unknown: Semantic judge role did not resolve to an invokable model: &#x27;azure_openai:gpt-4o&#x27;</td></tr>
+<tr><td><code>2026-08-01T21:26:14+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>kept 22 evidence cards; rejected 5 | phase=evidence_hygiene; kept=22; rejected=5</td></tr>
+<tr><td><code>2026-08-01T21:26:13+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>built 27 raw evidence cards | phase=build_evidence; cards=27</td></tr>
+<tr><td><code>2026-08-01T21:26:06+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>read 9 source documents | phase=read_sources</td></tr>
+<tr><td><code>2026-08-01T21:26:05+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>collected 9 usable sources from 24 candidates | phase=acquire_sources; sources=9; candidates=24; searches=2</td></tr>
+<tr><td><code>2026-08-01T21:26:05+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.wsj.com/tech/how-quantum-computing-works-cab3fef2?eafs_enabled=false; rejection_reason=only 0 relevant chunk(s); sources=9; candidates=24; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:41+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.reddit.com/r/QuantumComputing/comments/13suoa7/what_is_quantum_computing_in_laymans_terms_and; rejection_reason=90 words &lt; 180, extracted text appears to be mostly boilerplate or related-link content, only 0 relevant chunk(s); sources=9; candidates=23; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:35+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.youtube.com/watch?v=Kv8N9alyYNc; rejection_reason=only 0 relevant chunk(s); sources=9; candidates=22; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:34+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://computer.howstuffworks.com/quantum-computer.htm; rejection_reason=only 0 relevant chunk(s); sources=9; candidates=21; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:34+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.youtube.com/watch?v=B3U1NDUiwSA; rejection_reason=only 0 relevant chunk(s); sources=9; candidates=20; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:33+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [9] | phase=acquire_sources; source_id=9; sources=9; candidates=19; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:33+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>search returned 15 candidate(s) | phase=acquire_sources; query=What is quantum computing?; sources=8; candidates=18; searches=2; search_provider=tavily; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:15+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>searching source candidates | phase=acquire_sources; query=What is quantum computing?; sources=8; candidates=18; searches=2; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:15+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.sciencedirect.com/science/article/pii/S002228602400440X; rejection_reason=extracted text appears to be mostly boilerplate or related-link content, source relevance to the original question below threshold, source lacks a branch-specific anchor phrase, branch relevance below; sources=8; candidates=18; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:11+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.reddit.com/r/QuantumComputing/comments/yjnvwh/explain_it_like_im_5; rejection_reason=86 words &lt; 180, extracted text appears to be mostly boilerplate or related-link content, source relevance to the original question below threshold, source lacks a branch-specific anchor phrase, branch; sources=8; candidates=17; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:25:06+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.researchgate.net/publication/375794385_The_Future_of_Quantum_Computing_and_its_Potential_Applications; rejection_reason=78 words &lt; 180, extracted text appears to be mostly boilerplate or related-link content, only 0 relevant chunk(s); sources=8; candidates=16; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:59+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [8] | phase=acquire_sources; source_id=8; sources=8; candidates=15; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:58+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.reddit.com/r/QuantumComputing/comments/1rhvtr7/does_quantum_computing_actually_have_a_future; rejection_reason=88 words &lt; 180, extracted text appears to be mostly boilerplate or related-link content, only 0 relevant chunk(s); sources=7; candidates=14; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:54+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://quantumai.google/whatisqc; rejection_reason=only 0 relevant chunk(s); sources=7; candidates=13; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:54+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.nist.gov/quantum-information-science/quantum-computing-explained; rejection_reason=only 0 relevant chunk(s); sources=7; candidates=12; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:53+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://scienceexchange.caltech.edu/topics/quantum-science-explained/quantum-computing-computers; rejection_reason=only 0 relevant chunk(s); sources=7; candidates=11; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:53+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.rochester.edu/newscenter/is-quantum-computing-the-future-explainer-667152; rejection_reason=only 0 relevant chunk(s); sources=7; candidates=10; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:53+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [7] | phase=acquire_sources; source_id=7; sources=7; candidates=9; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:52+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [6] | phase=acquire_sources; source_id=6; sources=6; candidates=8; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:51+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [5] | phase=acquire_sources; source_id=5; sources=5; candidates=7; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:41+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://quantumcomputinginc.com; rejection_reason=only 0 relevant chunk(s); sources=4; candidates=6; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:40+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [4] | phase=acquire_sources; source_id=4; sources=4; candidates=5; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:39+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [3] | phase=acquire_sources; source_id=3; sources=3; candidates=4; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:24:39+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>rejected source candidate | phase=acquire_sources; url=https://www.mckinsey.com/featured-insights/mckinsey-explainers/what-is-quantum-computing; rejection_reason=Jina returned empty or very short content; sources=2; candidates=3; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:23:08+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [2] | phase=acquire_sources; source_id=2; sources=2; candidates=2; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:23:08+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>accepted source [1] | phase=acquire_sources; source_id=1; sources=1; candidates=1; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:23:06+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>search returned 18 candidate(s) | phase=acquire_sources; query=quantum computing; sources=0; candidates=0; searches=1; search_provider=tavily; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:22:49+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>searching source candidates | phase=acquire_sources; query=quantum computing; sources=0; candidates=0; searches=1; branch_id=branch_1</td></tr>
+<tr><td><code>2026-08-01T21:22:49+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>plan quality ok: score=1.00, branches=1 | phase=check_plan_quality; issues=[]</td></tr>
+<tr><td><code>2026-08-01T21:22:49+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>planned 1 research branches with deterministic fallback | phase=plan; branches=[branch_1]; llm_planning_accepted=false; llm_planning_failures=[Planner role did not resolve to an invokable chat model.]</td></tr>
+<tr><td><code>2026-08-01T21:22:21+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>classified request | phase=classify_request; question=What is quantum computing?</td></tr>
+<tr><td><code>2026-08-01T21:22:20+00:00</code></td><td><span class="stage stage-research_status">research_status</span></td><td>ingested 0 local document(s) and 0 MCP document(s)</td></tr>
+<tr><td><code>2026-08-01T21:22:20+00:00</code></td><td><span class="stage stage-run">run</span></td><td>created C:\Users\Hp\Documents\Codex\deep research\deep-research-agent\test_run\20260801T212219Z-what-is-quantum-computing</td></tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

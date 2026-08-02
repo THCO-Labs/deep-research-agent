@@ -181,9 +181,8 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
     if request_data.allow_weak_tool_models is not None:
         settings_kwargs["strict_tool_models"] = _enabled_unless_disabled(request_data.allow_weak_tool_models)
 
-    settings = Settings.from_env(**settings_kwargs)
-
     try:
+        settings = Settings.from_env(**settings_kwargs)
         result = run_research(
             question=request_data.question,
             settings=settings,

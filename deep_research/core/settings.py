@@ -26,10 +26,10 @@ OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:fr
 MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together", "azure_openai"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GOOGLE_DEFAULT_MODEL,
-    "fast": GROQ_DEFAULT_FAST_MODEL,
+    "fast": GOOGLE_DEFAULT_FAST_MODEL,
     "planner": GOOGLE_DEFAULT_FAST_MODEL,
-    "researcher": GROQ_DEFAULT_FAST_MODEL,
-    "analyst": GROQ_DEFAULT_FAST_MODEL,
+    "researcher": GOOGLE_DEFAULT_FAST_MODEL,
+    "analyst": GOOGLE_DEFAULT_FAST_MODEL,
     "verifier": GOOGLE_DEFAULT_FAST_MODEL,
     "judge": GOOGLE_DEFAULT_FAST_MODEL,
 }

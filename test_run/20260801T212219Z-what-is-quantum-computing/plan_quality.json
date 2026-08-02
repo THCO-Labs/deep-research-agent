@@ -1,0 +1,20 @@
+{
+  "branch_count": 1,
+  "branch_details": [
+    {
+      "id": "branch_1",
+      "min_sources": 17,
+      "query_count": 2,
+      "required_terms": [
+        "quantum",
+        "computing"
+      ],
+      "title": "Quantum computing"
+    }
+  ],
+  "branch_similarity": {},
+  "issues": [],
+  "overall_score": 1.0,
+  "question_term_coverage": 1.0,
+  "status": "ok"
+}

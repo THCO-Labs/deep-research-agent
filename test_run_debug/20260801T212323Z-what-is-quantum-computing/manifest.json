@@ -1,0 +1,228 @@
+{
+  "engine": "local_langgraph",
+  "managed_provider": null,
+  "mode": "fast",
+  "model_routes": {
+    "google_key_count": 2,
+    "groq_key_count": 2,
+    "mistral_key_count": 3,
+    "model_fallbacks": true,
+    "model_max_output_tokens": 16000,
+    "model_request_timeout_seconds": 600,
+    "openrouter_key_count": 1,
+    "provider": "hybrid",
+    "provider_retry_attempts": 3,
+    "provider_retry_max_wait_seconds": 30,
+    "roles": [
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "orchestrator"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "planner"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "researcher"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "analyst"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "verifier"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "judge"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "fast"
+      },
+      {
+        "fallback_routes": [
+          {
+            "fallback_type": "free_provider",
+            "key_label": "OPENROUTER_API_KEY",
+            "key_slot": 0,
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
+            "provider": "openrouter"
+          }
+        ],
+        "key_count": 0,
+        "key_label": null,
+        "key_slot": null,
+        "model": "gpt-4o",
+        "model_spec": "azure_openai:gpt-4o",
+        "provider": "azure_openai",
+        "role": "synthesis"
+      }
+    ]
+  },
+  "progress_mode": "live",
+  "question": "What is quantum computing?",
+  "run_id": "20260801T212323Z-what-is-quantum-computing",
+  "runtime": {
+    "packages": {
+      "deep-research-agent": "0.1.0",
+      "deepagents": "0.6.4",
+      "httpx": "0.28.1",
+      "langchain": "1.3.2",
+      "langchain-google-genai": "4.2.3",
+      "langchain-groq": "1.1.2",
+      "langchain-ollama": "1.1.0",
+      "playwright": "1.59.0",
+      "tavily-python": "0.7.24"
+    },
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.8"
+  },
+  "schema_version": 2,
+  "settings": {
+    "allow_failed_verification": false,
+    "allow_raw_content": true,
+    "analyst_model": "azure_openai:gpt-4o",
+    "blocked_source_pattern_count": 0,
+    "fast_model": "azure_openai:gpt-4o",
+    "google_key_count": 2,
+    "groq_key_count": 2,
+    "judge_model": "azure_openai:gpt-4o",
+    "live": false,
+    "llm_planning": true,
+    "llm_synthesis": true,
+    "local_input_count": 0,
+    "max_browser_scrapes_per_query": 0,
+    "max_candidates": 160,
+    "max_rounds": 2,
+    "max_search_queries": 16,
+    "max_sources": 24,
+    "mcp_manifest_present": false,
+    "min_relevant_chunks": 1,
+    "min_source_words": 180,
+    "min_usable_sources": 17,
+    "mode": "fast",
+    "model": "azure_openai:gpt-4o",
+    "model_fallbacks": true,
+    "openrouter_key_count": 1,
+    "out_dir": "C:\\Users\\Hp\\Documents\\Codex\\deep research\\deep-research-agent\\test_run_debug",
+    "planner_model": "azure_openai:gpt-4o",
+    "precollect_sources": true,
+    "project_root": "C:\\Users\\Hp\\Documents\\Codex\\deep research\\deep-research-agent",
+    "provider": "hybrid",
+    "provider_retry_attempts": 3,
+    "provider_retry_max_wait_seconds": 30,
+    "report_quality_gate": true,
+    "research_engine": "local_langgraph",
+    "researcher_model": "azure_openai:gpt-4o",
+    "scrape_char_limit": 5000,
+    "search_depth": "advanced",
+    "semantic_evidence_max_llm_cards": 120,
+    "semantic_verification": true,
+    "strict_tool_models": true,
+    "tavily_api_key_present": true,
+    "tavily_key_count": 2,
+    "tool_excerpt_char_limit": 900,
+    "verifier_model": "azure_openai:gpt-4o"
+  }
+}
