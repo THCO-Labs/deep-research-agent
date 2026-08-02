@@ -55,11 +55,15 @@ def run_research(
     on_update: ProgressCallback | None = None,
     progress_mode: ProgressMode = "live",
     writing_guidance: str = "",
+    run_dir: Path | None = None,
 ) -> ResearchRunResult:
     if not question.strip():
         raise ValueError("Research question cannot be empty.")
 
-    artifacts = ResearchArtifactsV2.create(settings.out_dir, question)
+    if run_dir is not None:
+        artifacts = ResearchArtifactsV2.from_existing(run_dir)
+    else:
+        artifacts = ResearchArtifactsV2.create(settings.out_dir, question)
     activity = ActivityLog(artifacts, on_update=on_update, progress_mode=progress_mode)
     started = time.perf_counter()
     _emit(activity, "run", f"created {artifacts.run_dir}")

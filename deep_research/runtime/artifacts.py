@@ -77,6 +77,8 @@ class RunArtifacts:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as handle:
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         return target
 
     def append_jsonl(self, file_path: str | Path, row: dict[str, Any]) -> Path:

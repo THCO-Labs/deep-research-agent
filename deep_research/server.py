@@ -189,6 +189,7 @@ def _execute_research_job(job_id: str, request_data: ResearchRequest):
             settings=settings,
             writing_guidance=request_data.writing_guidance or "",
             progress_mode="live",
+            run_dir=job_run_dir,
         )
         JOBS[job_id]["status"] = "completed"
         JOBS[job_id]["run_dir"] = str(result.run_dir)
