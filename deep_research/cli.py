@@ -68,7 +68,7 @@ def _add_runtime_flags(parser: argparse.ArgumentParser, *, include_engine: bool 
     parser.add_argument("--mcp-manifest", default=None, help="JSON manifest for MCP connector source payloads.")
     parser.add_argument(
         "--provider",
-        choices=["auto", "google", "groq", "hybrid", "ollama", "openrouter"],
+        choices=["auto", "google", "groq", "hybrid", "ollama", "openrouter", "deepseek", "azure"],
         default=None,
         help="Model provider for local utility/model policy routing.",
     )

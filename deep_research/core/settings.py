@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from deep_research.acquisition.source_limits import MINIMUM_SOURCE_TARGET, source_floor
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter", "together"]
-ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter", "together"]
+Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"]
+ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"]
 ResearchEngineName = Literal["local_langgraph", "gemini_managed", "openai_managed"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
@@ -23,13 +23,13 @@ OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
 OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
 OPENROUTER_DEFAULT_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
 OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
-MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together", "azure_openai"})
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together", "azure_openai", "deepseek"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GOOGLE_DEFAULT_MODEL,
-    "fast": GOOGLE_DEFAULT_FAST_MODEL,
+    "fast": GROQ_DEFAULT_FAST_MODEL,
     "planner": GOOGLE_DEFAULT_FAST_MODEL,
-    "researcher": GOOGLE_DEFAULT_FAST_MODEL,
-    "analyst": GOOGLE_DEFAULT_FAST_MODEL,
+    "researcher": GROQ_DEFAULT_FAST_MODEL,
+    "analyst": GROQ_DEFAULT_FAST_MODEL,
     "verifier": GOOGLE_DEFAULT_FAST_MODEL,
     "judge": GOOGLE_DEFAULT_FAST_MODEL,
 }
@@ -182,6 +182,7 @@ class Settings:
         together_api_key = together_api_keys[0] if together_api_keys else ""
         azure_openai_api_keys = _collect_numbered_env_values("AZURE_OPENAI_API_KEY")
         azure_openai_api_key = azure_openai_api_keys[0] if azure_openai_api_keys else ""
+        deepseek_api_key_env = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         tavily_api_keys = _collect_numbered_env_values(
             "TAVILY_API_KEY",
             extra_names=_semantic_api_key_env_names("TAVILY"),
@@ -191,7 +192,10 @@ class Settings:
             tavily_api_key = tavily_api_keys[0]
         provider_explicit = provider is not None
         requested_provider = provider or os.environ.get("DEEP_RESEARCH_PROVIDER", "auto")
-        resolved_provider = _resolve_provider(requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys, together_api_keys)
+        resolved_provider = _resolve_provider(
+            requested_provider, google_api_keys, groq_api_keys, openrouter_api_keys,
+            together_api_keys, deepseek_api_key=deepseek_api_key_env,
+        )
         mode_sources, mode_rounds = _mode_defaults(mode, resolved_provider)
         depth = _depth_defaults(mode)
         resolved_fast_model = _resolve_model(
@@ -466,7 +470,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
+        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.research_engine not in {"local_langgraph", "gemini_managed", "openai_managed"}:
             raise ConfigError(f"Unsupported research engine: {self.research_engine}")
@@ -586,9 +590,15 @@ def _resolve_provider(
     groq_api_keys: Iterable[str],
     openrouter_api_keys: Iterable[str],
     together_api_keys: Iterable[str] = (),
+    deepseek_api_key: str = "",
 ) -> ResolvedProvider:
     normalized = provider.strip().lower()
     if normalized == "auto":
+        # Prefer deepseek when its key is explicitly available, so that the
+        # container's DEEPSEEK_API_KEY env var takes precedence over the
+        # google/groq keys that might also be present from a previous config.
+        if deepseek_api_key:
+            return "deepseek"
         has_google = bool(tuple(google_api_keys))
         has_groq = bool(tuple(groq_api_keys))
         has_openrouter = bool(tuple(openrouter_api_keys))
@@ -604,7 +614,7 @@ def _resolve_provider(
         if has_together:
             return "together"
         return "google"
-    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
+    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 
@@ -626,6 +636,10 @@ def _resolve_model(
         prefix = "ollama"
     elif provider == "openrouter":
         prefix = "openrouter"
+    elif provider == "deepseek":
+        prefix = "deepseek"
+    elif provider == "azure":
+        prefix = "azure_openai"
     else:
         prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
@@ -654,6 +668,10 @@ def _default_model(provider: ResolvedProvider, *, fast: bool, role: str) -> str:
         return HYBRID_DEFAULT_MODELS.get(role, GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL)
     if provider == "groq":
         return GROQ_DEFAULT_FAST_MODEL if fast else GROQ_DEFAULT_MODEL
+    if provider == "deepseek":
+        return "deepseek:deepseek-v4-flash"
+    if provider == "azure":
+        return "azure_openai:gpt-4o"
     return GOOGLE_DEFAULT_FAST_MODEL if fast else GOOGLE_DEFAULT_MODEL
 
 
