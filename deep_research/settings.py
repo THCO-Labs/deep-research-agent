@@ -433,7 +433,7 @@ class Settings:
             )
         if self.mode not in {"fast", "balanced", "max_quality"}:
             raise ConfigError(f"Unsupported mode: {self.mode}")
-        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
+        if self.provider not in {"google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"}:
             raise ConfigError(f"Unsupported provider: {self.provider}")
         if self.research_engine not in {"local_langgraph", "gemini_managed", "openai_managed"}:
             raise ConfigError(f"Unsupported research engine: {self.research_engine}")
