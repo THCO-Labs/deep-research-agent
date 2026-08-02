@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from deep_research.source_limits import MINIMUM_SOURCE_TARGET, source_floor
 
 Mode = Literal["fast", "balanced", "max_quality"]
-Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter", "together"]
-ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter", "together"]
+Provider = Literal["auto", "google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"]
+ResolvedProvider = Literal["google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"]
 ResearchEngineName = Literal["local_langgraph", "gemini_managed", "openai_managed"]
 
 GOOGLE_DEFAULT_MODEL = "google_genai:gemini-2.5-flash"
@@ -571,7 +571,7 @@ def _resolve_provider(
         if has_together:
             return "together"
         return "google"
-    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter", "together"}:
+    if normalized in {"google", "groq", "hybrid", "ollama", "openrouter", "together", "deepseek", "azure"}:
         return normalized  # type: ignore[return-value]
     raise ConfigError(f"Unsupported provider: {provider}")
 
@@ -593,6 +593,10 @@ def _resolve_model(
         prefix = "ollama"
     elif provider == "openrouter":
         prefix = "openrouter"
+    elif provider == "deepseek":
+        prefix = "deepseek"
+    elif provider == "azure":
+        prefix = "azure_openai"
     else:
         prefix = "google_genai" if provider == "google" else "groq"
     return f"{prefix}:{chosen}"
