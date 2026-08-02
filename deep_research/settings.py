@@ -415,14 +415,33 @@ class Settings:
         if self.research_engine == "gemini_managed" and not self.google_key_pool:
             missing.append("GOOGLE_API_KEY")
         if self.research_engine == "local_langgraph":
-            if self._uses_model_provider("google_genai") and not self.google_key_pool:
-                missing.append("GOOGLE_API_KEY")
-            if self._uses_model_provider("groq") and not self.groq_key_pool:
-                missing.append("GROQ_API_KEY")
-            if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
-                missing.append("OPENROUTER_API_KEY")
-            if self._uses_model_provider("together") and not self.together_key_pool:
-                missing.append("TOGETHER_API_KEY")
+            _role_models = (
+                self.model, self.fast_model, self.planner_model,
+                self.researcher_model, self.analyst_model,
+                self.verifier_model, self.judge_model,
+            )
+            # For deepseek/azure providers, only require third-party provider keys
+            # when a role model *explicitly* uses that provider's prefix.
+            # For google/groq/hybrid/openrouter/together, use provider-aware logic.
+            _standalone_providers = {"deepseek", "azure", "ollama"}
+            if self.provider in _standalone_providers:
+                if any(m.startswith("google_genai:") for m in _role_models) and not self.google_key_pool:
+                    missing.append("GOOGLE_API_KEY")
+                if any(m.startswith("groq:") for m in _role_models) and not self.groq_key_pool:
+                    missing.append("GROQ_API_KEY")
+                if any(m.startswith("openrouter:") for m in _role_models) and not self.openrouter_key_pool:
+                    missing.append("OPENROUTER_API_KEY")
+                if any(m.startswith("together:") for m in _role_models) and not self.together_key_pool:
+                    missing.append("TOGETHER_API_KEY")
+            else:
+                if self._uses_model_provider("google_genai") and not self.google_key_pool:
+                    missing.append("GOOGLE_API_KEY")
+                if self._uses_model_provider("groq") and not self.groq_key_pool:
+                    missing.append("GROQ_API_KEY")
+                if self._uses_model_provider("openrouter") and not self.openrouter_key_pool:
+                    missing.append("OPENROUTER_API_KEY")
+                if self._uses_model_provider("together") and not self.together_key_pool:
+                    missing.append("TOGETHER_API_KEY")
             # Tavily and paid search-provider keys are optional because
             # DuckDuckGo is a no-key emergency fallback when installed.
         if missing:
