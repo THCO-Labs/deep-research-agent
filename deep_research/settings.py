@@ -23,7 +23,7 @@ OLLAMA_DEFAULT_MODEL = "ollama:qwen2.5:7b"
 OLLAMA_DEFAULT_FAST_MODEL = "ollama:qwen2.5:3b"
 OPENROUTER_DEFAULT_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
 OPENROUTER_DEFAULT_FAST_MODEL = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
-MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together"})
+MODEL_PROVIDER_PREFIXES = frozenset({"google_genai", "groq", "ollama", "openrouter", "mistral_ai", "together", "azure_openai", "deepseek"})
 HYBRID_DEFAULT_MODELS = {
     "orchestrator": GOOGLE_DEFAULT_MODEL,
     "fast": GROQ_DEFAULT_FAST_MODEL,
