@@ -1,22 +1,29 @@
+"""Read-only REST API for deep-research Container App Job results.
+
+All research execution is delegated to a Container App Job that reads from
+and writes to the shared AzureFile mount at /mnt/runs.
+
+POST /v1/research/trigger  — write job input + fire the Container App Job
+GET  /v1/research/{job_id}  — read job status + activity from disk
+GET  /v1/research/{job_id}/reports  — all report variants
+GET  /v1/research/{job_id}/report[/{variant}]  — single report
+GET  /v1/research/{job_id}/artifacts  — all artifacts
+GET  /v1/research/{job_id}/artifact/{filename}  — download artifact
+"""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from deep_research.agent import ResearchRunError, ResearchRunResult, run_research
-from deep_research.bench.deepresearch_bench import _criteria_guidance
-from deep_research.core.settings import Mode, Provider, ResearchEngineName, Settings
+from deep_research.core.settings import Mode, Provider, ResearchEngineName
 
 app = FastAPI(
     title="Deep Research API Server",
@@ -27,13 +34,18 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=***,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-executor = ThreadPoolExecutor(max_workers=int(os.environ.get("MAX_WORKERS", "20")))
-JOBS: Dict[str, Dict[str, Any]] = {}
+JOBS: dict[str, dict[str, Any]] = {}
+
+# --- Azure Container App Job trigger configuration ---
+CA_JOB_NAME = os.environ.get("CA_JOB_NAME", "job-drbench-research")
+CA_JOB_RG = os.environ.get("CA_JOB_RG", "rg-deepresearch-bench")
+CA_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+CA_JOB_API_VERSION = "2024-02-02-preview"
 
 
 class ResearchRequest(BaseModel):
@@ -47,7 +59,7 @@ class ResearchRequest(BaseModel):
     max_candidates: Optional[int] = Field(None, description="Maximum candidate pages considered.")
     max_followup_queries_per_branch: Optional[int] = Field(None, description="Maximum follow-up queries per branch.")
     min_source_words: Optional[int] = Field(None, description="Minimum words per source document.")
-    input: List[str] = Field(default_factory=list, description="Local input files or directories to ingest.")
+    input: list[str] = Field(default_factory=list, description="Local input files or directories to ingest.")
     mcp_manifest: Optional[str] = Field(None, description="Path to MCP manifest JSON.")
     provider: Optional[Provider] = Field(None, description="Model provider (auto, google, groq, hybrid, ollama, openrouter).")
     model: Optional[str] = Field(None, description="Primary model spec.")
@@ -75,297 +87,14 @@ class ResearchRequest(BaseModel):
     allow_failed_verification: Optional[bool] = Field(None, description="Allow report generation even if verification fails.")
     allow_weak_tool_models: Optional[bool] = Field(None, description="Opt out of strict tool-model policy.")
     writing_guidance: str = Field("", description="Optional guidance or checklist for synthesis/writing stage.")
-    async_mode: bool = Field(True, description="If True, returns immediately with job_id. If False, waits for run completion.")
-
-
-class ResearchJobStatus(BaseModel):
-    job_id: str
-    status: str  # queued, running, completed, failed
-    question: str
-    run_dir: Optional[str] = None
-    error: Optional[str] = None
-    report_available: bool = False
+    async_mode: bool = Field(True, description="Always async — the job runs externally.")
 
 
 def _get_runs_dir() -> Path:
-    env_dir = os.environ.get("RUNS_DIR", "runs")
+    env_dir = os.environ.get("RUNS_DIR", "/mnt/runs")
     path = Path(env_dir).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def _enabled_unless_disabled(flag_value: Optional[bool]) -> Optional[bool]:
-    return None if flag_value is None else not flag_value
-
-
-def _persist_job_state(job_id: str) -> None:
-    """Write job metadata to disk so it survives restarts."""
-    if job_id not in JOBS:
-        return
-    info = JOBS[job_id]
-    run_dir_str = info.get("run_dir")
-    if not run_dir_str:
-        return
-    job_file = Path(run_dir_str) / "job.json"
-    payload = {
-        "job_id": info["job_id"],
-        "status": info["status"],
-        "question": info["question"],
-        "run_dir": run_dir_str,
-        "error": info.get("error"),
-        "result": info.get("result"),
-    }
-    tmp = job_file.with_name(f".job.json.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    try:
-        tmp.replace(job_file)
-    except PermissionError:
-        job_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _execute_research_job(job_id: str, request_data: ResearchRequest):
-    JOBS[job_id]["status"] = "running"
-    base_runs_dir = _get_runs_dir()
-    job_run_dir = base_runs_dir / job_id
-    job_run_dir.mkdir(parents=True, exist_ok=True)
-    JOBS[job_id]["run_dir"] = str(job_run_dir)
-    _persist_job_state(job_id)
-
-    # Initialize empty activity.jsonl and manifest.json inside job_run_dir immediately
-    (job_run_dir / "activity.jsonl").touch(exist_ok=True)
-    (job_run_dir / "manifest.json").write_text(json.dumps({"job_id": job_id, "question": request_data.question}))
-
-    settings_kwargs = {
-        "out_dir": JOBS[job_id]["run_dir"],
-        "mode": request_data.mode,
-        "research_engine": request_data.engine,
-    }
-    
-    # Map all CLI options directly to Settings kwargs
-    fields_to_map = [
-        "max_sources", "max_rounds", "min_usable_sources", "max_search_queries",
-        "max_candidates", "max_followup_queries_per_branch", "min_source_words",
-        "mcp_manifest", "provider", "model", "fast_model", "planner_model",
-        "researcher_model", "analyst_model", "verifier_model", "judge_model",
-        "scrape_char_limit", "scrape_timeout_ms", "scrape_retries",
-        "max_browser_scrapes_per_query", "provider_retry_attempts",
-        "provider_retry_max_wait_seconds", "model_request_timeout_seconds",
-        "model_max_output_tokens", "semantic_evidence_max_llm_cards",
-        "allow_failed_verification"
-    ]
-    for key in fields_to_map:
-        val = getattr(request_data, key, None)
-        if val is not None:
-            settings_kwargs[key] = val
-
-    if request_data.synthesis_model:
-        settings_kwargs["model"] = request_data.synthesis_model
-    if request_data.citation_model:
-        settings_kwargs["analyst_model"] = request_data.citation_model
-
-    if request_data.input:
-        settings_kwargs["local_input_paths"] = tuple(request_data.input)
-
-    if request_data.no_model_fallbacks is not None:
-        settings_kwargs["model_fallbacks"] = _enabled_unless_disabled(request_data.no_model_fallbacks)
-    if request_data.no_llm_planning is not None:
-        settings_kwargs["llm_planning"] = _enabled_unless_disabled(request_data.no_llm_planning)
-    if request_data.no_llm_synthesis is not None:
-        settings_kwargs["llm_synthesis"] = _enabled_unless_disabled(request_data.no_llm_synthesis)
-    if request_data.no_semantic_verification is not None:
-        settings_kwargs["semantic_verification"] = _enabled_unless_disabled(request_data.no_semantic_verification)
-    if request_data.allow_weak_tool_models is not None:
-        settings_kwargs["strict_tool_models"] = _enabled_unless_disabled(request_data.allow_weak_tool_models)
-
-    try:
-        settings = Settings.from_env(**settings_kwargs)
-        result = run_research(
-            question=request_data.question,
-            settings=settings,
-            writing_guidance=request_data.writing_guidance or "",
-            progress_mode="live",
-            run_dir=job_run_dir,
-        )
-        JOBS[job_id]["status"] = "completed"
-        JOBS[job_id]["run_dir"] = str(result.run_dir)
-        JOBS[job_id]["result"] = {
-            "run_dir": str(result.run_dir),
-            "report_path": str(result.report_path),
-            "verification_path": str(result.verification_path),
-            "metrics_path": str(result.metrics_path),
-        }
-        _persist_job_state(job_id)
-    except ResearchRunError as err:
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(err)
-        if getattr(err, "result", None) and getattr(err.result, "run_dir", None):
-            JOBS[job_id]["run_dir"] = str(err.result.run_dir)
-            JOBS[job_id]["result"] = {
-                "run_dir": str(err.result.run_dir),
-                "report_path": str(err.result.report_path),
-                "verification_path": str(err.result.verification_path),
-                "metrics_path": str(err.result.metrics_path),
-            }
-        _persist_job_state(job_id)
-    except Exception as exc:
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(exc)
-        _persist_job_state(job_id)
-
-
-@app.get("/health", status_code=status.HTTP_200_OK)
-def health_check():
-    return {"status": "ok", "service": "deep-research-api", "runs_dir": str(_get_runs_dir())}
-
-
-@app.get("/", status_code=status.HTTP_200_OK)
-def root():
-    return {"message": "Deep Research API Server is operational.", "docs": "/docs"}
-
-
-@app.post("/v1/research", status_code=status.HTTP_202_ACCEPTED)
-async def submit_research(req: ResearchRequest, background_tasks: BackgroundTasks):
-    job_id = f"job_{uuid.uuid4().hex[:12]}"
-    runs_dir = _get_runs_dir()
-    job_run_dir = runs_dir / job_id
-    job_run_dir.mkdir(parents=True, exist_ok=True)
-    
-    JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "question": req.question,
-        "run_dir": str(job_run_dir),
-        "error": None,
-        "result": None,
-    }
-
-    if req.async_mode:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(executor, _execute_research_job, job_id, req)
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "status_url": f"/v1/research/{job_id}",
-            "report_url": f"/v1/research/{job_id}/report",
-        }
-    else:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(executor, _execute_research_job, job_id, req)
-        job_info = JOBS[job_id]
-        job_info["reports_url"] = f"/v1/research/{job_id}/reports"
-        job_info["report_url"] = f"/v1/research/{job_id}/report"
-        return job_info
-
-
-@app.get("/v1/research/{job_id}")
-def get_job_status(job_id: str):
-    if job_id in JOBS:
-        info = JOBS[job_id]
-        run_dir_path = _resolve_run_dir(job_id)
-        run_dir_str = str(run_dir_path) if run_dir_path else info.get("run_dir")
-        report_exists = False
-        activity_events = []
-        if run_dir_path and run_dir_path.exists():
-            if run_dir_path.joinpath("report.md").exists():
-                report_exists = True
-            act_file = run_dir_path.joinpath("activity.jsonl")
-            if act_file.exists():
-                try:
-                    lines = act_file.read_text(encoding="utf-8").strip().splitlines()
-                    activity_events = [json.loads(line) for line in lines[-20:] if line.strip()]
-                except Exception:
-                    pass
-
-        return {
-            "job_id": job_id,
-            "status": info["status"],
-            "question": info["question"],
-            "run_dir": run_dir_str,
-            "error": info.get("error"),
-            "report_available": report_exists,
-            "recent_activity": activity_events,
-            "result": info.get("result"),
-        }
-    
-    # Fallback to checking disk for existing run dir
-    run_dir_path = _resolve_run_dir(job_id)
-    if run_dir_path and run_dir_path.exists():
-        report_file = run_dir_path / "report.md"
-        act_file = run_dir_path / "activity.jsonl"
-        manifest_file = run_dir_path / "manifest.json"
-        job_file = run_dir_path / "job.json"
-        
-        question = ""
-        status_str = "running" if act_file.exists() else "queued"
-        error_msg = None
-        result_payload = None
-
-        if job_file.exists():
-            try:
-                jdata = json.loads(job_file.read_text(encoding="utf-8"))
-                status_str = jdata.get("status", status_str)
-                question = jdata.get("question", question)
-                error_msg = jdata.get("error")
-                result_payload = jdata.get("result")
-            except Exception:
-                pass
-
-        if not question and manifest_file.exists():
-            try:
-                mdata = json.loads(manifest_file.read_text(encoding="utf-8"))
-                question = mdata.get("question", "")
-            except Exception:
-                pass
-
-        if report_file.exists():
-            status_str = "completed"
-
-        activity_events = []
-        if act_file.exists():
-            try:
-                lines = act_file.read_text(encoding="utf-8").strip().splitlines()
-                activity_events = [json.loads(line) for line in lines[-20:] if line.strip()]
-            except Exception:
-                pass
-        
-        return {
-            "job_id": job_id,
-            "status": status_str,
-            "question": question,
-            "run_dir": str(run_dir_path),
-            "error": error_msg,
-            "report_available": report_file.exists(),
-            "recent_activity": activity_events,
-            "result": result_payload,
-        }
-
-    raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-
-
-@app.get("/v1/research/{job_id}/activity")
-def get_job_activity(job_id: str):
-    """Returns the step-by-step progress events stream for the research job."""
-    run_dir_path = _resolve_run_dir(job_id)
-    if not run_dir_path or not run_dir_path.exists():
-        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-
-    activity_path = run_dir_path / "activity.jsonl"
-    if not activity_path.exists():
-        return {"job_id": job_id, "events": []}
-
-    events = []
-    lines = activity_path.read_text(encoding="utf-8").strip().splitlines()
-    for line in lines:
-        if line.strip():
-            try:
-                events.append(json.loads(line))
-            except Exception:
-                pass
-    return {"job_id": job_id, "events": events}
 
 
 def _resolve_run_dir(job_id: str) -> Optional[Path]:
@@ -392,14 +121,183 @@ def _resolve_run_dir(job_id: str) -> Optional[Path]:
     return None
 
 
+def _trigger_containerapp_job(job_id: str, payload: dict) -> bool:
+    """Fire the Container App Job via Azure REST API using managed identity."""
+    import httpx
+
+    # Try managed identity token endpoint first (works inside Azure)
+    token = None
+    try:
+        imds_resp = httpx.get(
+            "http://169.254.169.254/metadata/identity/oauth2/token",
+            params={"api-version": "2018-02-01", "resource": "https://management.azure.com"},
+            headers={"Metadata": "true"},
+            timeout=10,
+        )
+        if imds_resp.status_code == 200:
+            token = imds_resp.json()["access_token"]
+    except Exception:
+        pass
+
+    if not token:
+        # Fallback: try az CLI
+        import subprocess
+        try:
+            token = subprocess.check_output(
+                ["az", "account", "get-access-token", "--resource", "https://management.azure.com", "--query", "accessToken", "-o", "tsv"],
+                text=True, timeout=15,
+            ).strip()
+        except Exception:
+            pass
+
+    if not token:
+        print(f"WARNING: Could not obtain Azure auth token. Job {job_id} was queued to disk but not triggered.", flush=True)
+        return False
+
+    if not CA_SUBSCRIPTION_ID:
+        print(f"WARNING: AZURE_SUBSCRIPTION_ID not set. Job {job_id} queued to disk but not triggered.", flush=True)
+        return False
+
+    url = (
+        f"https://management.azure.com"
+        f"/subscriptions/{CA_SUBSCRIPTION_ID}"
+        f"/resourceGroups/{CA_JOB_RG}"
+        f"/providers/Microsoft.App/jobs/{CA_JOB_NAME}/start"
+        f"?api-version={CA_JOB_API_VERSION}"
+    )
+
+    # Build the job execution payload — pass JOB_INPUT as an env var override.
+    body = {
+        "template": {
+            "containers": [{
+                "env": [{
+                    "name": "JOB_INPUT",
+                    "value": json.dumps(payload),
+                }],
+            }],
+        },
+    }
+
+    try:
+        resp = httpx.post(
+            url,
+            json=body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code in (200, 201, 202):
+            print(f"Container App Job triggered for {job_id}", flush=True)
+            return True
+        else:
+            print(f"WARNING: Job trigger returned {resp.status_code}: {resp.text[:300]}", flush=True)
+            return False
+    except Exception as exc:
+        print(f"WARNING: Failed to trigger job: {exc}", flush=True)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/health", status_code=status.HTTP_200_OK)
+def health_check():
+    return {"status": "ok", "service": "deep-research-api", "runs_dir": str(_get_runs_dir())}
+
+
+@app.get("/", status_code=status.HTTP_200_OK)
+def root():
+    return {"message": "Deep Research API Server is operational.", "docs": "/docs"}
+
+
+@app.post("/v1/research", status_code=status.HTTP_202_ACCEPTED)
+async def submit_research(req: ResearchRequest):
+    """Queue a research job and trigger the Container App Job to execute it."""
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+    runs_dir = _get_runs_dir()
+    run_dir = runs_dir / job_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {"job_id": job_id, "question": req.question}
+    for key in ResearchRequest.model_fields:
+        if key in ("question",):
+            continue
+        val = getattr(req, key, None)
+        if val is not None and val != [] and val != "":
+            payload[key] = val
+
+    # Write job.json so the read API can discover it even before the job starts.
+    (run_dir / "job.json").write_text(json.dumps({"job_id": job_id, "status": "queued", **payload}, indent=2), encoding="utf-8")
+
+    # Trigger the job (fire-and-forget — job writes its own completion status).
+    triggered = _trigger_containerapp_job(job_id, payload)
+
+    JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "question": req.question,
+        "run_dir": str(run_dir),
+        "error": None,
+        "result": None,
+        "triggered": triggered,
+    }
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "triggered": triggered,
+        "status_url": f"/v1/research/{job_id}",
+        "report_url": f"/v1/research/{job_id}/report",
+    }
+
+
+@app.get("/v1/research/{job_id}")
+def get_job_status(job_id: str):
+    """Read job status and recent activity from the shared file system."""
+    # In-memory fallback
+    if job_id in JOBS:
+        info = JOBS[job_id]
+        run_dir_path = _resolve_run_dir(job_id)
+        run_dir_str = str(run_dir_path) if run_dir_path else info.get("run_dir")
+        report_exists = run_dir_path is not None and (run_dir_path / "report.md").exists()
+        activity_events = _read_activity(run_dir_path)
+        return {
+            "job_id": job_id,
+            "status": info["status"],
+            "question": info["question"],
+            "run_dir": run_dir_str,
+            "error": info.get("error"),
+            "report_available": report_exists,
+            "recent_activity": activity_events,
+            "result": info.get("result"),
+        }
+
+    # Fallback: read from disk (survives server restarts)
+    run_dir_path = _resolve_run_dir(job_id)
+    if run_dir_path:
+        return _status_from_disk(job_id, run_dir_path)
+
+    raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
+
+@app.get("/v1/research/{job_id}/activity")
+def get_job_activity(job_id: str):
+    run_dir_path = _resolve_run_dir(job_id)
+    if not run_dir_path:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return {"job_id": job_id, "events": _read_activity(run_dir_path)}
+
+
 @app.get("/v1/research/{job_id}/reports")
 def get_all_job_reports(job_id: str):
-    """Returns all generated report versions (final report, best draft, failed report, draft report)."""
     run_dir_path = _resolve_run_dir(job_id)
     if not run_dir_path or not run_dir_path.exists():
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found or run directory not yet initialized.")
 
     report_files = ["report.md", "best_draft.md", "failed_report.md", "draft_report.md"]
+    for p in sorted(run_dir_path.glob("draft_report_*.md")):
+        report_files.append(p.name)
+
     reports = {}
     for filename in report_files:
         p = run_dir_path / filename
@@ -416,12 +314,10 @@ def get_all_job_reports(job_id: str):
 @app.get("/v1/research/{job_id}/report", response_class=PlainTextResponse)
 @app.get("/v1/research/{job_id}/report/{variant}", response_class=PlainTextResponse)
 def get_job_report(job_id: str, variant: str = "report.md"):
-    """Fetch report or specific report variant (report.md, best_draft.md, draft_report.md, failed_report.md)."""
     run_dir_path = _resolve_run_dir(job_id)
     if not run_dir_path:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
-    # Standardize variant filename
     filename = variant if variant.endswith(".md") else f"{variant}.md"
     report_path = run_dir_path / filename
     if not report_path.exists():
@@ -432,16 +328,8 @@ def get_job_report(job_id: str, variant: str = "report.md"):
 
 @app.get("/v1/research/{job_id}/artifacts")
 def get_job_artifacts(job_id: str):
-    run_dir_path: Optional[Path] = None
-    if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        run_dir_path = Path(JOBS[job_id]["run_dir"])
-    else:
-        runs_dir = _get_runs_dir()
-        candidate = runs_dir / job_id
-        if candidate.exists():
-            run_dir_path = candidate
-
-    if not run_dir_path or not run_dir_path.exists():
+    run_dir_path = _resolve_run_dir(job_id)
+    if not run_dir_path:
         raise HTTPException(status_code=404, detail=f"Run artifacts directory for '{job_id}' not found.")
 
     artifacts = {}
@@ -456,15 +344,7 @@ def get_job_artifacts(job_id: str):
 
 @app.get("/v1/research/{job_id}/artifact/{filename}")
 def download_artifact(job_id: str, filename: str):
-    run_dir_path: Optional[Path] = None
-    if job_id in JOBS and JOBS[job_id].get("run_dir"):
-        run_dir_path = Path(JOBS[job_id]["run_dir"])
-    else:
-        runs_dir = _get_runs_dir()
-        candidate = runs_dir / job_id
-        if candidate.exists():
-            run_dir_path = candidate
-
+    run_dir_path = _resolve_run_dir(job_id)
     if not run_dir_path:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
@@ -473,3 +353,63 @@ def download_artifact(job_id: str, filename: str):
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
 
     return FileResponse(path=file_path, filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _read_activity(run_dir_path: Optional[Path]) -> list[dict]:
+    if not run_dir_path:
+        return []
+    act_file = run_dir_path / "activity.jsonl"
+    if not act_file.exists():
+        return []
+    try:
+        lines = act_file.read_text(encoding="utf-8").strip().splitlines()
+        return [json.loads(line) for line in lines[-20:] if line.strip()]
+    except Exception:
+        return []
+
+
+def _status_from_disk(job_id: str, run_dir_path: Path) -> dict:
+    report_file = run_dir_path / "report.md"
+    act_file = run_dir_path / "activity.jsonl"
+    job_file = run_dir_path / "job.json"
+    manifest_file = run_dir_path / "manifest.json"
+
+    question = ""
+    status_str = "running" if act_file.exists() else "queued"
+    error_msg = None
+    result_payload = None
+
+    if job_file.exists():
+        try:
+            jdata = json.loads(job_file.read_text(encoding="utf-8"))
+            status_str = jdata.get("status", status_str)
+            question = jdata.get("question", question)
+            error_msg = jdata.get("error")
+            result_payload = jdata.get("result")
+        except Exception:
+            pass
+
+    if not question and manifest_file.exists():
+        try:
+            mdata = json.loads(manifest_file.read_text(encoding="utf-8"))
+            question = mdata.get("question", "")
+        except Exception:
+            pass
+
+    if report_file.exists():
+        status_str = "completed"
+
+    return {
+        "job_id": job_id,
+        "status": status_str,
+        "question": question,
+        "run_dir": str(run_dir_path),
+        "error": error_msg,
+        "report_available": report_file.exists(),
+        "recent_activity": _read_activity(run_dir_path),
+        "result": result_payload,
+    }

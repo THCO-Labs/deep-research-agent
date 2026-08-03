@@ -29,14 +29,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image
+      # ── Build & push API image ────────────────────────────────────────
+      - name: Build and push API Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: cae637758ca2acr.azurecr.io/deep-research-agent:${{ github.sha }},cae637758ca2acr.azurecr.io/deep-research-agent:latest
+          tags: |
+            cae637758ca2acr.azurecr.io/deep-research-agent:${{ github.sha }}
+            cae637758ca2acr.azurecr.io/deep-research-agent:latest
 
-      - name: Deploy to Azure Container Apps
+      # ── Build & push Job image ───────────────────────────────────────
+      - name: Build and push Job Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.job
+          push: true
+          tags: |
+            cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }}
+            cae637758ca2acr.azurecr.io/deep-research-agent-job:latest
+
+      # ── Deploy read-only API (Container App) ─────────────────────────
+      - name: Deploy API to Azure Container Apps
         uses: azure/container-apps-deploy-action@v1
         with:
           appSourcePath: ${{ github.workspace }}
@@ -45,4 +61,98 @@ jobs:
           resourceGroup: rg-deepresearch-bench
           imageToDeploy: cae637758ca2acr.azurecr.io/deep-research-agent:${{ github.sha }}
           targetPort: 8080
-          environmentVariables: RUNS_DIR=/app/runs
+          environmentVariables: |
+            RUNS_DIR=/mnt/runs
+            CA_JOB_NAME=job-drbench-research
+            CA_JOB_RG=rg-deepresearch-bench
+            AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Deploy / update Container App Job ────────────────────────────
+      - name: Deploy or update Container App Job
+        run: |
+          JOB_EXISTS=$(az containerapp job show \
+            -n job-drbench-research \
+            -g rg-deepresearch-bench \
+            --query name -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$JOB_EXISTS" ]; then
+            echo "Creating new Container App Job..."
+            az containerapp job create \
+              -n job-drbench-research \
+              -g rg-deepresearch-bench \
+              --environment app-drbench-api-env \
+              --trigger-type Manual \
+              --replica-timeout 3600 \
+              --parallelism 1 \
+              --replica-completion-count 1 \
+              --replica-retry-limit 0 \
+              --cpu 2.0 \
+              --memory 4.0Gi \
+              --image cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }} \
+              --registry-server cae637758ca2acr.azurecr.io \
+              --registry-username cae637758ca2acr \
+              --registry-password "$(az acr credential show -n cae637758ca2acr --query 'passwords[0].value' -o tsv)" \
+              --env-vars \
+                RUNS_DIR=/mnt/runs \
+                TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+                DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}" \
+                GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
+                OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+                AZURE_OPENAI_API_KEY="${{ secrets.AZURE_OPENAI_API_KEY }}" \
+                AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
+                AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+              -o none
+          else
+            echo "Updating existing Container App Job..."
+            az containerapp job update \
+              -n job-drbench-research \
+              -g rg-deepresearch-bench \
+              --image cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }} \
+              -o none
+          fi
+
+      # ── Ensure volume mount on both API and Job ─────────────────────
+      - name: Ensure AzureFile volume mount
+        run: |
+          STORAGE_KEY=$(az storage account keys list -n stdrbenchruns -g rg-deepresearch-bench --query "[0].value" -o tsv)
+
+          # Environment-level storage (once)
+          az containerapp env storage set \
+            -n app-drbench-api-env \
+            -g rg-deepresearch-bench \
+            --storage-name runs-volume \
+            --azure-file-account-name stdrbenchruns \
+            --azure-file-share-name deepresearch-runs \
+            --azure-file-account-key "$STORAGE_KEY" \
+            --access-mode ReadWrite \
+            -o none
+
+          # Mount on API
+          az containerapp update \
+            -n app-drbench-api \
+            -g rg-deepresearch-bench \
+            --set-template '{"volumes":[{"name":"runs-volume","storageName":"runs-volume","storageType":"AzureFile"}],"containers":[{"volumeMounts":[{"volumeName":"runs-volume","mountPath":"/mnt/runs"}]}]}' \
+            -o none
+
+          # Mount on Job (--set-template not available for jobs; use YAML)
+          az containerapp job show -n job-drbench-research -g rg-deepresearch-bench -o json \
+            | python3 -c "
+import sys,json,yaml
+d=json.load(sys.stdin)
+t=d['properties']['template']
+t['volumes']=[{'name':'runs-volume','storageName':'runs-volume','storageType':'AzureFile'}]
+t['containers'][0]['volumeMounts']=[{'volumeName':'runs-volume','mountPath':'/mnt/runs'}]
+d.pop('systemData',None)
+yaml.dump(d,open('/tmp/job-patch.yaml','w'),default_flow_style=False)
+print('ok')
+"
+          az containerapp job update -n job-drbench-research -g rg-deepresearch-bench \
+            --yaml /tmp/job-patch.yaml -o none
+
+      - name: Log deployment summary
+        run: |
+          echo "### Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "- **API**: app-drbench-api (image: ${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job**: job-drbench-research (image: ${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Volume**: deepresearch-runs → /mnt/runs" >> $GITHUB_STEP_SUMMARY
