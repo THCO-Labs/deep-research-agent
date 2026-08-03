@@ -119,18 +119,18 @@ jobs:
               --registry-server cae637758ca2acr.azurecr.io \
               --registry-username cae637758ca2acr \
               --registry-password "$REGISTRY_PASSWORD" \
-              --env-vars \
-                RUNS_DIR=/mnt/runs \
-                STORAGE_CONNECTION_STRING="${{ steps.storage.outputs.connection_string }}" \
-                QUEUE_NAME=research-jobs \
-                TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
-                DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}" \
-                GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
-                GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
-                OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
-                AZURE_OPENAI_API_KEY="${{ secrets.AZURE_OPENAI_API_KEY }}" \
-                AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
-                AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+              -o none
+
+            # Set scale rule secret and auth
+            az containerapp secret set \
+              -n app-drbench-worker \
+              -g rg-deepresearch-bench \
+              --secrets "storage-conn=${{ steps.storage.outputs.connection_string }}" \
+              -o none
+
+            az containerapp update \
+              -n app-drbench-worker \
+              -g rg-deepresearch-bench \
               --scale-rule-name queue-scale \
               --scale-rule-type azure-queue \
               --scale-rule-auth "connection=storage-conn" \
@@ -146,7 +146,32 @@ jobs:
               -g rg-deepresearch-bench \
               --image cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }} \
               -o none
+
+            # Re-ensure scale rule secret
+            az containerapp secret set \
+              -n app-drbench-worker \
+              -g rg-deepresearch-bench \
+              --secrets "storage-conn=${{ steps.storage.outputs.connection_string }}" \
+              -o none || true
           fi
+
+          # Always update env vars (covers create + update)
+          az containerapp update \
+            -n app-drbench-worker \
+            -g rg-deepresearch-bench \
+            --set-env-vars \
+              RUNS_DIR=/mnt/runs \
+              STORAGE_CONNECTION_STRING="${{ steps.storage.outputs.connection_string }}" \
+              QUEUE_NAME=research-jobs \
+              TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+              DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}" \
+              GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
+              OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+              AZURE_OPENAI_API_KEY="${{ secrets.AZURE_OPENAI_API_KEY }}" \
+              AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
+              AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+            -o none
 
       - name: Mount volume on Worker
         run: |

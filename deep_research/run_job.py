@@ -138,6 +138,7 @@ def _run_research(
 
     settings_kwargs: dict = {
         "out_dir": str(run_dir),
+        "project_root": str(run_dir),
         "mode": payload.get("mode", "max_quality"),
         "research_engine": payload.get("engine", "local_langgraph"),
     }
@@ -179,10 +180,10 @@ def _run_research(
     if payload.get("allow_weak_tool_models") is not None:
         settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
 
-    settings = Settings(**settings_kwargs)
     writing_guidance = payload.get("writing_guidance", "")
 
     try:
+        settings = Settings(**settings_kwargs)
         result = run_research(
             question=question,
             settings=settings,
