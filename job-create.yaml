@@ -1,0 +1,39 @@
+﻿identity:
+  type: None
+location: East US
+properties:
+  configuration:
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    replicaRetryLimit: 0
+    replicaTimeout: 3600
+    triggerType: Manual
+    registries:
+      - server: cae637758ca2acr.azurecr.io
+        username: cae637758ca2acr
+        passwordSecretRef: cae637758ca2acr-registry
+  environmentId: /subscriptions/76b8d220-e8d4-48d2-8ee2-088ef41fea55/resourceGroups/rg-deepresearch-bench/providers/Microsoft.App/managedEnvironments/app-drbench-api-env
+  template:
+    volumes:
+      - name: runs-volume
+        storageName: runs-volume
+        storageType: AzureFile
+    containers:
+      - name: job-drbench-research
+        image: cae637758ca2acr.azurecr.io/deep-research-agent-job:latest
+        command:
+          - python
+          - -m
+          - deep_research.run_job
+        env:
+          - name: RUNS_DIR
+            value: /mnt/runs
+          - name: DEEPSEEK_API_KEY
+            value: sk-1c33ace62c814e669e2b14bde9f6a560
+        volumeMounts:
+          - volumeName: runs-volume
+            mountPath: /mnt/runs
+        resources:
+          cpu: 2.0
+          memory: 4Gi

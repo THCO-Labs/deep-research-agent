@@ -1,14 +1,9 @@
-"""Read-only REST API for deep-research Container App Job results.
+"""Read-only REST API for deep-research results.
 
-All research execution is delegated to a Container App Job that reads from
-and writes to the shared AzureFile mount at /mnt/runs.
+Research execution is delegated to a queue-triggered Container App worker.
+Both API and worker share the AzureFile mount at /mnt/runs.
 
-POST /v1/research/trigger  — write job input + fire the Container App Job
-GET  /v1/research/{job_id}  — read job status + activity from disk
-GET  /v1/research/{job_id}/reports  — all report variants
-GET  /v1/research/{job_id}/report[/{variant}]  — single report
-GET  /v1/research/{job_id}/artifacts  — all artifacts
-GET  /v1/research/{job_id}/artifact/{filename}  — download artifact
+POST /v1/research  -- push job to Azure Storage Queue (worker picks it up)
 """
 from __future__ import annotations
 
@@ -42,10 +37,9 @@ app.add_middleware(
 JOBS: dict[str, dict[str, Any]] = {}
 
 # --- Azure Container App Job trigger configuration ---
-CA_JOB_NAME = os.environ.get("CA_JOB_NAME", "job-drbench-research")
-CA_JOB_RG = os.environ.get("CA_JOB_RG", "rg-deepresearch-bench")
-CA_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
-CA_JOB_API_VERSION = "2024-02-02-preview"
+# ── Queue config (shared with the worker Container App) ──────────────
+STORAGE_CONNECTION_STRING = os.environ.get("STORAGE_CONNECTION_STRING", "")
+QUEUE_NAME = os.environ.get("QUEUE_NAME", "research-jobs")
 
 
 class ResearchRequest(BaseModel):
@@ -121,80 +115,35 @@ def _resolve_run_dir(job_id: str) -> Optional[Path]:
     return None
 
 
-def _trigger_containerapp_job(job_id: str, payload: dict) -> bool:
-    """Fire the Container App Job via Azure REST API using managed identity."""
-    import httpx
+def _push_to_queue(job_id: str, payload: dict) -> bool:
+    """Push a job payload to the Azure Storage Queue.
 
-    # Try managed identity token endpoint first (works inside Azure)
-    token = None
-    try:
-        imds_resp = httpx.get(
-            "http://169.254.169.254/metadata/identity/oauth2/token",
-            params={"api-version": "2018-02-01", "resource": "https://management.azure.com"},
-            headers={"Metadata": "true"},
-            timeout=10,
+    The worker Container App picks it up and runs the research.
+    This is fire-and-forget — the worker writes completion status to disk.
+    """
+    if not STORAGE_CONNECTION_STRING:
+        print(
+            f"WARNING: STORAGE_CONNECTION_STRING not set. "
+            f"Job {job_id} queued to disk but not triggered.",
+            flush=True,
         )
-        if imds_resp.status_code == 200:
-            token = imds_resp.json()["access_token"]
-    except Exception:
-        pass
+        return False
 
-    if not token:
-        # Fallback: try az CLI
-        import subprocess
+    try:
+        from azure.storage.queue import QueueClient
+        client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)
+        # Idempotent create — no-op if the queue already exists.
         try:
-            token = subprocess.check_output(
-                ["az", "account", "get-access-token", "--resource", "https://management.azure.com", "--query", "accessToken", "-o", "tsv"],
-                text=True, timeout=15,
-            ).strip()
+            client.create_queue()
         except Exception:
             pass
-
-    if not token:
-        print(f"WARNING: Could not obtain Azure auth token. Job {job_id} was queued to disk but not triggered.", flush=True)
-        return False
-
-    if not CA_SUBSCRIPTION_ID:
-        print(f"WARNING: AZURE_SUBSCRIPTION_ID not set. Job {job_id} queued to disk but not triggered.", flush=True)
-        return False
-
-    url = (
-        f"https://management.azure.com"
-        f"/subscriptions/{CA_SUBSCRIPTION_ID}"
-        f"/resourceGroups/{CA_JOB_RG}"
-        f"/providers/Microsoft.App/jobs/{CA_JOB_NAME}/start"
-        f"?api-version={CA_JOB_API_VERSION}"
-    )
-
-    # Build the job execution payload — pass JOB_INPUT as an env var override.
-    body = {
-        "template": {
-            "containers": [{
-                "env": [{
-                    "name": "JOB_INPUT",
-                    "value": json.dumps(payload),
-                }],
-            }],
-        },
-    }
-
-    try:
-        resp = httpx.post(
-            url,
-            json=body,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        if resp.status_code in (200, 201, 202):
-            print(f"Container App Job triggered for {job_id}", flush=True)
-            return True
-        else:
-            print(f"WARNING: Job trigger returned {resp.status_code}: {resp.text[:300]}", flush=True)
-            return False
+        msg_str = json.dumps(payload)
+        client.send_message(msg_str)
+        print(f"Queue message sent for {job_id}", flush=True)
+        return True
     except Exception as exc:
-        print(f"WARNING: Failed to trigger job: {exc}", flush=True)
+        print(f"WARNING: Failed to push queue message: {exc}", flush=True)
         return False
-
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -230,7 +179,7 @@ async def submit_research(req: ResearchRequest):
     (run_dir / "job.json").write_text(json.dumps({"job_id": job_id, "status": "queued", **payload}, indent=2), encoding="utf-8")
 
     # Trigger the job (fire-and-forget — job writes its own completion status).
-    triggered = _trigger_containerapp_job(job_id, payload)
+    triggered = _push_to_queue(job_id, payload)
 
     JOBS[job_id] = {
         "job_id": job_id,

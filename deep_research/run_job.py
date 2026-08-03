@@ -1,59 +1,130 @@
-"""Container App Job entry point.
+"""Queue-triggered Container App worker.
 
-Reads job parameters from JOB_INPUT env var (JSON), calls run_research,
-and writes the result to the shared file-system run directory so the
-read-only API server can pick it up.
+Polls an Azure Storage Queue for research jobs, processes ONE message
+to completion, and exits.  The Container App scale rule spawns a new
+replica for each message; the replica dies after finishing, so failures
+don't wedge a persistent process.
 
-Expected JOB_INPUT JSON shape:
-{
-    "job_id": "job_abc123",
-    "question": "...",
-    "mode": "max_quality",
-    "engine": "local_langgraph",
-    ...  (all ResearchRequest fields)
-}
+Required env vars:
+    STORAGE_CONNECTION_STRING  –  Azure Storage account connection string
+    QUEUE_NAME                 –  queue name (default: research-jobs)
+    RUNS_DIR                   –  shared AzureFile mount (default: /mnt/runs)
 """
+
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
-from deep_research.agent import ResearchRunError, run_research
-from deep_research.core.settings import Settings
+from azure.core.exceptions import ResourceNotFoundError
+from azure.storage.queue import QueueClient, QueueMessage
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _decode_message(msg: QueueMessage) -> dict:
+    """Decode a queue message, handling both base64 and plain-text."""
+    raw = msg.content
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+    except Exception:
+        decoded = raw
+    return json.loads(decoded)
+
+
+# ── main ───────────────────────────────────────────────────────────────────
 
 
 def main() -> int:
-    raw = os.environ.get("JOB_INPUT", "")
-    if not raw:
-        # Default test question when no JOB_INPUT is provided
-        raw = json.dumps({"job_id": f"job_{uuid.uuid4().hex[:8]}", "question": "What is 2+2?", "mode": "fast", "engine": "local_langgraph"})
-        print(f"WARNING: JOB_INPUT not set, using default: {raw}", file=sys.stderr)
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: JOB_INPUT is not valid JSON: {exc}", file=sys.stderr)
-        return 1
-
-    job_id = payload.get("job_id", "")
-    question = payload.get("question", "")
-    if not job_id or not question:
-        print("ERROR: JOB_INPUT must contain 'job_id' and 'question'.", file=sys.stderr)
-        return 1
-
+    conn_str = os.environ.get("STORAGE_CONNECTION_STRING", "")
+    queue_name = os.environ.get("QUEUE_NAME", "research-jobs")
     runs_dir = Path(os.environ.get("RUNS_DIR", "/mnt/runs")).resolve()
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = runs_dir / job_id
-    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Persist the job input for the read API to discover.
-    job_file = run_dir / "job.json"
-    job_file.write_text(json.dumps({"job_id": job_id, "status": "running", **payload}, indent=2), encoding="utf-8")
+    if not conn_str:
+        print("ERROR: STORAGE_CONNECTION_STRING is not set.", file=sys.stderr)
+        return 1
 
-    # Build Settings from payload — every field mirrors the ResearchRequest model.
+    # Idempotent — creates if not present, no-op otherwise.
+    client: QueueClient = QueueClient.from_connection_string(conn_str, queue_name)
+    try:
+        client.create_queue()
+    except Exception:
+        pass  # may already exist
+
+    # Visibility timeout: how long before an un-deleted message re-appears.
+    # Set high enough that a full research run won't expire before completion.
+    visibility_timeout = 3600  # 1 hour
+
+    # Poll with a 30-second window.  If no message arrives within
+    # ~90 seconds, the Container App scales this replica to zero.
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        messages = client.receive_messages(
+            max_messages=1,
+            visibility_timeout=visibility_timeout,
+        )
+        for msg in messages:
+            try:
+                payload = _decode_message(msg)
+            except Exception as exc:
+                print(f"WARNING: unreadable message — deleting. Error: {exc}", file=sys.stderr)
+                client.delete_message(msg)
+                continue
+
+            job_id = payload.get("job_id", f"job_{uuid.uuid4().hex[:8]}")
+            question = payload.get("question", "")
+            if not question:
+                print(f"WARNING: message missing 'question' — deleting.", file=sys.stderr)
+                client.delete_message(msg)
+                continue
+
+            # ── process the job ────────────────────────────────────────
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = runs_dir / job_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write job.json so the API can see it
+            job_file = run_dir / "job.json"
+            job_file.write_text(
+                json.dumps({"job_id": job_id, "status": "running", **payload}, indent=2),
+                encoding="utf-8",
+            )
+
+            success = _run_research(job_id, question, payload, run_dir, job_file)
+
+            # Delete the message on success OR failure (we already persisted
+            # the result to disk).  On a hard crash (SIGKILL), the message
+            # becomes visible again after the visibility timeout.
+            client.delete_message(msg)
+
+            # One job per replica — exit so the next message gets a fresh
+            # replica.
+            return 0 if success else 1
+
+        time.sleep(5)
+
+    print("No messages received within poll window — exiting.", file=sys.stderr)
+    return 0
+
+
+def _run_research(
+    job_id: str,
+    question: str,
+    payload: dict,
+    run_dir: Path,
+    job_file: Path,
+) -> bool:
+    """Run a single research job. Returns True on success."""
+    # Lazy imports — keep the polling loop lightweight until it finds work.
+    from deep_research.agent import ResearchRunError, run_research
+    from deep_research.core.settings import Settings
+
     settings_kwargs: dict = {
         "out_dir": str(run_dir),
         "mode": payload.get("mode", "max_quality"),
@@ -98,7 +169,6 @@ def main() -> int:
         settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
 
     settings = Settings(**settings_kwargs)
-
     writing_guidance = payload.get("writing_guidance", "")
 
     try:
@@ -121,13 +191,13 @@ def main() -> int:
             "result": result_payload, **payload,
         }, indent=2), encoding="utf-8")
         print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+        return False
     except Exception as exc:
         job_file.write_text(json.dumps({
             "job_id": job_id, "status": "failed", "error": str(exc), **payload,
         }, indent=2), encoding="utf-8")
         print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+        return False
 
     # Mark complete.
     result_payload = {
@@ -140,7 +210,7 @@ def main() -> int:
         "job_id": job_id, "status": "completed", "result": result_payload, **payload,
     }, indent=2), encoding="utf-8")
     print(f"DONE: report written to {result.report_path}")
-    return 0
+    return True
 
 
 if __name__ == "__main__":

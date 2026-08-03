@@ -40,8 +40,8 @@ jobs:
             cae637758ca2acr.azurecr.io/deep-research-agent:${{ github.sha }}
             cae637758ca2acr.azurecr.io/deep-research-agent:latest
 
-      # ── Build & push Job image ───────────────────────────────────────
-      - name: Build and push Job Docker image
+      # ── Build & push Worker image (runs on the queue-triggered CA) ────
+      - name: Build and push Worker Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -51,7 +51,29 @@ jobs:
             cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }}
             cae637758ca2acr.azurecr.io/deep-research-agent-job:latest
 
-      # ── Deploy read-only API (Container App) ─────────────────────────
+      # ── Connection string (shared env var, computed from key) ─────────
+      - name: Compute Storage connection string
+        id: storage
+        run: |
+          KEY=$(az storage account keys list -n stdrbenchruns -g rg-deepresearch-bench --query "[0].value" -o tsv)
+          CS="DefaultEndpointsProtocol=https;EndpointSuffix=core.windows.net;AccountName=stdrbenchruns;AccountKey=${KEY};QueueEndpoint=https://stdrbenchruns.queue.core.windows.net/"
+          echo "connection_string=${CS}" >> $GITHUB_OUTPUT
+
+      # ── Ensure environment-level AzureFile storage ────────────────────
+      - name: Ensure AzureFile volume mount
+        run: |
+          STORAGE_KEY=$(az storage account keys list -n stdrbenchruns -g rg-deepresearch-bench --query "[0].value" -o tsv)
+          az containerapp env storage set \
+            -n app-drbench-api-env \
+            -g rg-deepresearch-bench \
+            --storage-name runs-volume \
+            --azure-file-account-name stdrbenchruns \
+            --azure-file-share-name deepresearch-runs \
+            --azure-file-account-key "$STORAGE_KEY" \
+            --access-mode ReadWrite \
+            -o none
+
+      # ── Deploy API (read-only) Container App ──────────────────────────
       - name: Deploy API to Azure Container Apps
         uses: azure/container-apps-deploy-action@v1
         with:
@@ -63,37 +85,44 @@ jobs:
           targetPort: 8080
           environmentVariables: |
             RUNS_DIR=/mnt/runs
-            CA_JOB_NAME=job-drbench-research
-            CA_JOB_RG=rg-deepresearch-bench
-            AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            STORAGE_CONNECTION_STRING=${{ steps.storage.outputs.connection_string }}
+            QUEUE_NAME=research-jobs
 
-      # ── Deploy / update Container App Job ────────────────────────────
-      - name: Deploy or update Container App Job
+      - name: Mount volume on API
         run: |
-          JOB_EXISTS=$(az containerapp job show \
-            -n job-drbench-research \
+          az containerapp show -n app-drbench-api -g rg-deepresearch-bench -o json \
+            | python3 .github/scripts/patch_volume.py
+          az containerapp update -n app-drbench-api -g rg-deepresearch-bench \
+            --yaml /tmp/job-patch.yaml -o none
+
+      # ── Deploy / update Worker Container App ──────────────────────────
+      - name: Deploy or update Worker Container App
+        run: |
+          REGISTRY_PASSWORD=$(az acr credential show -n cae637758ca2acr --query 'passwords[0].value' -o tsv)
+
+          WORKER_EXISTS=$(az containerapp show \
+            -n app-drbench-worker \
             -g rg-deepresearch-bench \
             --query name -o tsv 2>/dev/null || echo "")
 
-          if [ -z "$JOB_EXISTS" ]; then
-            echo "Creating new Container App Job..."
-            az containerapp job create \
-              -n job-drbench-research \
+          if [ -z "$WORKER_EXISTS" ]; then
+            echo "Creating Worker Container App..."
+            az containerapp create \
+              -n app-drbench-worker \
               -g rg-deepresearch-bench \
               --environment app-drbench-api-env \
-              --trigger-type Manual \
-              --replica-timeout 3600 \
-              --parallelism 1 \
-              --replica-completion-count 1 \
-              --replica-retry-limit 0 \
+              --min-replicas 0 \
+              --max-replicas 3 \
               --cpu 2.0 \
               --memory 4.0Gi \
               --image cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }} \
               --registry-server cae637758ca2acr.azurecr.io \
               --registry-username cae637758ca2acr \
-              --registry-password "$(az acr credential show -n cae637758ca2acr --query 'passwords[0].value' -o tsv)" \
+              --registry-password "$REGISTRY_PASSWORD" \
               --env-vars \
                 RUNS_DIR=/mnt/runs \
+                STORAGE_CONNECTION_STRING="${{ steps.storage.outputs.connection_string }}" \
+                QUEUE_NAME=research-jobs \
                 TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
                 DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}" \
                 GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
@@ -102,47 +131,35 @@ jobs:
                 AZURE_OPENAI_API_KEY="${{ secrets.AZURE_OPENAI_API_KEY }}" \
                 AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
                 AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+              --scale-rule-name queue-scale \
+              --scale-rule-type azure-queue \
+              --scale-rule-auth "connection=storage-conn" \
+              --scale-rule-metadata \
+                queueName=research-jobs \
+                queueLength=1 \
+                accountName=stdrbenchruns \
               -o none
           else
-            echo "Updating existing Container App Job..."
-            az containerapp job update \
-              -n job-drbench-research \
+            echo "Updating Worker Container App..."
+            az containerapp update \
+              -n app-drbench-worker \
               -g rg-deepresearch-bench \
               --image cae637758ca2acr.azurecr.io/deep-research-agent-job:${{ github.sha }} \
               -o none
           fi
 
-      # ── Ensure volume mount on both API and Job ─────────────────────
-      - name: Ensure AzureFile volume mount
+      - name: Mount volume on Worker
         run: |
-          STORAGE_KEY=$(az storage account keys list -n stdrbenchruns -g rg-deepresearch-bench --query "[0].value" -o tsv)
-
-          # Environment-level storage (once)
-          az containerapp env storage set \
-            -n app-drbench-api-env \
-            -g rg-deepresearch-bench \
-            --storage-name runs-volume \
-            --azure-file-account-name stdrbenchruns \
-            --azure-file-share-name deepresearch-runs \
-            --azure-file-account-key "$STORAGE_KEY" \
-            --access-mode ReadWrite \
-            -o none
-
-          # Mount on API
-          az containerapp show -n app-drbench-api -g rg-deepresearch-bench -o json \
+          az containerapp show -n app-drbench-worker -g rg-deepresearch-bench -o json \
             | python3 .github/scripts/patch_volume.py
-          az containerapp update -n app-drbench-api -g rg-deepresearch-bench \
-            --yaml /tmp/job-patch.yaml -o none
-
-          # Mount on Job
-          az containerapp job show -n job-drbench-research -g rg-deepresearch-bench -o json \
-            | python3 .github/scripts/patch_volume.py
-          az containerapp job update -n job-drbench-research -g rg-deepresearch-bench \
+          az containerapp update -n app-drbench-worker -g rg-deepresearch-bench \
             --yaml /tmp/job-patch.yaml -o none
 
       - name: Log deployment summary
         run: |
           echo "### Deployed" >> $GITHUB_STEP_SUMMARY
           echo "- **API**: app-drbench-api (image: ${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
-          echo "- **Job**: job-drbench-research (image: ${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Worker**: app-drbench-worker (image: ${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Queue**: research-jobs → worker scale rule" >> $GITHUB_STEP_SUMMARY
           echo "- **Volume**: deepresearch-runs → /mnt/runs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture**: queue push → scale-to-1 → worker processes → scale-to-0" >> $GITHUB_STEP_SUMMARY

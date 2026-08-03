@@ -1,0 +1,23 @@
+﻿properties:
+  configuration:
+    triggerType: Manual
+  template:
+    volumes:
+      - name: runs-volume
+        storageName: runs-volume
+        storageType: AzureFile
+    containers:
+      - image: cae637758ca2acr.azurecr.io/deep-research-agent-job:latest
+        env:
+          - name: JOB_INPUT
+            value: '{"mode":"fast","engine":"local_langgraph","job_id":"job_test008","question":"What is 2+2?"}'
+          - name: RUNS_DIR
+            value: /mnt/runs
+          - name: DEEPSEEK_API_KEY
+            value: sk-1c33ace62c814e669e2b14bde9f6a560
+        volumeMounts:
+          - volumeName: runs-volume
+            mountPath: /mnt/runs
+        resources:
+          cpu: 2.0
+          memory: 4Gi
