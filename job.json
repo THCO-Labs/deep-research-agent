@@ -1,0 +1,7 @@
+{
+  "job_id": "job_test_queue_001",
+  "status": "running",
+  "question": "What is 2+2?",
+  "mode": "fast",
+  "engine": "local_langgraph"
+}

@@ -21,3 +21,4 @@
 - The deployment branch is 'current-setup'. All commits to this branch trigger a CI/CD pipeline to Azure Container Apps.
 - The persistent run directory on the container app is `/mnt/runs`, mounted from Azure File Share `deepresearch-runs`.
 - The GitHub Actions deploy workflow (`.github/workflows/deploy.yml`) must include a post-deploy step to ensure the Azure File volume mount is present.
+- All API keys (e.g., TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, EXA_API_KEY) must be configured as GitHub Actions secrets; the deploy pipeline wires them into the container environment.
