@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from deep_research.agent import ResearchRunError, run_research
@@ -27,8 +28,9 @@ from deep_research.core.settings import Settings
 def main() -> int:
     raw = os.environ.get("JOB_INPUT", "")
     if not raw:
-        print("ERROR: JOB_INPUT environment variable is empty or not set.", file=sys.stderr)
-        return 1
+        # Default test question when no JOB_INPUT is provided
+        raw = json.dumps({"job_id": f"job_{uuid.uuid4().hex[:8]}", "question": "What is 2+2?", "mode": "fast", "engine": "local_langgraph"})
+        print(f"WARNING: JOB_INPUT not set, using default: {raw}", file=sys.stderr)
 
     try:
         payload = json.loads(raw)
