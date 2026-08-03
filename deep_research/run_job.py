@@ -183,7 +183,7 @@ def _run_research(
     writing_guidance = payload.get("writing_guidance", "")
 
     try:
-        settings = Settings(**settings_kwargs)
+        settings = Settings.from_env(**settings_kwargs)
         result = run_research(
             question=question,
             settings=settings,
