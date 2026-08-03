@@ -129,24 +129,14 @@ jobs:
             -o none
 
           # Mount on API
-          az containerapp update \
-            -n app-drbench-api \
-            -g rg-deepresearch-bench \
-            --set-template '{"volumes":[{"name":"runs-volume","storageName":"runs-volume","storageType":"AzureFile"}],"containers":[{"volumeMounts":[{"volumeName":"runs-volume","mountPath":"/mnt/runs"}]}]}' \
-            -o none
+          az containerapp show -n app-drbench-api -g rg-deepresearch-bench -o json \
+            | python3 .github/scripts/patch_volume.py
+          az containerapp update -n app-drbench-api -g rg-deepresearch-bench \
+            --yaml /tmp/job-patch.yaml -o none
 
-          # Mount on Job (--set-template not available for jobs; use YAML)
+          # Mount on Job
           az containerapp job show -n job-drbench-research -g rg-deepresearch-bench -o json \
-            | python3 -c "
-import sys,json,yaml
-d=json.load(sys.stdin)
-t=d['properties']['template']
-t['volumes']=[{'name':'runs-volume','storageName':'runs-volume','storageType':'AzureFile'}]
-t['containers'][0]['volumeMounts']=[{'volumeName':'runs-volume','mountPath':'/mnt/runs'}]
-d.pop('systemData',None)
-yaml.dump(d,open('/tmp/job-patch.yaml','w'),default_flow_style=False)
-print('ok')
-"
+            | python3 .github/scripts/patch_volume.py
           az containerapp job update -n job-drbench-research -g rg-deepresearch-bench \
             --yaml /tmp/job-patch.yaml -o none
 
