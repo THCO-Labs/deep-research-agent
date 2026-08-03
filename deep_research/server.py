@@ -130,6 +130,7 @@ def _push_to_queue(job_id: str, payload: dict) -> bool:
         return False
 
     try:
+    try:
         from azure.storage.queue import QueueClient
         client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)
         # Idempotent create — no-op if the queue already exists.

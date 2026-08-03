@@ -22,7 +22,11 @@ import uuid
 from pathlib import Path
 
 from azure.core.exceptions import ResourceNotFoundError
-from azure.storage.queue import QueueClient, QueueMessage
+try:
+    from azure.storage.queue import QueueClient, QueueMessage
+except ImportError:
+    print("ERROR: azure-storage-queue package is not installed.", file=sys.stderr)
+    raise
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -121,9 +125,16 @@ def _run_research(
     job_file: Path,
 ) -> bool:
     """Run a single research job. Returns True on success."""
-    # Lazy imports — keep the polling loop lightweight until it finds work.
-    from deep_research.agent import ResearchRunError, run_research
-    from deep_research.core.settings import Settings
+    try:
+        from deep_research.agent import ResearchRunError, run_research
+        from deep_research.core.settings import Settings
+    except Exception as exc:
+        job_file.write_text(json.dumps({
+            "job_id": job_id, "status": "failed",
+            "error": f"Import failed: {exc}", **payload,
+        }, indent=2), encoding="utf-8")
+        print(f"FATAL: cannot import deep_research — {exc}", file=sys.stderr)
+        return False
 
     settings_kwargs: dict = {
         "out_dir": str(run_dir),
