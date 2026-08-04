@@ -39,6 +39,7 @@ _ROLE_KEY_INDEX = {
     "analyst": 4,
     "judge": 5,
     "fast": 6,
+    "citation": 3,
     "synthesis": 0,
 }
 
@@ -49,6 +50,7 @@ _ROLE_MODEL_ATTRS = {
     "analyst": "analyst_model",
     "verifier": "verifier_model",
     "judge": "judge_model",
+    "citation": "citation_model",
     "fast": "fast_model",
     "synthesis": "synthesis_model",
 }
@@ -91,6 +93,7 @@ _KEY_ENV_BASE = {
     "openrouter": "OPENROUTER_API_KEY",
     "mistral_ai": "MISTRAL_API_KEY",
     "together": "TOGETHER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "azure_openai": "AZURE_OPENAI_API_KEY",
 }
 
@@ -366,7 +369,7 @@ def describe_model_routes(settings: Settings) -> dict[str, object]:
 
 
 def route_summary(settings: Settings) -> str:
-    visible_roles = ("orchestrator", "planner", "researcher", "analyst", "verifier", "judge", "synthesis")
+    visible_roles = ("orchestrator", "planner", "researcher", "analyst", "verifier", "judge", "citation", "synthesis")
     routes = [_describe_role(settings, role) for role in visible_roles]
     parts = []
     for route in routes:
@@ -408,6 +411,8 @@ def _describe_role(settings: Settings, role: str) -> ModelRoute:
 def _model_spec_for_manifest_role(settings: Settings, role: str) -> str:
     attr = _ROLE_MODEL_ATTRS[role]
     model_spec = str(getattr(settings, attr) or "")
+    if role == "citation" and not model_spec:
+        return settings.verifier_model
     if role == "synthesis" and not model_spec:
         return settings.model
     return model_spec
@@ -424,6 +429,8 @@ def _key_pool_for_provider(settings: Settings, provider: str) -> tuple[str, ...]
         return settings.mistral_key_pool
     if provider == "together":
         return settings.together_key_pool
+    if provider == "deepseek":
+        return settings.deepseek_key_pool
     if provider == "ollama":
         return ("ollama-local",)
     if provider == "azure_openai":

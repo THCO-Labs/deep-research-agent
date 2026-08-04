@@ -3,20 +3,12 @@
 Reads job parameters from JOB_INPUT env var (JSON), calls run_research,
 and writes the result to the shared file-system run directory so the
 read-only API server can pick it up.
-
-Expected JOB_INPUT JSON shape:
-{
-    "job_id": "job_abc123",
-    "question": "...",
-    "mode": "max_quality",
-    "engine": "local_langgraph",
-    ...  (all ResearchRequest fields)
-}
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -47,59 +39,14 @@ def main() -> int:
     run_dir = runs_dir / job_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Persist the job input for the read API to discover.
     job_file = run_dir / "job.json"
     job_file.write_text(json.dumps({"job_id": job_id, "status": "running", **payload}, indent=2), encoding="utf-8")
 
-    # Build Settings from payload — every field mirrors the ResearchRequest model.
-    settings_kwargs: dict = {
-        "out_dir": str(run_dir),
-        "mode": payload.get("mode", "max_quality"),
-        "research_engine": payload.get("engine", "local_langgraph"),
-    }
-
-    scalar_keys = [
-        "max_sources", "max_rounds", "min_usable_sources", "max_search_queries",
-        "max_candidates", "max_followup_queries_per_branch", "min_source_words",
-        "mcp_manifest", "provider", "model", "fast_model", "planner_model",
-        "researcher_model", "analyst_model", "verifier_model", "judge_model",
-        "scrape_char_limit", "scrape_timeout_ms", "scrape_retries",
-        "max_browser_scrapes_per_query", "provider_retry_attempts",
-        "provider_retry_max_wait_seconds", "model_request_timeout_seconds",
-        "model_max_output_tokens", "semantic_evidence_max_llm_cards",
-        "allow_failed_verification",
-    ]
-    for key in scalar_keys:
-        val = payload.get(key)
-        if val is not None:
-            settings_kwargs[key] = val
-
-    if payload.get("synthesis_model"):
-        settings_kwargs["model"] = payload["synthesis_model"]
-    if payload.get("citation_model"):
-        settings_kwargs["analyst_model"] = payload["citation_model"]
-    if payload.get("input"):
-        settings_kwargs["local_input_paths"] = tuple(payload["input"])
-
-    bool_invert = {
-        "no_model_fallbacks": "model_fallbacks",
-        "no_llm_planning": "llm_planning",
-        "no_llm_synthesis": "llm_synthesis",
-        "no_semantic_verification": "semantic_verification",
-    }
-    for payload_key, settings_key in bool_invert.items():
-        val = payload.get(payload_key)
-        if val is not None:
-            settings_kwargs[settings_key] = not val
-
-    if payload.get("allow_weak_tool_models") is not None:
-        settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
-
-    settings = Settings(**settings_kwargs)
-
+    settings_kwargs = _settings_kwargs_from_payload(payload, run_dir)
     writing_guidance = payload.get("writing_guidance", "")
 
     try:
+        settings = Settings.from_env(**settings_kwargs)
         result = run_research(
             question=question,
             settings=settings,
@@ -127,7 +74,6 @@ def main() -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
-    # Mark complete.
     result_payload = {
         "run_dir": str(result.run_dir),
         "report_path": str(result.report_path),
@@ -137,8 +83,93 @@ def main() -> int:
     job_file.write_text(json.dumps({
         "job_id": job_id, "status": "completed", "result": result_payload, **payload,
     }, indent=2), encoding="utf-8")
+    removed = _compact_completed_run_dir(run_dir)
+    if removed:
+        print(f"Cleaned {len(removed)} nonessential artifact(s) from {run_dir}")
     print(f"DONE: report written to {result.report_path}")
     return 0
+
+
+def _settings_kwargs_from_payload(payload: dict, run_dir: Path) -> dict:
+    settings_kwargs: dict = {
+        "out_dir": str(run_dir),
+        "project_root": str(run_dir),
+        "mode": payload.get("mode", "max_quality"),
+        "research_engine": payload.get("engine", "local_langgraph"),
+    }
+
+    scalar_keys = [
+        "max_sources", "max_rounds", "min_usable_sources", "max_search_queries",
+        "max_candidates", "max_followup_queries_per_branch", "min_source_words",
+        "mcp_manifest", "provider", "model", "fast_model", "planner_model",
+        "researcher_model", "analyst_model", "verifier_model", "judge_model",
+        "citation_model", "synthesis_model",
+        "scrape_char_limit", "scrape_timeout_ms", "scrape_retries",
+        "max_browser_scrapes_per_query", "provider_retry_attempts",
+        "provider_retry_max_wait_seconds", "model_request_timeout_seconds",
+        "model_max_output_tokens", "semantic_evidence_max_llm_cards",
+        "allow_failed_verification",
+    ]
+    for key in scalar_keys:
+        val = payload.get(key)
+        if val is not None:
+            settings_kwargs[key] = val
+
+    if payload.get("input"):
+        settings_kwargs["local_input_paths"] = tuple(payload["input"])
+
+    bool_invert = {
+        "no_model_fallbacks": "model_fallbacks",
+        "no_llm_planning": "llm_planning",
+        "no_llm_synthesis": "llm_synthesis",
+        "no_semantic_verification": "semantic_verification",
+    }
+    for payload_key, settings_key in bool_invert.items():
+        val = payload.get(payload_key)
+        if val is not None:
+            settings_kwargs[settings_key] = not val
+
+    if payload.get("allow_weak_tool_models") is not None:
+        settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
+
+    return settings_kwargs
+
+
+def _compact_completed_run_dir(run_dir: Path) -> list[str]:
+    """Keep only report markdown variants and sources.jsonl for completed Azure jobs."""
+    allowed_names = {
+        "report.md",
+        "best_report.md",
+        "best_draft.md",
+        "draft_report.md",
+        "failed_report.md",
+        "assembled_best_report.md",
+        "sources.jsonl",
+    }
+    removed: list[str] = []
+    root = run_dir.resolve()
+    for item in root.iterdir():
+        if _keep_completed_artifact(item.name, allowed_names):
+            continue
+        resolved = item.resolve()
+        if resolved == root or root not in resolved.parents:
+            raise RuntimeError(f"Refusing to remove path outside run directory: {resolved}")
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+        removed.append(item.name)
+    return removed
+
+
+def _keep_completed_artifact(name: str, allowed_names: set[str]) -> bool:
+    if name in allowed_names:
+        return True
+    return (
+        name.startswith("draft_report_")
+        and name.endswith(".md")
+        and name[len("draft_report_"):-len(".md")].isdigit()
+    )
 
 
 if __name__ == "__main__":

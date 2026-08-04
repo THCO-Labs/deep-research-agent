@@ -62,3 +62,9 @@ CLI (python -m deep_research "question")
 - Use `verification.json` to inspect `weakly_supported_claims` when cited paragraphs do not match scraped source text.
 - Use `findings/verification_repair.md` for the deterministic human repair checklist when final verification fails.
 - Use `failure.json` to inspect quota, token-budget, tool-call, and permission failures after a failed run.
+- The deployment branch is 'current-setup'. All commits to this branch trigger a CI/CD pipeline to Azure Container Apps.
+- The persistent run directory on the container app is `/mnt/runs`, mounted from Azure File Share `deepresearch-runs`.
+- The GitHub Actions deploy workflow (`.github/workflows/deploy.yml`) must include a post-deploy step to ensure the Azure File volume mount is present.
+- All API keys (e.g., TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, EXA_API_KEY) must be configured as GitHub Actions secrets; the deploy pipeline wires them into the container environment.
+- On AzureFile mounts, Path.replace may fail with OSError; implement a direct write fallback (e.g., catch OSError and write directly).
+- When constructing Settings, ensure the project_root is included in the kwargs to avoid relative path breakage.
