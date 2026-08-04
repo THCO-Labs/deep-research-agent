@@ -137,49 +137,7 @@ def _run_research(
         print(f"FATAL: cannot import deep_research — {exc}", file=sys.stderr)
         return False
 
-    settings_kwargs: dict = {
-        "out_dir": str(run_dir),
-        "project_root": str(run_dir),
-        "mode": payload.get("mode", "max_quality"),
-        "research_engine": payload.get("engine", "local_langgraph"),
-    }
-
-    scalar_keys = [
-        "max_sources", "max_rounds", "min_usable_sources", "max_search_queries",
-        "max_candidates", "max_followup_queries_per_branch", "min_source_words",
-        "mcp_manifest", "provider", "model", "fast_model", "planner_model",
-        "researcher_model", "analyst_model", "verifier_model", "judge_model",
-        "scrape_char_limit", "scrape_timeout_ms", "scrape_retries",
-        "max_browser_scrapes_per_query", "provider_retry_attempts",
-        "provider_retry_max_wait_seconds", "model_request_timeout_seconds",
-        "model_max_output_tokens", "semantic_evidence_max_llm_cards",
-        "allow_failed_verification",
-    ]
-    for key in scalar_keys:
-        val = payload.get(key)
-        if val is not None:
-            settings_kwargs[key] = val
-
-    if payload.get("synthesis_model"):
-        settings_kwargs["model"] = payload["synthesis_model"]
-    if payload.get("citation_model"):
-        settings_kwargs["analyst_model"] = payload["citation_model"]
-    if payload.get("input"):
-        settings_kwargs["local_input_paths"] = tuple(payload["input"])
-
-    bool_invert = {
-        "no_model_fallbacks": "model_fallbacks",
-        "no_llm_planning": "llm_planning",
-        "no_llm_synthesis": "llm_synthesis",
-        "no_semantic_verification": "semantic_verification",
-    }
-    for payload_key, settings_key in bool_invert.items():
-        val = payload.get(payload_key)
-        if val is not None:
-            settings_kwargs[settings_key] = not val
-
-    if payload.get("allow_weak_tool_models") is not None:
-        settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
+    settings_kwargs = _settings_kwargs_from_payload(payload, run_dir)
 
     writing_guidance = payload.get("writing_guidance", "")
 
@@ -227,6 +185,51 @@ def _run_research(
         print(f"Cleaned {len(removed)} nonessential artifact(s) from {run_dir}")
     print(f"DONE: report written to {result.report_path}")
     return True
+
+
+def _settings_kwargs_from_payload(payload: dict, run_dir: Path) -> dict:
+    settings_kwargs: dict = {
+        "out_dir": str(run_dir),
+        "project_root": str(run_dir),
+        "mode": payload.get("mode", "max_quality"),
+        "research_engine": payload.get("engine", "local_langgraph"),
+    }
+
+    scalar_keys = [
+        "max_sources", "max_rounds", "min_usable_sources", "max_search_queries",
+        "max_candidates", "max_followup_queries_per_branch", "min_source_words",
+        "mcp_manifest", "provider", "model", "fast_model", "planner_model",
+        "researcher_model", "analyst_model", "verifier_model", "judge_model",
+        "citation_model", "synthesis_model",
+        "scrape_char_limit", "scrape_timeout_ms", "scrape_retries",
+        "max_browser_scrapes_per_query", "provider_retry_attempts",
+        "provider_retry_max_wait_seconds", "model_request_timeout_seconds",
+        "model_max_output_tokens", "semantic_evidence_max_llm_cards",
+        "allow_failed_verification",
+    ]
+    for key in scalar_keys:
+        val = payload.get(key)
+        if val is not None:
+            settings_kwargs[key] = val
+
+    if payload.get("input"):
+        settings_kwargs["local_input_paths"] = tuple(payload["input"])
+
+    bool_invert = {
+        "no_model_fallbacks": "model_fallbacks",
+        "no_llm_planning": "llm_planning",
+        "no_llm_synthesis": "llm_synthesis",
+        "no_semantic_verification": "semantic_verification",
+    }
+    for payload_key, settings_key in bool_invert.items():
+        val = payload.get(payload_key)
+        if val is not None:
+            settings_kwargs[settings_key] = not val
+
+    if payload.get("allow_weak_tool_models") is not None:
+        settings_kwargs["allow_weak_tool_models"] = payload["allow_weak_tool_models"]
+
+    return settings_kwargs
 
 
 def _compact_completed_run_dir(run_dir: Path) -> list[str]:

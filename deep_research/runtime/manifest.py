@@ -57,6 +57,7 @@ def redacted_settings(settings: Settings) -> dict[str, Any]:
         "analyst_model": settings.analyst_model,
         "verifier_model": settings.verifier_model,
         "judge_model": settings.judge_model,
+        "citation_model": settings.citation_model,
         "max_sources": settings.max_sources,
         "max_rounds": settings.max_rounds,
         "research_engine": settings.research_engine,

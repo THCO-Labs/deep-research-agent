@@ -15,7 +15,17 @@ class ResearchArtifactsV2:
     @classmethod
     def create(cls, out_dir: Path, question: str) -> "ResearchArtifactsV2":
         out_dir_path = Path(out_dir)
-        if out_dir_path.exists() or out_dir_path.name.startswith("job_"):
+        # Treat the path as an existing run dir only if it looks like one
+        # (has manifest.json or request.json). A plain existing directory like
+        # "runs/" is a parent output directory, not a run dir itself.
+        _is_run_dir = out_dir_path.name.startswith("job_") or (
+            out_dir_path.exists()
+            and (
+                (out_dir_path / "manifest.json").exists()
+                or (out_dir_path / "request.json").exists()
+            )
+        )
+        if _is_run_dir:
             base = RunArtifacts(run_dir=out_dir_path.resolve())
             base.run_dir.mkdir(parents=True, exist_ok=True)
         else:

@@ -72,6 +72,7 @@ class Settings:
     analyst_model: str = GOOGLE_DEFAULT_FAST_MODEL
     verifier_model: str = GOOGLE_DEFAULT_FAST_MODEL
     judge_model: str = GOOGLE_DEFAULT_FAST_MODEL
+    citation_model: str = ""
     synthesis_model: str = ""
     scrape_char_limit: int = 15_000
     scrape_timeout_ms: int = 20_000
@@ -105,6 +106,7 @@ class Settings:
     mistral_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
     together_api_key: str = field(default="", repr=False)
     together_api_keys: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    deepseek_api_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(
@@ -141,6 +143,7 @@ class Settings:
         analyst_model: str | None = None,
         verifier_model: str | None = None,
         judge_model: str | None = None,
+        citation_model: str | None = None,
         synthesis_model: str | None = None,
         scrape_char_limit: int | None = None,
         scrape_timeout_ms: int | None = None,
@@ -318,6 +321,12 @@ class Settings:
                 fallback=resolved_fast_model,
                 role="judge",
             ),
+            citation_model=_resolve_role_model(
+                resolved_provider,
+                citation_model or _env_model_override("DEEP_RESEARCH_CITATION_MODEL", provider_explicit=provider_explicit),
+                fallback="",
+                role="citation",
+            ),
             synthesis_model=_resolve_role_model(
                 resolved_provider,
                 synthesis_model or _env_model_override("DEEP_RESEARCH_SYNTHESIS_MODEL", provider_explicit=provider_explicit),
@@ -386,6 +395,7 @@ class Settings:
             mistral_api_keys=mistral_api_keys,
             together_api_key=together_api_key,
             together_api_keys=together_api_keys,
+            deepseek_api_key=deepseek_api_key_env,
         )
         settings.validate()
         return settings
@@ -414,6 +424,10 @@ class Settings:
     def together_key_pool(self) -> tuple[str, ...]:
         return self.together_api_keys or ((self.together_api_key,) if self.together_api_key else ())
 
+    @property
+    def deepseek_key_pool(self) -> tuple[str, ...]:
+        return (self.deepseek_api_key,) if self.deepseek_api_key else ()
+
     def validate(self) -> None:
         missing = []
         if self.research_engine == "gemini_managed" and not self.google_key_pool:
@@ -423,6 +437,7 @@ class Settings:
                 self.model, self.fast_model, self.planner_model,
                 self.researcher_model, self.analyst_model,
                 self.verifier_model, self.judge_model,
+                self.citation_model, self.synthesis_model,
             )
             # Always use explicit model-prefix inspection so that the check is
             # independent of how the provider env-var resolved at runtime.
@@ -436,6 +451,8 @@ class Settings:
                 missing.append("OPENROUTER_API_KEY")
             if any(m.startswith("together:") for m in _role_models) and not self.together_key_pool:
                 missing.append("TOGETHER_API_KEY")
+            if any(m.startswith("deepseek:") for m in _role_models) and not self.deepseek_key_pool:
+                missing.append("DEEPSEEK_API_KEY")
             # Tavily and paid search-provider keys are optional because
             # DuckDuckGo is a no-key emergency fallback when installed.
         if missing:
@@ -511,6 +528,7 @@ class Settings:
             self.analyst_model,
             self.verifier_model,
             self.judge_model,
+            self.citation_model,
         )
         return any(model.startswith(f"{provider_prefix}:") for model in models)
 

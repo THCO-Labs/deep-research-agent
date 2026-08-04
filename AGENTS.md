@@ -22,3 +22,5 @@
 - The persistent run directory on the container app is `/mnt/runs`, mounted from Azure File Share `deepresearch-runs`.
 - The GitHub Actions deploy workflow (`.github/workflows/deploy.yml`) must include a post-deploy step to ensure the Azure File volume mount is present.
 - All API keys (e.g., TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, EXA_API_KEY) must be configured as GitHub Actions secrets; the deploy pipeline wires them into the container environment.
+- On AzureFile mounts, Path.replace may fail with OSError; implement a direct write fallback (e.g., catch OSError and write directly).
+- When constructing Settings, ensure the project_root is included in the kwargs to avoid relative path breakage.
