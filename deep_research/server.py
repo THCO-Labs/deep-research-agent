@@ -29,7 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=***,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -129,7 +129,6 @@ def _push_to_queue(job_id: str, payload: dict) -> bool:
         )
         return False
 
-    try:
     try:
         from azure.storage.queue import QueueClient
         client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)

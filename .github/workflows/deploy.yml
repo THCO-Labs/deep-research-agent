@@ -95,6 +95,17 @@ jobs:
           az containerapp update -n app-drbench-api -g rg-deepresearch-bench \
             --yaml /tmp/job-patch.yaml -o none
 
+      - name: Re-ensure API runtime env vars
+        run: |
+          az containerapp update \
+            -n app-drbench-api \
+            -g rg-deepresearch-bench \
+            --set-env-vars \
+              RUNS_DIR=/mnt/runs \
+              STORAGE_CONNECTION_STRING="${{ steps.storage.outputs.connection_string }}" \
+              QUEUE_NAME=research-jobs \
+            -o none
+
       # ── Deploy / update Worker Container App ──────────────────────────
       - name: Deploy or update Worker Container App
         run: |
