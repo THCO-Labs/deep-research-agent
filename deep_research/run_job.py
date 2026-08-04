@@ -16,23 +16,18 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sys
 import time
 import uuid
 from pathlib import Path
-
-from azure.core.exceptions import ResourceNotFoundError
-try:
-    from azure.storage.queue import QueueClient, QueueMessage
-except ImportError:
-    print("ERROR: azure-storage-queue package is not installed.", file=sys.stderr)
-    raise
+from typing import Any
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-def _decode_message(msg: QueueMessage) -> dict:
+def _decode_message(msg: Any) -> dict:
     """Decode a queue message, handling both base64 and plain-text."""
     raw = msg.content
     try:
@@ -46,6 +41,12 @@ def _decode_message(msg: QueueMessage) -> dict:
 
 
 def main() -> int:
+    try:
+        from azure.storage.queue import QueueClient
+    except ImportError:
+        print("ERROR: azure-storage-queue package is not installed.", file=sys.stderr)
+        raise
+
     conn_str = os.environ.get("STORAGE_CONNECTION_STRING", "")
     queue_name = os.environ.get("QUEUE_NAME", "research-jobs")
     runs_dir = Path(os.environ.get("RUNS_DIR", "/mnt/runs")).resolve()
@@ -221,8 +222,48 @@ def _run_research(
     job_file.write_text(json.dumps({
         "job_id": job_id, "status": "completed", "result": result_payload, **payload,
     }, indent=2), encoding="utf-8")
+    removed = _compact_completed_run_dir(run_dir)
+    if removed:
+        print(f"Cleaned {len(removed)} nonessential artifact(s) from {run_dir}")
     print(f"DONE: report written to {result.report_path}")
     return True
+
+
+def _compact_completed_run_dir(run_dir: Path) -> list[str]:
+    """Keep only report markdown variants and sources.jsonl for completed Azure jobs."""
+    allowed_names = {
+        "report.md",
+        "best_report.md",
+        "best_draft.md",
+        "draft_report.md",
+        "failed_report.md",
+        "assembled_best_report.md",
+        "sources.jsonl",
+    }
+    removed: list[str] = []
+    root = run_dir.resolve()
+    for item in root.iterdir():
+        if _keep_completed_artifact(item.name, allowed_names):
+            continue
+        resolved = item.resolve()
+        if resolved == root or root not in resolved.parents:
+            raise RuntimeError(f"Refusing to remove path outside run directory: {resolved}")
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+        removed.append(item.name)
+    return removed
+
+
+def _keep_completed_artifact(name: str, allowed_names: set[str]) -> bool:
+    if name in allowed_names:
+        return True
+    return (
+        name.startswith("draft_report_")
+        and name.endswith(".md")
+        and name[len("draft_report_"):-len(".md")].isdigit()
+    )
 
 
 if __name__ == "__main__":
