@@ -51,8 +51,10 @@ class RunArtifacts:
         temporary.write_text(content, encoding="utf-8")
         try:
             temporary.replace(target)
-        except PermissionError:
-            # Windows can lock the target briefly between writes; fall back to direct write.
+        except (PermissionError, OSError):
+            # Atomic rename can fail on network filesystems (AzureFile/SMB).
+            # Fall back to direct write — this is safe because we always
+            # write-to-temp then copy, never delete.
             try:
                 target.write_text(content, encoding="utf-8")
             finally:

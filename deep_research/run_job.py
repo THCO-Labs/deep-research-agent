@@ -1,48 +1,144 @@
-"""Container App Job entry point.
+"""Queue-triggered Container App worker.
 
-Reads job parameters from JOB_INPUT env var (JSON), calls run_research,
-and writes the result to the shared file-system run directory so the
-read-only API server can pick it up.
+Polls an Azure Storage Queue for research jobs, processes ONE message
+to completion, and exits.  The Container App scale rule spawns a new
+replica for each message; the replica dies after finishing, so failures
+don't wedge a persistent process.
+
+Required env vars:
+    STORAGE_CONNECTION_STRING  –  Azure Storage account connection string
+    QUEUE_NAME                 –  queue name (default: research-jobs)
+    RUNS_DIR                   –  shared AzureFile mount (default: /mnt/runs)
 """
+
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
 import sys
+import time
+import uuid
 from pathlib import Path
+from typing import Any
 
-from deep_research.agent import ResearchRunError, run_research
-from deep_research.core.settings import Settings
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _decode_message(msg: Any) -> dict:
+    """Decode a queue message, handling both base64 and plain-text."""
+    raw = msg.content
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+    except Exception:
+        decoded = raw
+    return json.loads(decoded)
+
+
+# ── main ───────────────────────────────────────────────────────────────────
 
 
 def main() -> int:
-    raw = os.environ.get("JOB_INPUT", "")
-    if not raw:
-        print("ERROR: JOB_INPUT environment variable is empty or not set.", file=sys.stderr)
-        return 1
-
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: JOB_INPUT is not valid JSON: {exc}", file=sys.stderr)
-        return 1
+        from azure.storage.queue import QueueClient
+    except ImportError:
+        print("ERROR: azure-storage-queue package is not installed.", file=sys.stderr)
+        raise
 
-    job_id = payload.get("job_id", "")
-    question = payload.get("question", "")
-    if not job_id or not question:
-        print("ERROR: JOB_INPUT must contain 'job_id' and 'question'.", file=sys.stderr)
-        return 1
-
+    conn_str = os.environ.get("STORAGE_CONNECTION_STRING", "")
+    queue_name = os.environ.get("QUEUE_NAME", "research-jobs")
     runs_dir = Path(os.environ.get("RUNS_DIR", "/mnt/runs")).resolve()
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = runs_dir / job_id
-    run_dir.mkdir(parents=True, exist_ok=True)
 
-    job_file = run_dir / "job.json"
-    job_file.write_text(json.dumps({"job_id": job_id, "status": "running", **payload}, indent=2), encoding="utf-8")
+    if not conn_str:
+        print("ERROR: STORAGE_CONNECTION_STRING is not set.", file=sys.stderr)
+        return 1
+
+    # Idempotent — creates if not present, no-op otherwise.
+    client: QueueClient = QueueClient.from_connection_string(conn_str, queue_name)
+    try:
+        client.create_queue()
+    except Exception:
+        pass  # may already exist
+
+    # Visibility timeout: how long before an un-deleted message re-appears.
+    # Set high enough that a full research run won't expire before completion.
+    visibility_timeout = 3600  # 1 hour
+
+    # Poll with a 30-second window.  If no message arrives within
+    # ~90 seconds, the Container App scales this replica to zero.
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        messages = client.receive_messages(
+            max_messages=1,
+            visibility_timeout=visibility_timeout,
+        )
+        for msg in messages:
+            try:
+                payload = _decode_message(msg)
+            except Exception as exc:
+                print(f"WARNING: unreadable message — deleting. Error: {exc}", file=sys.stderr)
+                client.delete_message(msg)
+                continue
+
+            job_id = payload.get("job_id", f"job_{uuid.uuid4().hex[:8]}")
+            question = payload.get("question", "")
+            if not question:
+                print(f"WARNING: message missing 'question' — deleting.", file=sys.stderr)
+                client.delete_message(msg)
+                continue
+
+            # ── process the job ────────────────────────────────────────
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = runs_dir / job_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write job.json so the API can see it
+            job_file = run_dir / "job.json"
+            job_file.write_text(
+                json.dumps({"job_id": job_id, "status": "running", **payload}, indent=2),
+                encoding="utf-8",
+            )
+
+            success = _run_research(job_id, question, payload, run_dir, job_file)
+
+            # Delete the message on success OR failure (we already persisted
+            # the result to disk).  On a hard crash (SIGKILL), the message
+            # becomes visible again after the visibility timeout.
+            client.delete_message(msg)
+
+            # One job per replica — exit so the next message gets a fresh
+            # replica.
+            return 0 if success else 1
+
+        time.sleep(5)
+
+    print("No messages received within poll window — exiting.", file=sys.stderr)
+    return 0
+
+
+def _run_research(
+    job_id: str,
+    question: str,
+    payload: dict,
+    run_dir: Path,
+    job_file: Path,
+) -> bool:
+    """Run a single research job. Returns True on success."""
+    try:
+        from deep_research.agent import ResearchRunError, run_research
+        from deep_research.core.settings import Settings
+    except Exception as exc:
+        job_file.write_text(json.dumps({
+            "job_id": job_id, "status": "failed",
+            "error": f"Import failed: {exc}", **payload,
+        }, indent=2), encoding="utf-8")
+        print(f"FATAL: cannot import deep_research — {exc}", file=sys.stderr)
+        return False
 
     settings_kwargs = _settings_kwargs_from_payload(payload, run_dir)
+
     writing_guidance = payload.get("writing_guidance", "")
 
     try:
@@ -66,14 +162,15 @@ def main() -> int:
             "result": result_payload, **payload,
         }, indent=2), encoding="utf-8")
         print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+        return False
     except Exception as exc:
         job_file.write_text(json.dumps({
             "job_id": job_id, "status": "failed", "error": str(exc), **payload,
         }, indent=2), encoding="utf-8")
         print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+        return False
 
+    # Mark complete.
     result_payload = {
         "run_dir": str(result.run_dir),
         "report_path": str(result.report_path),
@@ -87,7 +184,7 @@ def main() -> int:
     if removed:
         print(f"Cleaned {len(removed)} nonessential artifact(s) from {run_dir}")
     print(f"DONE: report written to {result.report_path}")
-    return 0
+    return True
 
 
 def _settings_kwargs_from_payload(payload: dict, run_dir: Path) -> dict:
